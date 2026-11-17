@@ -128,10 +128,6 @@ function formatBytes(bytes: number): string {
   return unitIndex === 0 ? `${Math.round(value)} ${unit}` : `${value.toFixed(1)} ${unit}`;
 }
 
-function formatCount(value: number, singular: string, plural: string): string {
-  return `${value.toLocaleString('en-GB')} ${value === 1 ? singular : plural}`;
-}
-
 function describeError(error: unknown): string {
   if (error instanceof TypeError) return 'The studio server did not answer.';
   if (error instanceof Error) return error.message;
@@ -273,12 +269,6 @@ export function App({ slots = {} }: AppProps): ReactNode {
 
   const centreSlot = view === 'generate' ? slots.canvas : slots.library;
   const centreTitle = view === 'generate' ? 'Generate' : 'Library';
-  const centreSubtitle =
-    view === 'generate'
-      ? provider === null
-        ? 'No provider selected'
-        : `${provider.label} / ${provider.kind}`
-      : `${formatCount(imageCount, 'image', 'images')} / ${formatCount(batchCount, 'batch', 'batches')}`;
 
   if (phase === 'loading') {
     return (
@@ -347,7 +337,7 @@ export function App({ slots = {} }: AppProps): ReactNode {
             <div className="topbar-meta">
               {provider === null ? null : (
                 <label className="provider-pill">
-                  <span className="mono-label">Provider</span>
+                  <span className="label">Provider</span>
                   <select
                     value={provider.id}
                     onChange={(event) => {
@@ -388,7 +378,6 @@ export function App({ slots = {} }: AppProps): ReactNode {
               <section className="rail-section">
                 <div className="rail-head">
                   <h2 className="section-label">Library</h2>
-                  <span className="rail-count">{formatCount(batchCount, 'batch', 'batches')}</span>
                 </div>
                 <dl className="summary">
                   <div className="summary-row">
@@ -432,7 +421,6 @@ export function App({ slots = {} }: AppProps): ReactNode {
 
             <main className="centre">
               <h2 className="sr-only">{centreTitle}</h2>
-              <span className="centre-sub">{centreSubtitle}</span>
               {centreSlot === undefined ? (
                 <div className="centre-panel is-empty">
                   <EmptyState
@@ -606,7 +594,7 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
         <h3 className="setup-card-title" id={`setup-${meta.kind}`}>
           {meta.label}
         </h3>
-        <span className="mono-label">{meta.kind}</span>
+        <span className="data">{meta.kind}</span>
       </div>
       <p className="setup-card-summary">{meta.summary}</p>
       <Field

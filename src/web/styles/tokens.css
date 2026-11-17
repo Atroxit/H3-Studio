@@ -1,32 +1,48 @@
-/* Design tokens for H3 Studio: dark, one accent, hairline borders, 4 px grid. */
+/* Design tokens for H3 Studio: neutral near-black, one white accent, hairline borders, 4 px grid.
+   Neutral on purpose: the interface must not tint the images it is showing. */
 
 :root {
   color-scheme: dark;
 
   /* Surfaces */
-  --canvas-top: #14100e;
-  --canvas-bottom: #1b1614;
-  --panel: #211b18;
-  --panel-raised: #292220;
-  --panel-sunken: #1a1513;
-  --line: #3a2f29;
-  --line-soft: #2b2420;
+  --canvas-top: #0a0a0c;
+  --canvas-bottom: #101013;
+  --panel: #151518;
+  --panel-raised: #1c1c20;
+  --panel-sunken: #0e0e10;
+  --line: #2a2a30;
+  --line-soft: #1f1f24;
 
   /* Text */
-  --text: #efe6dd;
-  --text-muted: #a3938a;
-  --text-faint: #7d6f66;
+  --text: #f4f4f5;
+  --text-muted: #a0a0a8;
+  --text-faint: #6e6e78;
 
   /* The single accent, and the ink that sits on it */
-  --accent: #e0b183;
-  --accent-ink: #221a14;
-  --accent-soft: rgba(224, 177, 131, 0.12);
-  --accent-line: rgba(224, 177, 131, 0.45);
+  --accent: #f4f4f5;
+  --accent-ink: #0a0a0c;
+  --accent-soft: rgba(244, 244, 245, 0.10);
+  --accent-line: rgba(244, 244, 245, 0.35);
+  /* The pressed and hover fill for a primary action: the accent, one step down. */
+  --accent-hover: #d9d9dc;
 
-  /* Status */
-  --ok: #a9c3a4;
-  --warn: #d6b07a;
-  --danger: #d98d82;
+  /* Status, and the hairline and fill each one uses */
+  --ok: #8fd694;
+  --warn: #e0c07a;
+  --danger: #e2725f;
+  --ok-line: rgba(143, 214, 148, 0.40);
+  --ok-soft: rgba(143, 214, 148, 0.10);
+  --warn-line: rgba(224, 192, 122, 0.40);
+  --warn-soft: rgba(224, 192, 122, 0.10);
+  --danger-line: rgba(226, 114, 95, 0.45);
+  --danger-soft: rgba(226, 114, 95, 0.10);
+  --danger-hover: #f08c78;
+
+  /* Scrims: anything laid over an image, in three depths plus a transparent end */
+  --scrim-soft: rgba(10, 10, 12, 0.68);
+  --scrim-strong: rgba(10, 10, 12, 0.86);
+  --scrim-opaque: rgba(8, 8, 10, 0.94);
+  --scrim-clear: rgba(10, 10, 12, 0);
 
   /* Spacing, 4 px grid */
   --space-1: 4px;
@@ -44,7 +60,7 @@
   --radius-pill: 999px;
 
   /* Type */
-  --font-display: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+  --font-display: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
@@ -63,6 +79,6 @@
   --inspector-collapsed-width: 48px;
 
   /* Depth and focus */
-  --shadow-panel: 0 18px 48px rgba(0, 0, 0, 0.38);
+  --shadow-panel: 0 18px 48px rgba(0, 0, 0, 0.5);
   --focus-ring: 0 0 0 2px var(--canvas-top), 0 0 0 4px var(--accent);
 }

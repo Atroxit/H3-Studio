@@ -11,9 +11,7 @@ import { useGeneration } from './useGeneration';
 import './generate.css';
 
 export function GenerateCanvas(): ReactNode {
-  const { provider } = useStudio();
   const generation = useGeneration();
-  const providerLabel = provider === null ? null : provider.label;
 
   return (
     <div className="gen-canvas">
@@ -26,10 +24,10 @@ export function GenerateCanvas(): ReactNode {
         onRetry={generation.retry}
         onRetryFailed={generation.retryFailed}
         onReload={generation.reloadBatch}
+        onUseStarter={generation.setPrompt}
       />
       <PromptComposer
         form={generation.form}
-        providerLabel={providerLabel}
         running={generation.running}
         canGenerate={generation.canGenerate}
         blockedReason={generation.blockedReason}

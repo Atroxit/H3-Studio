@@ -19,6 +19,17 @@ npm run verify
 
 `npm run verify` is `npm run typecheck && npm run test && npm run build`. It type checks the whole repository with `tsc --noEmit`, runs the vitest suite in `tests/`, and builds the web app into `dist/web`.
 
+## The desktop app
+
+```powershell
+npm run desktop
+```
+
+That builds the web app, bundles the server into `dist/server/main.cjs` with esbuild, and opens H3 Studio in its own Electron window with no browser chrome. The window loads the same app from a loopback port the shell picks at startup, and the server runs as a child process that stops when the window closes. The desktop build keeps its library in `%APPDATA%\h3-studio\library`, which is separate from the `~/.h3-studio` default that `npm run dev` uses, so the two do not share images.
+
+Use `npm run desktop` rather than calling Electron directly. It clears `ELECTRON_RUN_AS_NODE` before launching, and with that variable set, which happens when you start from inside another Electron based tool, Electron runs as plain Node and no window appears.
+
+
 ## Where your images live
 
 The library is a plain directory, created on first start. By default it is `.h3-studio` in your home directory; set `H3_DATA_DIR` to put it somewhere else.

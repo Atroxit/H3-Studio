@@ -27,15 +27,24 @@ function resolvePort(): number {
   return parsed;
 }
 
-const dataDir = resolveDataDir();
-const port = resolvePort();
-await mkdir(dataDir, { recursive: true });
+// Wrapped in main() rather than using top level await, so the desktop shell can bundle
+// this entry point as CommonJS, which the Electron main process spawns the same way.
+async function main(): Promise<void> {
+  const dataDir = resolveDataDir();
+  const port = resolvePort();
+  await mkdir(dataDir, { recursive: true });
 
-const server = createApp({ dataDir }).listen(port, LOOPBACK, () => {
-  console.log(`h3-studio: listening on http://${LOOPBACK}:${port} with data in ${dataDir}`);
-});
+  const server = createApp({ dataDir }).listen(port, LOOPBACK, () => {
+    console.log(`h3-studio: listening on http://${LOOPBACK}:${port} with data in ${dataDir}`);
+  });
 
-server.on('error', (error: Error) => {
-  console.error(`h3-studio: cannot listen on http://${LOOPBACK}:${port}: ${error.message}`);
+  server.on('error', (error: Error) => {
+    console.error(`h3-studio: cannot listen on http://${LOOPBACK}:${port}: ${error.message}`);
+    process.exitCode = 1;
+  });
+}
+
+main().catch((error: unknown) => {
+  console.error(`h3-studio: failed to start: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 });

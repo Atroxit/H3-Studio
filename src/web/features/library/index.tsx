@@ -439,9 +439,9 @@ export function LibraryRail(): ReactNode {
               <span className="lb-rail-copy">
                 <span className="lb-rail-name">{promptExcerpt(batch.prompt, 5)}</span>
                 <span className="lb-rail-meta">
-                  {formatCount(batch.images.length, 'image', 'images')} / {batch.width} x {batch.height}
+                  {formatCount(batch.images.length, 'image', 'images')} · {batch.width} x {batch.height} ·{' '}
+                  {formatShortTimestamp(batch.createdAt)}
                 </span>
-                <span className="lb-rail-time">{formatShortTimestamp(batch.createdAt)}</span>
               </span>
             </button>
           </li>

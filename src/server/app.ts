@@ -88,10 +88,21 @@ const presetSchema = z.object({
 });
 
 /**
- * The built web app, when it exists. Resolved from this module, so it works whether
- * the server runs from tsx on src or from a compiled copy in the same tree.
+ * The built web app, when it exists. H3_WEB_ROOT wins because a bundled copy of this
+ * server, which is how the desktop shell runs it, has no module URL to resolve against.
+ * The process.cwd() fallback keeps `node dist/server/main.cjs` working from the repo root.
  */
-const WEB_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../dist/web');
+function resolveWebRoot(): string {
+  const override = (process.env.H3_WEB_ROOT ?? '').trim();
+  if (override.length > 0) return path.resolve(override);
+  try {
+    return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../dist/web');
+  } catch {
+    return path.resolve(process.cwd(), 'dist/web');
+  }
+}
+
+const WEB_ROOT = resolveWebRoot();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;

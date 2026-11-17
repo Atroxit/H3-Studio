@@ -4,7 +4,7 @@
 
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import { imageUrl } from '../../api';
-import { Button, EmptyState, Spinner } from '../../components';
+import { Button, Spinner } from '../../components';
 import type { GenerationBatch, GenerationTile, TileSummary } from './useGeneration';
 
 export interface ResultsGridProps {
@@ -17,7 +17,16 @@ export interface ResultsGridProps {
   onRetry: (indices: number[]) => void;
   onRetryFailed: () => void;
   onReload: () => void;
+  /** Adds a starter to the prompt, so a first run is one click away. */
+  onUseStarter: (prompt: string) => void;
 }
+
+/** The first screen: three prompts that only fill the composer, never submit it. */
+const PROMPT_STARTERS: readonly string[] = [
+  'A brass diving helmet on wet sand, overcast light',
+  'A stone lighthouse on a basalt cliff at blue hour',
+  'Pears on a linen cloth, north window light',
+];
 
 export function columnsForCount(count: number): 1 | 2 | 3 | 4 {
   if (count <= 1) return 1;
@@ -34,13 +43,13 @@ function ratioStyle(width: number, height: number): CSSProperties {
 
 /**
  * Keeps the empty placeholder inside a sane box whatever the aspect is. The frame
- * is deliberately small: it is a shape hint above the prompt, not the subject.
+ * is deliberately small: it is a size hint above the prompt, not the subject.
  */
 function ghostStyle(width: number, height: number): CSSProperties {
   const safeWidth = width > 0 ? width : 1;
   const safeHeight = height > 0 ? height : 1;
-  const longest = 280;
-  const ghostWidth = safeHeight > safeWidth ? Math.max(120, Math.round((longest * safeWidth) / safeHeight)) : longest;
+  const longest = 224;
+  const ghostWidth = safeHeight > safeWidth ? Math.max(104, Math.round((longest * safeWidth) / safeHeight)) : longest;
   return { ...ratioStyle(safeWidth, safeHeight), width: ghostWidth, maxWidth: '100%' };
 }
 
@@ -165,6 +174,7 @@ export function ResultsGrid({
   onRetry,
   onRetryFailed,
   onReload,
+  onUseStarter,
 }: ResultsGridProps): ReactNode {
   if (batch === null) {
     return (
@@ -175,10 +185,27 @@ export function ResultsGrid({
               {plannedWidth} x {plannedHeight}
             </span>
           </div>
-          <EmptyState
-            title="The canvas is ready"
-            description="Write a prompt, then generate. One tile per image appears here at the chosen aspect ratio."
-          />
+          <div className="gen-empty-copy">
+            <h3 className="gen-empty-title">Nothing generated yet</h3>
+            <p className="gen-empty-lead">Write a prompt, or start with one of these.</p>
+          </div>
+          <ul className="gen-starters" aria-label="Prompt starters">
+            {PROMPT_STARTERS.map((starter) => (
+              <li key={starter}>
+                <button
+                  type="button"
+                  className="gen-starter"
+                  title="Use this prompt"
+                  onClick={() => onUseStarter(starter)}
+                >
+                  <svg className="icon gen-starter-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M12 5.5v13M5.5 12h13" />
+                  </svg>
+                  {starter}
+                </button>
+              </li>
+            ))}
+          </ul>
         </div>
       </section>
     );
@@ -208,12 +235,16 @@ export function ResultsGrid({
         <span className={running ? 'gen-status is-running' : 'gen-status'}>{statusLabel}</span>
       </header>
 
-      <p className="gen-progress-line">
-        <span className="gen-progress-count">
-          {settled} of {batch.tiles.length} settled
-        </span>
-        <span className="gen-progress-percent">{summary === null ? 0 : summary.percent}%</span>
-      </p>
+      {/* Progress is a live signal: once the batch settles the status pill and the
+          tiles already say what happened, so the line goes away. */}
+      {running ? (
+        <p className="gen-progress-line">
+          <span className="gen-progress-count">
+            {settled} of {batch.tiles.length} settled
+          </span>
+          <span className="gen-progress-percent">{summary === null ? 0 : summary.percent}%</span>
+        </p>
+      ) : null}
 
       {showPartial && summary !== null ? (
         <div className="gen-partial" role="status">

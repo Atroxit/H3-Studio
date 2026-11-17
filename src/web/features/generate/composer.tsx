@@ -1,5 +1,6 @@
 // The prompt composer and the action row: a real textarea, a character count,
 // Cmd or Ctrl Enter to generate, and a visible Stop while a batch runs.
+// Size and count each appear once: the size beside the button, the count in it.
 
 import { useId, type ChangeEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { Button } from '../../components';
@@ -7,7 +8,6 @@ import type { GenerationForm } from './useGeneration';
 
 export interface PromptComposerProps {
   form: GenerationForm;
-  providerLabel: string | null;
   running: boolean;
   canGenerate: boolean;
   blockedReason: string | null;
@@ -18,7 +18,6 @@ export interface PromptComposerProps {
 
 export function PromptComposer({
   form,
-  providerLabel,
   running,
   canGenerate,
   blockedReason,
@@ -70,17 +69,15 @@ export function PromptComposer({
       <p className="gen-hint" id={hintId}>
         {running
           ? 'A batch is running. Stop it before starting another.'
-          : `Cmd or Ctrl + Enter to generate. Enter adds a new line. ${form.prompt.length} characters, ${countLabel}.`}
+          : 'Cmd or Ctrl + Enter to generate. Enter adds a new line.'}
       </p>
 
       <div className="gen-actions">
-        <div className="gen-actions-meta">
+        <p className="gen-actions-meta">
           <span className="gen-mono">
             {form.width} x {form.height}
           </span>
-          <span className="gen-mono">{countLabel}</span>
-          <span className="gen-mono">{providerLabel ?? 'No provider'}</span>
-        </div>
+        </p>
         <div className="gen-actions-buttons">
           {running ? (
             <Button variant="secondary" onClick={onCancel}>
@@ -94,14 +91,12 @@ export function PromptComposer({
           )}
           <Button
             variant="primary"
-            className="gen-generate"
             disabled={!canGenerate}
             title={blockedReason ?? undefined}
             aria-describedby={blockedReason === null ? undefined : blockedId}
             onClick={onGenerate}
           >
-            <span className="gen-generate-title">Generate {countLabel}</span>
-            <span className="gen-generate-sub">{providerLabel ?? 'No provider'}</span>
+            Generate {countLabel}
           </Button>
         </div>
       </div>

@@ -91,6 +91,7 @@ function ChipGroup({
   onChange,
   disabled = false,
   compact = false,
+  stacked = false,
 }: {
   legend: string;
   name: string;
@@ -100,11 +101,15 @@ function ChipGroup({
   disabled?: boolean;
   /** Short numeric options share one row, so they read as a scale rather than a block grid. */
   compact?: boolean;
+  /** A named preset with a dimension under it takes the full row. */
+  stacked?: boolean;
 }): ReactNode {
+  const chipsClass = compact ? 'gen-chips is-compact' : stacked ? 'gen-chips is-stacked' : 'gen-chips';
+
   return (
-    <fieldset className="gen-group">
+    <fieldset className="gen-chips-group">
       <legend className="gen-legend">{legend}</legend>
-      <div className={compact ? 'gen-chips is-compact' : 'gen-chips'}>
+      <div className={chipsClass}>
         {options.map((option) => (
           <label key={option.value} className="gen-chip">
             <input
@@ -148,6 +153,13 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const sizeName = useId();
   const countName = useId();
   const negativeId = useId();
+  const sizeHeadingId = useId();
+  const batchHeadingId = useId();
+  const advancedHeadingId = useId();
+  const advancedPanelId = useId();
+  const referencesHeadingId = useId();
+  const notesHeadingId = useId();
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [referenceError, setReferenceError] = useState<string | null>(null);
 
@@ -157,7 +169,7 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
 
   if (capability.phase === 'error') {
     return (
-      <div className="gen-group">
+      <div className="gen-section">
         <p className="gen-quiet">{capability.error ?? 'The provider capabilities could not be loaded.'}</p>
         <Button variant="secondary" size="sm" onClick={controller.reloadCapabilities}>
           Try again
@@ -187,6 +199,25 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
     { length: Math.max(1, Math.trunc(capabilities.maxBatch)) },
     (_unused, index) => ({ value: String(index + 1), label: String(index + 1) }),
   );
+
+  // An unsupported sampling capability is one visible line, never a hidden control:
+  // these notes sit outside the advanced disclosure, whatever its state.
+  const advancedNotes: string[] = [];
+  if (!capabilities.adjustableSteps) {
+    advancedNotes.push(
+      capabilities.fixedSteps !== null
+        ? `Steps are fixed at ${capabilities.fixedSteps} by this provider.`
+        : noteFor(capabilities, ['step']) ?? 'Steps are chosen by this provider.',
+    );
+  }
+  if (!capabilities.guidance) {
+    advancedNotes.push(noteFor(capabilities, ['guidance', 'cfg']) ?? 'This provider has no guidance scale.');
+  }
+  if (!capabilities.negativePrompt) {
+    advancedNotes.push(noteFor(capabilities, ['negative']) ?? 'This provider has no negative prompt.');
+  }
+  const advancedCount =
+    (capabilities.adjustableSteps ? 1 : 0) + (capabilities.guidance ? 1 : 0) + (capabilities.negativePrompt ? 1 : 0);
 
   const handleAspect = (ratio: string): void => {
     const group = groups.find((candidate) => candidate.ratio === ratio);
@@ -237,79 +268,82 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
 
   return (
     <div className="gen-controls">
-      {capabilities.presets.length === 0 ? (
-        <div className="gen-group">
-          <p className="gen-legend-static">Size</p>
+      <section className="gen-section" aria-labelledby={sizeHeadingId}>
+        <h3 className="gen-section-title" id={sizeHeadingId}>
+          Size
+        </h3>
+        {capabilities.presets.length === 0 ? (
           <QuietLine text={noteFor(capabilities, ['size', 'resolution', 'dimension']) ?? 'This provider lists no size presets.'} />
-        </div>
-      ) : (
-        <>
-          <ChipGroup
-            legend="Aspect ratio"
-            name={aspectName}
-            value={activeRatio}
-            options={aspectOptions}
-            onChange={handleAspect}
-            disabled={controller.running}
-          />
-          <ChipGroup
-            legend="Resolution"
-            name={sizeName}
-            value={activePreset === null ? null : activePreset.id}
-            options={sizeOptions}
-            onChange={handleSize}
-            disabled={controller.running}
-          />
-        </>
-      )}
+        ) : (
+          <>
+            <ChipGroup
+              legend="Aspect ratio"
+              name={aspectName}
+              value={activeRatio}
+              options={aspectOptions}
+              onChange={handleAspect}
+              disabled={controller.running}
+            />
+            <ChipGroup
+              legend="Resolution"
+              name={sizeName}
+              value={activePreset === null ? null : activePreset.id}
+              options={sizeOptions}
+              onChange={handleSize}
+              disabled={controller.running}
+              stacked
+            />
+          </>
+        )}
 
-      {capabilities.arbitrarySize ? (
-        <div className="gen-group">
-          <div className="gen-pair">
-            <Field
-              label="Width"
-              type="number"
-              inputMode="numeric"
-              min={multiple}
-              step={multiple}
-              value={String(form.width)}
-              disabled={controller.running}
-              hint={`Multiples of ${multiple} px`}
-              onChange={handleWidth}
-            />
-            <Field
-              label="Height"
-              type="number"
-              inputMode="numeric"
-              min={multiple}
-              step={multiple}
-              value={String(form.height)}
-              disabled={controller.running}
-              onChange={handleHeight}
-            />
-          </div>
-          {sizeInvalid ? <p className="gen-quiet is-error">Width and height must be at least 1 px.</p> : null}
-        </div>
-      ) : (
-        <div className="gen-group">
+        {capabilities.arbitrarySize ? (
+          <>
+            <div className="gen-pair">
+              <Field
+                label="Width"
+                type="number"
+                inputMode="numeric"
+                min={multiple}
+                step={multiple}
+                value={String(form.width)}
+                disabled={controller.running}
+                hint={`Multiples of ${multiple} px`}
+                onChange={handleWidth}
+              />
+              <Field
+                label="Height"
+                type="number"
+                inputMode="numeric"
+                min={multiple}
+                step={multiple}
+                value={String(form.height)}
+                disabled={controller.running}
+                onChange={handleHeight}
+              />
+            </div>
+            {sizeInvalid ? <p className="gen-quiet is-error">Width and height must be at least 1 px.</p> : null}
+          </>
+        ) : (
           <QuietLine
             text={noteFor(capabilities, ['size', 'resolution', 'dimension']) ?? 'This provider takes sizes from its presets only.'}
           />
-        </div>
-      )}
+        )}
+      </section>
 
-      <ChipGroup
-        legend="Batch count"
-        name={countName}
-        value={String(form.count)}
-        options={countOptions}
-        onChange={(value) => controller.updateForm({ count: Number(value) })}
-        disabled={controller.running}
-        compact
-      />
-
-      {capabilities.seed ? (
-        <div className="gen-group">
+      <section className="gen-section" aria-labelledby={batchHeadingId}>
+        <h3 className="gen-section-title" id={batchHeadingId}>
+          Batch
+        </h3>
+        <ChipGroup
+          legend="Images"
+          name={countName}
+          value={String(form.count)}
+          options={countOptions}
+          onChange={(value) => controller.updateForm({ count: Number(value) })}
+          disabled={controller.running}
+          compact
+        />
+        {capabilities.seed ? (
           <Field
             label="Seed"
             type="number"
@@ -321,84 +355,96 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
             hint="Leave empty for a fresh seed per image."
             onChange={(event) => controller.updateForm({ seed: event.target.value })}
           />
-        </div>
-      ) : (
-        <div className="gen-group">
+        ) : (
           <QuietLine text={noteFor(capabilities, ['seed']) ?? 'This provider chooses the seed itself.'} />
-        </div>
-      )}
-
-      <div className="gen-group">
-        {capabilities.adjustableSteps ? (
-          <Slider
-            label="Steps"
-            min={MIN_STEPS}
-            max={MAX_STEPS}
-            step={1}
-            value={form.steps}
-            disabled={controller.running}
-            hint={`${MIN_STEPS} to ${MAX_STEPS} sampling steps.`}
-            onChange={(value) => controller.updateForm({ steps: value })}
-          />
-        ) : (
-          <QuietLine
-            text={
-              capabilities.fixedSteps !== null
-                ? `Steps are fixed at ${capabilities.fixedSteps} by this provider.`
-                : noteFor(capabilities, ['step']) ?? 'Steps are chosen by this provider.'
-            }
-          />
         )}
-      </div>
+      </section>
 
-      <div className="gen-group">
-        {capabilities.guidance ? (
-          <Slider
-            label="Guidance"
-            min={0}
-            max={20}
-            step={0.5}
-            value={form.guidance}
-            disabled={controller.running}
-            hint="How closely the provider follows the prompt."
-            format={(value) => value.toFixed(1)}
-            onChange={(value) => controller.updateForm({ guidance: value })}
-          />
+      <section className="gen-section" aria-labelledby={advancedHeadingId}>
+        {advancedCount === 0 ? (
+          <h3 className="gen-section-title" id={advancedHeadingId}>
+            Advanced
+          </h3>
         ) : (
-          <QuietLine text={noteFor(capabilities, ['guidance', 'cfg']) ?? 'This provider has no guidance scale.'} />
+          <button
+            type="button"
+            className="gen-section-toggle"
+            aria-expanded={advancedOpen}
+            aria-controls={advancedPanelId}
+            onClick={() => setAdvancedOpen(!advancedOpen)}
+          >
+            <svg className="icon gen-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M9.5 6.5L15 12l-5.5 5.5" />
+            </svg>
+            <span className="gen-section-title" id={advancedHeadingId}>
+              Advanced
+            </span>
+            <span className="gen-section-count">{advancedCount === 1 ? '1 setting' : `${advancedCount} settings`}</span>
+          </button>
         )}
-      </div>
 
-      <div className="gen-group">
-        {capabilities.negativePrompt ? (
-          <>
-            <label className="gen-label" htmlFor={negativeId}>
-              Negative prompt
-            </label>
-            <textarea
-              id={negativeId}
-              className="gen-textarea"
-              rows={2}
-              value={form.negativePrompt}
+        <div className="gen-advanced" id={advancedPanelId} hidden={!advancedOpen || advancedCount === 0}>
+          {capabilities.adjustableSteps ? (
+            <Slider
+              label="Steps"
+              min={MIN_STEPS}
+              max={MAX_STEPS}
+              step={1}
+              value={form.steps}
               disabled={controller.running}
-              placeholder="What to leave out."
-              onChange={(event) => controller.updateForm({ negativePrompt: event.target.value })}
+              hint={`${MIN_STEPS} to ${MAX_STEPS} sampling steps.`}
+              onChange={(value) => controller.updateForm({ steps: value })}
             />
-          </>
-        ) : (
-          <QuietLine text={noteFor(capabilities, ['negative']) ?? 'This provider has no negative prompt.'} />
-        )}
-      </div>
+          ) : null}
+          {capabilities.guidance ? (
+            <Slider
+              label="Guidance"
+              min={0}
+              max={20}
+              step={0.5}
+              value={form.guidance}
+              disabled={controller.running}
+              hint="How closely the provider follows the prompt."
+              format={(value) => value.toFixed(1)}
+              onChange={(value) => controller.updateForm({ guidance: value })}
+            />
+          ) : null}
+          {capabilities.negativePrompt ? (
+            <div className="field">
+              <label className="gen-label" htmlFor={negativeId}>
+                Negative prompt
+              </label>
+              <textarea
+                id={negativeId}
+                className="gen-textarea"
+                rows={2}
+                value={form.negativePrompt}
+                disabled={controller.running}
+                placeholder="What to leave out."
+                onChange={(event) => controller.updateForm({ negativePrompt: event.target.value })}
+              />
+            </div>
+          ) : null}
+        </div>
 
-      <div className="gen-group">
+        {advancedNotes.map((note) => (
+          <QuietLine key={note} text={note} />
+        ))}
+      </section>
+
+      <section className="gen-section" aria-labelledby={referencesHeadingId}>
+        <div className="gen-section-head">
+          <h3 className="gen-section-title" id={referencesHeadingId}>
+            References
+          </h3>
+          {capabilities.maxReferenceImages > 0 ? (
+            <span className="gen-section-count">
+              {form.references.length} of {capabilities.maxReferenceImages}
+            </span>
+          ) : null}
+        </div>
         {capabilities.maxReferenceImages > 0 ? (
           <>
-            <div className="gen-group-head">
-              <span className="gen-legend-static">References</span>
-              <span className="gen-group-count">
-                {form.references.length} of {capabilities.maxReferenceImages}
-              </span>
-            </div>
             <ul className="gen-ref-list">
               {form.references.map((reference) => (
                 <li key={reference.id} className="gen-ref">
@@ -433,7 +479,9 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
                   }}
                 />
                 <span className="gen-ref-add-icon" aria-hidden="true">
-                  {uploading ? <Spinner size={12} label="" /> : (
+                  {uploading ? (
+                    <Spinner size={12} label="" />
+                  ) : (
                     <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                       <path d="M12 5.5v13M5.5 12h13" />
                     </svg>
@@ -449,24 +497,25 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
             text={noteFor(capabilities, ['reference', 'image input', 'edit']) ?? 'This provider does not accept reference images.'}
           />
         )}
-      </div>
+      </section>
 
-      {capabilities.streamingProgress ? null : (
-        <div className="gen-group">
-          <QuietLine text="This provider reports progress only when each image finishes." />
-        </div>
-      )}
-
-      {capabilities.notes.length === 0 ? null : (
-        <section className="gen-group" aria-label="Provider notes">
-          <span className="gen-legend-static">Provider notes</span>
-          <ul className="gen-notes">
-            {capabilities.notes.map((note, index) => (
-              <li key={`${index}-${note}`} className="gen-quiet">
-                {note}
-              </li>
-            ))}
-          </ul>
+      {capabilities.streamingProgress && capabilities.notes.length === 0 ? null : (
+        <section className="gen-section" aria-labelledby={notesHeadingId}>
+          <h3 className="gen-section-title" id={notesHeadingId}>
+            Provider notes
+          </h3>
+          {capabilities.streamingProgress ? null : (
+            <QuietLine text="This provider reports progress only when each image finishes." />
+          )}
+          {capabilities.notes.length === 0 ? null : (
+            <ul className="gen-notes">
+              {capabilities.notes.map((note, index) => (
+                <li key={`${index}-${note}`} className="gen-quiet">
+                  {note}
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       )}
     </div>
