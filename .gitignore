@@ -1,0 +1,18 @@
+**/node_modules/
+**/.next/
+**/dist/
+**/target/
+**/artifacts/
+**/test-results/
+**/playwright-report/
+**/coverage/
+**/.env
+**/.env.local
+**/*.tsbuildinfo
+*.log
+
+# Local studio state and build output
+node_modules/
+dist/
+.h3data/
+*.log

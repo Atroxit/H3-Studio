@@ -1,0 +1,461 @@
+import { createServer } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { synthImage } from '../../src/core/png';
+import { ComfyUIError, createComfyUIAdapter, defaultWorkflowTemplate } from '../../src/core/providers/comfyui';
+import type {
+  GenerationEvent,
+  GenerationRequest,
+  ProviderConfig,
+} from '../../src/core/types';
+
+// A real PNG, used as the bytes ComfyUI serves from /view.
+const PNG_BYTES = synthImage({ width: 16, height: 16, seed: 7, label: 'comfyui test' });
+
+const BASE_REQUEST: GenerationRequest = {
+  prompt: 'a brass lighthouse at dusk',
+  width: 512,
+  height: 512,
+  count: 1,
+};
+
+interface StubResponse {
+  status: number;
+  body: unknown;
+}
+
+interface StubConfig {
+  promptResponse?: StubResponse;
+  historyResponse?: (poll: number) => StubResponse;
+  viewBytes?: Uint8Array;
+  onHistory?: (poll: number) => void;
+}
+
+interface RecordedRequest {
+  method: string;
+  path: string;
+  body: unknown;
+}
+
+interface Stub {
+  baseUrl: string;
+  requests: RecordedRequest[];
+  historyPolls: () => number;
+  close: () => Promise<void>;
+}
+
+const openStubs: Stub[] = [];
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function record(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error(`expected an object, got ${JSON.stringify(value)}`);
+  return value;
+}
+
+function inputsOf(node: Record<string, unknown>): Record<string, unknown> {
+  return record(node['inputs']);
+}
+
+function nodesOfType(graph: Record<string, unknown>, classType: string): Record<string, unknown>[] {
+  return Object.values(graph).filter(
+    (node): node is Record<string, unknown> => isRecord(node) && node['class_type'] === classType,
+  );
+}
+
+function readRequestBody(request: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    request.on('data', (chunk: Buffer) => chunks.push(chunk));
+    request.on('error', reject);
+    request.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8');
+      if (text.length === 0) {
+        resolve(undefined);
+        return;
+      }
+      resolve(JSON.parse(text) as unknown);
+    });
+  });
+}
+
+function sendJson(response: ServerResponse, payload: StubResponse): void {
+  response.writeHead(payload.status, { 'content-type': 'application/json' });
+  response.end(JSON.stringify(payload.body));
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+    server.closeAllConnections();
+  });
+}
+
+function startStub(config: StubConfig = {}): Promise<Stub> {
+  return new Promise((resolve, reject) => {
+    const requests: RecordedRequest[] = [];
+    let polls = 0;
+
+    async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+      const method = request.method ?? 'GET';
+      const path = request.url ?? '/';
+      const body = method === 'POST' ? await readRequestBody(request) : undefined;
+      requests.push({ method, path, body });
+
+      if (method === 'POST' && path === '/prompt') {
+        sendJson(response, config.promptResponse ?? { status: 200, body: { prompt_id: 'prompt-1', number: 1 } });
+        return;
+      }
+      if (method === 'GET' && path.startsWith('/history/')) {
+        polls += 1;
+        config.onHistory?.(polls);
+        sendJson(response, config.historyResponse?.(polls) ?? { status: 200, body: {} });
+        return;
+      }
+      if (method === 'GET' && path.startsWith('/view')) {
+        if (config.viewBytes === undefined) {
+          response.writeHead(404, { 'content-type': 'text/plain' });
+          response.end('missing');
+          return;
+        }
+        response.writeHead(200, { 'content-type': 'image/png' });
+        response.end(Buffer.from(config.viewBytes));
+        return;
+      }
+      if (method === 'GET' && path === '/system_stats') {
+        sendJson(response, { status: 200, body: { system: { os: 'test' } } });
+        return;
+      }
+      response.writeHead(404, { 'content-type': 'text/plain' });
+      response.end('not found');
+    }
+
+    const server = createServer((request, response) => {
+      handle(request, response).catch((error: unknown) => {
+        response.writeHead(500, { 'content-type': 'text/plain' });
+        response.end(error instanceof Error ? error.message : String(error));
+      });
+    });
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        reject(new Error('stub server did not bind a port'));
+        return;
+      }
+      const stub: Stub = {
+        baseUrl: `http://127.0.0.1:${address.port}`,
+        requests,
+        historyPolls: () => polls,
+        close: () => closeServer(server),
+      };
+      openStubs.push(stub);
+      resolve(stub);
+    });
+  });
+}
+
+function comfyConfig(baseUrl: string, options: Record<string, unknown> = {}): ProviderConfig {
+  return { id: 'comfy-test', kind: 'comfyui', label: 'ComfyUI test', baseUrl, options };
+}
+
+function context(): { signal: AbortSignal; events: GenerationEvent[] } {
+  const events: GenerationEvent[] = [];
+  const { signal } = new AbortController();
+  return { signal, events };
+}
+
+function postedGraph(stub: Stub): Record<string, unknown> {
+  const posted = stub.requests.find((entry) => entry.method === 'POST' && entry.path === '/prompt');
+  if (posted === undefined) throw new Error('no POST /prompt request recorded');
+  return record(record(posted.body)['prompt']);
+}
+
+afterEach(async () => {
+  await Promise.all(openStubs.splice(0).map((stub) => stub.close()));
+});
+
+describe('ComfyUI adapter', () => {
+  it('returns bytes from a completed prompt', async () => {
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-1', number: 1, node_errors: {} } },
+      historyResponse: () => ({
+        status: 200,
+        body: {
+          'prompt-1': {
+            outputs: { '9': { images: [{ filename: 'h3_00001_.png', subfolder: '', type: 'output' }] } },
+          },
+        },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(comfyConfig(stub.baseUrl, { pollIntervalMs: 10, timeoutMs: 2000 }));
+    const run = context();
+
+    const outcome = await adapter.generate(BASE_REQUEST, { signal: run.signal, onEvent: (event) => run.events.push(event) });
+
+    expect(outcome.providerId).toBe('comfy-test');
+    expect(outcome.items).toHaveLength(1);
+    const item = outcome.items[0];
+    if (item === undefined) throw new Error('expected one generated item');
+    expect(item.ok).toBe(true);
+    expect(item.seed).toBeTypeOf('number');
+    const bytes = item.bytes;
+    if (bytes === undefined) throw new Error('expected image bytes');
+    expect(bytes).toEqual(PNG_BYTES);
+    expect(Array.from(bytes.slice(0, 8))).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+
+    const posted = stub.requests.find((entry) => entry.method === 'POST' && entry.path === '/prompt');
+    if (posted === undefined) throw new Error('no POST /prompt request recorded');
+    expect(record(posted.body)['client_id']).toBe('h3-studio');
+
+    const view = stub.requests.find((entry) => entry.path.startsWith('/view'));
+    if (view === undefined) throw new Error('no GET /view request recorded');
+    expect(view.path).toContain('filename=h3_00001_.png');
+    expect(view.path).toContain('subfolder=');
+    expect(view.path).toContain('type=output');
+
+    const progress = run.events.filter(
+      (event): event is Extract<GenerationEvent, { type: 'progress' }> => event.type === 'progress',
+    );
+    expect(progress.length).toBeGreaterThan(0);
+    for (const event of progress) {
+      expect(event.stage).toBe('sampling');
+      expect(event.percent ?? 0).toBeGreaterThan(0);
+      expect(event.percent ?? 0).toBeLessThanOrEqual(95);
+    }
+  });
+
+  it('surfaces node_errors as a failure naming the node', async () => {
+    const stub = await startStub({
+      promptResponse: {
+        status: 200,
+        body: {
+          prompt_id: 'prompt-2',
+          number: 2,
+          node_errors: {
+            '6': {
+              class_type: 'EmptyLatentImage',
+              errors: [{ message: 'Value not in list', details: 'ckpt_name: nope.safetensors not in list' }],
+            },
+          },
+        },
+      },
+    });
+    const adapter = createComfyUIAdapter(comfyConfig(stub.baseUrl, { pollIntervalMs: 10, timeoutMs: 2000 }));
+    const run = context();
+    const generation = adapter.generate(BASE_REQUEST, { signal: run.signal, onEvent: () => {} });
+
+    await expect(generation).rejects.toBeInstanceOf(ComfyUIError);
+    await expect(generation).rejects.toThrow(/node 6: Value not in list ckpt_name: nope\.safetensors not in list/);
+    expect(stub.historyPolls()).toBe(0);
+  });
+
+  it('fails with a timeout message when history never resolves', async () => {
+    const stub = await startStub({ promptResponse: { status: 200, body: { prompt_id: 'prompt-3' } } });
+    const adapter = createComfyUIAdapter(comfyConfig(stub.baseUrl, { pollIntervalMs: 15, timeoutMs: 120 }));
+    const run = context();
+    const started = Date.now();
+    const generation = adapter.generate(BASE_REQUEST, { signal: run.signal, onEvent: () => {} });
+
+    await expect(generation).rejects.toThrow(/timed out after 120 ms waiting for prompt prompt-3/);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(90);
+    expect(stub.historyPolls()).toBeGreaterThan(1);
+  });
+
+  it('clears the poll timer and rejects when aborted', async () => {
+    let markFirstPoll: () => void = () => {};
+    const firstPoll = new Promise<void>((resolve) => {
+      markFirstPoll = resolve;
+    });
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-4' } },
+      onHistory: (poll) => {
+        if (poll === 1) markFirstPoll();
+      },
+    });
+    const adapter = createComfyUIAdapter(comfyConfig(stub.baseUrl, { pollIntervalMs: 5000, timeoutMs: 60_000 }));
+    const controller = new AbortController();
+    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    const started = Date.now();
+
+    const generation = adapter.generate(BASE_REQUEST, {
+      signal: controller.signal,
+      onEvent: () => {},
+    });
+    await firstPoll;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    controller.abort();
+
+    try {
+      await expect(generation).rejects.toThrow(/aborted/);
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+    } finally {
+      clearTimeoutSpy.mockRestore();
+    }
+    // The 5000 ms poll timer was cleared, so the rejection arrives long before it could fire.
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(stub.historyPolls()).toBe(1);
+  });
+
+  it('substitutes placeholders inside the posted graph', async () => {
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-5' } },
+      historyResponse: () => ({
+        status: 200,
+        body: { 'prompt-5': { outputs: { '9': { images: [{ filename: 'h3_00005_.png', subfolder: 'batch' }] } } } },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(
+      comfyConfig(stub.baseUrl, { pollIntervalMs: 10, timeoutMs: 2000, ckptName: 'sd15.safetensors' }),
+    );
+    const request: GenerationRequest = {
+      prompt: 'a brass lighthouse',
+      negativePrompt: 'blurry, low detail',
+      width: 832,
+      height: 1216,
+      count: 1,
+      seed: 424242,
+      steps: 28,
+      guidance: 6.5,
+    };
+    const run = context();
+
+    await adapter.generate(request, { signal: run.signal, onEvent: () => {} });
+
+    const graph = postedGraph(stub);
+    const classTypes = Object.values(graph).map((node) => record(node)['class_type']);
+    expect(classTypes).toEqual(
+      expect.arrayContaining([
+        'CheckpointLoaderSimple',
+        'CLIPTextEncode',
+        'EmptyLatentImage',
+        'KSampler',
+        'VAEDecode',
+        'SaveImage',
+      ]),
+    );
+
+    const textNodes = nodesOfType(graph, 'CLIPTextEncode');
+    expect(textNodes).toHaveLength(2);
+    const positive = textNodes.find((node) => inputsOf(node)['text'] === 'a brass lighthouse');
+    const negative = textNodes.find((node) => inputsOf(node)['text'] === 'blurry, low detail');
+    expect(positive).toBeDefined();
+    expect(negative).toBeDefined();
+
+    const latent = nodesOfType(graph, 'EmptyLatentImage');
+    if (latent[0] === undefined) throw new Error('missing EmptyLatentImage node');
+    const latentInputs = inputsOf(latent[0]);
+    expect(latentInputs['width']).toBe(832);
+    expect(latentInputs['height']).toBe(1216);
+    expect(latentInputs['batch_size']).toBe(1);
+
+    const sampler = nodesOfType(graph, 'KSampler');
+    if (sampler[0] === undefined) throw new Error('missing KSampler node');
+    const samplerInputs = inputsOf(sampler[0]);
+    expect(samplerInputs['seed']).toBe(424242);
+    expect(samplerInputs['steps']).toBe(28);
+    expect(samplerInputs['cfg']).toBe(6.5);
+
+    const loader = nodesOfType(graph, 'CheckpointLoaderSimple');
+    if (loader[0] === undefined) throw new Error('missing CheckpointLoaderSimple node');
+    expect(inputsOf(loader[0])['ckpt_name']).toBe('sd15.safetensors');
+    expect(JSON.stringify(graph)).not.toContain('{{');
+  });
+
+  it('uses the workflow template from options when provided', async () => {
+    const customTemplate = {
+      '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: '{{ckpt}}' } },
+      '2': { class_type: 'SaveImage', inputs: { filename_prefix: '{{prompt}}', images: ['1', 0] } },
+    };
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-6' } },
+      historyResponse: () => ({
+        status: 200,
+        body: { 'prompt-6': { outputs: { '2': { images: [{ filename: 'custom.png', subfolder: '' }] } } } },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(
+      comfyConfig(stub.baseUrl, {
+        pollIntervalMs: 10,
+        timeoutMs: 2000,
+        workflowTemplate: JSON.stringify(customTemplate),
+      }),
+    );
+    const run = context();
+
+    await adapter.generate(BASE_REQUEST, { signal: run.signal, onEvent: () => {} });
+
+    const graph = postedGraph(stub);
+    expect(Object.keys(graph)).toEqual(['1', '2']);
+    const saver = nodesOfType(graph, 'SaveImage');
+    if (saver[0] === undefined) throw new Error('missing SaveImage node');
+    expect(inputsOf(saver[0])['filename_prefix']).toBe(BASE_REQUEST.prompt);
+  });
+
+  it('reports a working health check from system_stats', async () => {
+    const stub = await startStub();
+    const adapter = createComfyUIAdapter(comfyConfig(stub.baseUrl));
+
+    await expect(adapter.health()).resolves.toEqual({ ok: true });
+    expect(stub.requests.some((entry) => entry.method === 'GET' && entry.path === '/system_stats')).toBe(true);
+  });
+
+  it('reports capabilities for a text to image pipeline', async () => {
+    const adapter = createComfyUIAdapter(comfyConfig('http://127.0.0.1:1'));
+    const capabilities = await adapter.capabilities();
+
+    expect(capabilities.seed).toBe(true);
+    expect(capabilities.negativePrompt).toBe(true);
+    expect(capabilities.adjustableSteps).toBe(true);
+    expect(capabilities.fixedSteps).toBeNull();
+    expect(capabilities.guidance).toBe(true);
+    expect(capabilities.maxReferenceImages).toBe(0);
+    expect(capabilities.maxBatch).toBe(4);
+    expect(capabilities.arbitrarySize).toBe(true);
+    expect(capabilities.sizeMultiple).toBe(8);
+    expect(capabilities.presets.map((preset) => preset.id)).toEqual([
+      '512x512',
+      '768x768',
+      '832x1216',
+      '1216x832',
+    ]);
+    expect(capabilities.outputFormats).toEqual(['png']);
+    expect(capabilities.streamingProgress).toBe(true);
+    const notes = capabilities.notes.join(' ');
+    expect(notes).toContain('different graph');
+    expect(notes).toContain('polled');
+  });
+
+  it('ships a default text to image template with the contract node classes', () => {
+    const classTypes = Object.values(defaultWorkflowTemplate).map((node) => node.class_type);
+    expect(classTypes.filter((type) => type === 'CLIPTextEncode')).toHaveLength(2);
+    expect(classTypes).toEqual(
+      expect.arrayContaining([
+        'CheckpointLoaderSimple',
+        'EmptyLatentImage',
+        'KSampler',
+        'VAEDecode',
+        'SaveImage',
+      ]),
+    );
+    const serialized = JSON.stringify(defaultWorkflowTemplate);
+    for (const placeholder of [
+      '{{prompt}}',
+      '{{negativePrompt}}',
+      '{{width}}',
+      '{{height}}',
+      '{{seed}}',
+      '{{steps}}',
+      '{{cfg}}',
+      '{{ckpt}}',
+      '{{batch}}',
+    ]) {
+      expect(serialized).toContain(placeholder);
+    }
+  });
+});

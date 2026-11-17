@@ -1,0 +1,68 @@
+/* Design tokens for H3 Studio: dark, one accent, hairline borders, 4 px grid. */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --canvas-top: #14100e;
+  --canvas-bottom: #1b1614;
+  --panel: #211b18;
+  --panel-raised: #292220;
+  --panel-sunken: #1a1513;
+  --line: #3a2f29;
+  --line-soft: #2b2420;
+
+  /* Text */
+  --text: #efe6dd;
+  --text-muted: #a3938a;
+  --text-faint: #7d6f66;
+
+  /* The single accent, and the ink that sits on it */
+  --accent: #e0b183;
+  --accent-ink: #221a14;
+  --accent-soft: rgba(224, 177, 131, 0.12);
+  --accent-line: rgba(224, 177, 131, 0.45);
+
+  /* Status */
+  --ok: #a9c3a4;
+  --warn: #d6b07a;
+  --danger: #d98d82;
+
+  /* Spacing, 4 px grid */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+
+  /* Radii */
+  --radius-panel: 10px;
+  --radius-control: 8px;
+  --radius-pill: 999px;
+
+  /* Type */
+  --font-display: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, "Times New Roman", serif;
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --text-micro: 11px;
+  --text-sm: 12px;
+  --text-body: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 22px;
+  --text-display: 28px;
+
+  /* Frame */
+  --topbar-height: 56px;
+  --rail-width: 260px;
+  --inspector-width: 300px;
+  --inspector-collapsed-width: 48px;
+
+  /* Depth and focus */
+  --shadow-panel: 0 18px 48px rgba(0, 0, 0, 0.38);
+  --focus-ring: 0 0 0 2px var(--canvas-top), 0 0 0 4px var(--accent);
+}

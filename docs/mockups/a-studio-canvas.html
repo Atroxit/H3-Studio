@@ -1,0 +1,1306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1440">
+<title>Studio Canvas - Mockup A</title>
+<style>
+  :root{
+    --page:#090a0c;
+    --app:#141519;
+    --panel:#17181d;
+    --panel-2:#1b1c22;
+    --panel-3:#1e2026;
+    --canvas:#0e0f12;
+    --line:#262830;
+    --line-soft:#23252b;
+    --text:#eceae5;
+    --muted:#a9abb2;
+    --dim:#9799a1;
+    --faint:#7f818a;
+    --accent:#d3a86a;
+    --accent-strong:#eac488;
+    --accent-ink:#1b1409;
+    --green:#93bd9f;
+    --red:#dd9187;
+    --font:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;
+    --mono:ui-monospace,"Cascadia Mono","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box}
+  html{color-scheme:dark;scrollbar-width:none}
+  body{
+    margin:0;
+    padding:0;
+    background:var(--page);
+    color:var(--text);
+    font-family:var(--font);
+    font-size:13px;
+    line-height:1.45;
+    -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+    overflow-x:hidden;
+  }
+  ::-webkit-scrollbar{width:0;height:0}
+  button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+  button:focus-visible,
+  textarea:focus-visible,
+  input:focus-visible{
+    outline:2px solid var(--accent-strong);
+    outline-offset:2px;
+  }
+  .sprite{position:absolute;width:0;height:0;overflow:hidden}
+  .icon{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:0 0 auto}
+  .icon-xs{width:11px;height:11px}
+  .mono{font-family:var(--mono)}
+  .page{width:1440px;margin:0 auto;padding:16px 0 26px;background:var(--page)}
+
+  /* Section labels */
+  .label-row{
+    width:1440px;height:54px;display:flex;align-items:center;gap:14px;
+    padding:0 2px;background:var(--page);
+  }
+  .label-num{font-family:var(--mono);font-size:10px;line-height:1;color:#7d7f88;letter-spacing:.08em}
+  .label-title{font-size:10.5px;font-weight:650;letter-spacing:.19em;color:#d8d6cf;text-transform:uppercase}
+  .label-meta{font-size:10.5px;color:#898b93;white-space:nowrap}
+  .label-rule{flex:1 1 auto;height:1px;background:#1f2127}
+  .label-size{font-family:var(--mono);font-size:9.5px;letter-spacing:.05em;color:#7d7f88;white-space:nowrap}
+
+  /* Application frame */
+  .app{
+    width:1440px;height:948px;
+    display:grid;
+    grid-template-columns:260px minmax(0,1fr) 300px;
+    grid-template-rows:52px minmax(0,1fr) 96px;
+    grid-template-areas:
+      "top top top"
+      "rail canvas inspector"
+      "rail command command";
+    background:var(--app);
+    border:1px solid #292b33;
+    border-radius:12px;
+    overflow:hidden;
+    box-shadow:0 26px 70px rgba(0,0,0,.42);
+  }
+
+  /* Top bar */
+  .topbar{
+    grid-area:top;display:flex;align-items:center;gap:22px;
+    padding:0 18px;background:#16171c;border-bottom:1px solid var(--line-soft);
+    min-width:0;
+  }
+  .brand{display:flex;align-items:center;gap:10px;flex:0 0 auto}
+  .brand-mark{
+    width:28px;height:28px;border-radius:7px;border:1px solid #34363f;
+    background:linear-gradient(160deg,#272930,#1a1b20);
+    display:grid;place-items:center;color:#d8b37a;
+  }
+  .brand-mark .icon{width:16px;height:16px}
+  .brand-name{font-size:13.5px;font-weight:650;color:#f1efe9;letter-spacing:.005em}
+  .brand-mode{
+    font-family:var(--mono);font-size:8.5px;line-height:1;color:#a4a5ac;
+    border:1px solid #32343c;border-radius:4px;padding:4px 6px;letter-spacing:.08em;
+  }
+  .crumb{display:flex;align-items:center;gap:8px;font-size:11.5px;color:#a6a8b0;white-space:nowrap;min-width:0}
+  .crumb strong{color:#dedcd6;font-weight:550}
+  .crumb .slash{color:#5c5e68}
+  .top-right{margin-left:auto;display:flex;align-items:center;gap:16px;flex:0 0 auto}
+  .provider{
+    display:flex;align-items:center;gap:8px;padding:6px 11px;
+    border:1px solid #2f3139;border-radius:999px;background:#1b1c22;
+    font-size:11px;color:#e9e7e1;white-space:nowrap;
+  }
+  .provider .k{font-size:8.5px;letter-spacing:.1em;text-transform:uppercase;color:#9a9ca4;font-weight:600}
+  .provider .v{font-weight:550}
+  .dot{width:6px;height:6px;border-radius:50%;display:inline-block;background:var(--green);box-shadow:0 0 0 3px rgba(147,189,159,.12);flex:0 0 auto}
+  .dot.hosted{background:#b3bfd2;box-shadow:0 0 0 3px rgba(179,191,210,.12)}
+  .storage-line{display:flex;align-items:center;gap:7px;font-size:10px;color:#9698a0;white-space:nowrap}
+  .storage-line .icon{width:13px;height:13px;color:#8e9098}
+
+  /* Left rail */
+  .rail{
+    grid-area:rail;display:flex;flex-direction:column;gap:16px;
+    padding:15px 14px 13px;background:#17181d;border-right:1px solid var(--line-soft);
+    min-height:0;overflow:hidden;
+  }
+  .rail-section{display:flex;flex-direction:column;min-height:0}
+  .rail-section + .rail-section{border-top:1px solid #23252b;padding-top:14px}
+  .rail-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+  .rail-title{margin:0;font-size:9.5px;font-weight:650;letter-spacing:.16em;text-transform:uppercase;color:#a3a5ad}
+  .rail-count{font-family:var(--mono);font-size:9.5px;line-height:1;color:#8b8d95}
+  .rail-link{font-size:9.5px;color:#b6b7be;padding:2px 4px;border-radius:3px}
+  .rail-link:hover{color:#e4e1da;background:#22242b}
+  .library{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+  .lib-item{
+    display:flex;align-items:center;gap:9px;width:100%;padding:5px 6px;
+    border:1px solid transparent;border-radius:6px;text-align:left;
+  }
+  .lib-item:hover{background:#1e2026;border-color:#2a2c34}
+  .lib-thumb{
+    width:38px;height:38px;flex:0 0 38px;border-radius:5px;overflow:hidden;
+    border:1px solid #2b2d34;background:#101114;
+  }
+  .lib-thumb svg{display:block;width:100%;height:100%}
+  .lib-copy{min-width:0;display:flex;flex-direction:column;gap:1px}
+  .lib-name{font-size:11px;color:#dad8d3;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.35}
+  .lib-meta{font-family:var(--mono);font-size:8.5px;line-height:1.35;color:#8f9199;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .batch-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+  .batch-row{
+    display:grid;grid-template-columns:17px minmax(0,1fr) auto;align-items:center;gap:7px;
+    padding:6px 7px;border:1px solid #24262d;border-radius:5px;background:#1a1b20;
+  }
+  .batch-num{font-family:var(--mono);font-size:8.5px;color:#8e9098}
+  .batch-name{font-size:10px;color:#cfcdc8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .batch-status{font-family:var(--mono);font-size:8px;letter-spacing:.02em;text-align:right;color:#9a9ca4;white-space:nowrap}
+  .batch-row.done .batch-status{color:#9ec4a7}
+  .batch-row.run{border-color:#3d3427;background:#1e1c19}
+  .batch-row.run .batch-status{color:#ddb67e}
+  .batch-row.fail{border-color:#3a2b29}
+  .batch-row.fail .batch-status{color:#db9188}
+  .batch-empty{
+    display:flex;flex-direction:column;align-items:flex-start;gap:4px;
+    border:1px dashed #30323a;border-radius:7px;padding:12px 12px 11px;background:#191a1f;
+  }
+  .batch-empty .icon{width:16px;height:16px;color:#8f9199;margin-bottom:1px}
+  .batch-empty strong{font-size:10.5px;font-weight:550;color:#cbc9c4}
+  .batch-empty span{font-size:9.5px;line-height:1.45;color:#9698a0}
+  .preset-list{display:flex;flex-direction:column;gap:2px}
+  .preset{
+    display:flex;align-items:center;gap:8px;width:100%;padding:7px 6px;
+    border:1px solid transparent;border-radius:5px;text-align:left;
+  }
+  .preset:hover{background:#1e2026;border-color:#2a2c34}
+  .preset-swatch{width:12px;height:12px;border-radius:3px;flex:0 0 12px;border:1px solid rgba(255,255,255,.12)}
+  .preset-swatch.coast{background:linear-gradient(140deg,#2f4652,#c69a68)}
+  .preset-swatch.cinema{background:linear-gradient(140deg,#1d2a33,#a67454)}
+  .preset-swatch.vertical{background:linear-gradient(140deg,#3a3a42,#8e8d7b)}
+  .preset-name{flex:1 1 auto;font-size:10.5px;color:#d4d2cd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .preset-meta{font-family:var(--mono);font-size:8px;color:#8d8f97;white-space:nowrap}
+  .rail-foot{margin-top:auto;display:flex;flex-direction:column;gap:6px;padding-top:12px;border-top:1px solid #23252b}
+  .disk-line{display:flex;align-items:center;justify-content:space-between;gap:8px;font-family:var(--mono);font-size:8.5px;color:#8f9199}
+  .disk-track{height:4px;border-radius:2px;background:#282a31;overflow:hidden}
+  .disk-fill{width:35%;height:100%;border-radius:2px;background:#737783}
+  .rail-note{font-size:9px;line-height:1.4;color:#8f9199}
+
+  /* Canvas column */
+  .canvas{
+    grid-area:canvas;display:flex;flex-direction:column;min-width:0;min-height:0;
+    padding:16px 20px 18px;background:#111216;
+  }
+  .canvas-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex:0 0 auto;margin-bottom:12px}
+  .canvas-title{font-size:12.5px;font-weight:600;letter-spacing:.01em;color:#e8e6e0;line-height:1.25}
+  .canvas-sub{margin-top:4px;font-size:9.5px;line-height:1.4;color:#9698a0}
+  .canvas-sub .mono{color:#c6a674;font-size:9px}
+  .canvas-meta{font-family:var(--mono);font-size:9px;color:#9a9ca4;white-space:nowrap;padding-top:2px}
+  .status-summary{display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:9px;color:#a8aab1;white-space:nowrap;padding-top:3px}
+  .status-summary .item{display:flex;align-items:center;gap:5px}
+  .sum-dot{width:5px;height:5px;border-radius:50%;display:inline-block;flex:0 0 auto}
+  .sum-dot.ok{background:var(--green)}
+  .sum-dot.run{background:#d8b078}
+  .sum-dot.err{background:var(--red)}
+
+  .stage{
+    position:relative;flex:1 1 auto;min-height:0;overflow:hidden;
+    border:1px solid #272932;border-radius:10px;background:#0b0c0f;
+  }
+  .stage-empty{
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:17px;
+    background:radial-gradient(120% 90% at 50% 0%,#181a20 0%,#101115 58%,#0b0c0f 100%);
+  }
+  .stage-results{
+    display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:8px;padding:8px;
+    background:#0a0b0e;
+  }
+  .ghost{
+    position:relative;width:480px;height:360px;border:1px dashed #363943;border-radius:8px;
+    background:linear-gradient(165deg,rgba(255,255,255,.03),rgba(255,255,255,.006));
+    display:grid;place-items:center;
+  }
+  .ghost-tag{
+    position:absolute;top:10px;left:12px;font-family:var(--mono);font-size:8px;
+    letter-spacing:.1em;text-transform:uppercase;color:#81838c;
+  }
+  .ghost-inner{width:356px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:9px}
+  .ghost-icon{
+    width:40px;height:40px;border-radius:50%;border:1px solid #373a43;
+    background:#191b20;display:grid;place-items:center;color:#bea57d;margin-bottom:2px;
+  }
+  .ghost-icon .icon{width:18px;height:18px}
+  .ghost-title{font-size:16px;font-weight:600;letter-spacing:-.005em;color:#e3e0d9}
+  .ghost-copy{margin:0;font-size:10.5px;line-height:1.55;color:#a2a4ac}
+  .empty-steps{display:flex;align-items:center;gap:8px;margin-top:4px;font-size:9px;color:#9b9da5}
+  .empty-steps .n{font-family:var(--mono);font-size:8px;color:#c9ad7e;margin-right:3px}
+  .empty-steps .pin{color:#555862}
+
+  .schedule{
+    width:604px;border:1px solid #282a33;border-radius:8px;background:#15161b;
+    padding:10px 12px 11px;flex:0 0 auto;
+  }
+  .schedule-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
+  .schedule-title{font-size:8px;font-weight:650;letter-spacing:.15em;text-transform:uppercase;color:#9d9fa7}
+  .schedule-time{font-family:var(--mono);font-size:9px;color:#a8aab1}
+  .schedule-time .idle{color:#7f818a}
+  .steps{display:grid;grid-template-columns:repeat(6,1fr);gap:7px}
+  .step{display:flex;flex-direction:column;gap:4px;min-width:0}
+  .step-bar{height:3px;border-radius:2px;background:#2c2e36;display:block}
+  .step-name{font-family:var(--mono);font-size:8.5px;line-height:1;color:#8f9199;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  /* Result tiles */
+  .tile{
+    position:relative;min-width:0;min-height:0;overflow:hidden;border-radius:6px;
+    background:#0e0f12;border:1px solid #25272f;
+  }
+  .tile .art{display:block;width:100%;height:100%}
+  .tile-index{
+    position:absolute;top:8px;left:8px;z-index:2;font-family:var(--mono);font-size:8px;line-height:1;
+    color:#dedbd4;background:rgba(10,11,14,.86);border:1px solid rgba(255,255,255,.12);
+    border-radius:4px;padding:4px 6px;
+  }
+  .tile-state{
+    position:absolute;top:8px;right:8px;z-index:2;display:inline-flex;align-items:center;gap:4px;
+    font-family:var(--mono);font-size:8px;line-height:1;color:#b8bac1;
+    background:rgba(10,11,14,.88);border:1px solid #34363e;border-radius:4px;padding:4px 6px;
+  }
+  .tile-state.ok{color:#b2cfb9;border-color:#35463a}
+  .tile-state.run{color:#e3bd85;border-color:#4b3c2a}
+  .tile-state.err{color:#e4a097;border-color:#4d3230}
+  .tile-meta{
+    position:absolute;left:0;right:0;bottom:0;z-index:2;display:flex;align-items:flex-end;justify-content:space-between;gap:10px;
+    padding:26px 10px 8px;background:linear-gradient(180deg,rgba(5,6,8,0),rgba(5,6,8,.74));
+    font-family:var(--mono);font-size:8.5px;color:#dedbd5;
+  }
+  .tile.sampling .art{filter:blur(9px) saturate(.6) brightness(.56);transform:scale(1.09)}
+  .tile-veil{position:absolute;inset:0;background:linear-gradient(180deg,rgba(8,9,12,.14),rgba(8,9,12,.36) 44%,rgba(8,9,12,.93) 100%)}
+  .sampling-body{position:absolute;left:12px;right:12px;bottom:11px;z-index:2;display:flex;flex-direction:column;gap:6px}
+  .sampling-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .sampling-kicker{font-family:var(--mono);font-size:8px;letter-spacing:.09em;text-transform:uppercase;color:#d0bd99}
+  .sampling-elapsed{font-family:var(--mono);font-size:8.5px;color:#d1d0cc}
+  .sampling-step{font-size:12.5px;font-weight:600;color:#f0eee8;line-height:1.2}
+  .sampling-bar{display:grid;grid-template-columns:repeat(6,1fr);gap:4px;margin-top:1px}
+  .seg{height:4px;border-radius:2px;background:#353740;display:block}
+  .seg.fill{background:#b18b58}
+  .seg.half{background:linear-gradient(90deg,#b18b58 0 50%,#353740 50% 100%)}
+  .sampling-names{display:grid;grid-template-columns:repeat(6,1fr);gap:4px;font-family:var(--mono);font-size:8px;line-height:1;color:#a3a5ad}
+  .sampling-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;font-family:var(--mono);font-size:8px;color:#adabb1;margin-top:2px}
+  .tile.failed{
+    display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:8px;padding:22px;
+    background:repeating-linear-gradient(135deg,#141418 0,#141418 11px,#171419 11px,#171419 22px);
+    border-color:#432e2c;
+  }
+  .fail-icon{width:30px;height:30px;border-radius:50%;border:1px solid #5a3733;background:#201616;color:#dd9187;display:grid;place-items:center}
+  .fail-title{font-size:12.5px;font-weight:600;color:#efebe4;line-height:1.2}
+  .fail-msg{margin:0;max-width:280px;font-size:10px;line-height:1.5;color:#c6a9a4}
+  .retry{
+    display:inline-flex;align-items:center;gap:6px;margin-top:2px;
+    font-size:9.5px;color:#e4ddd5;background:#1d1919;border:1px solid #4c3a37;
+    border-radius:5px;padding:6px 10px;
+  }
+  .retry:hover{background:#262020;border-color:#5e4641}
+
+  /* Revised prompt */
+  .revised{
+    flex:0 0 auto;margin-top:12px;padding:9px 12px 10px;
+    border:1px solid #282a33;border-radius:8px;background:#16171c;
+    display:flex;flex-direction:column;gap:5px;
+  }
+  .revised-head{display:flex;align-items:center;gap:8px;min-width:0}
+  .revised-title{font-size:8px;font-weight:650;letter-spacing:.15em;text-transform:uppercase;color:#9d9fa7;white-space:nowrap}
+  .badge-enh{
+    font-family:var(--mono);font-size:7.5px;line-height:1;color:#d8b37c;
+    border:1px solid rgba(216,179,124,.34);background:rgba(216,179,124,.06);
+    border-radius:3px;padding:3px 5px;letter-spacing:.05em;white-space:nowrap;
+  }
+  .revised-actions{margin-left:auto;display:flex;align-items:center;gap:2px}
+  .ghost-btn{font-size:9px;color:#a6a8b0;padding:3px 7px;border:1px solid transparent;border-radius:4px}
+  .ghost-btn:hover{color:#e9e6df;background:#1f2027;border-color:#30323a}
+  .revised-text{
+    margin:0;font-size:10.5px;line-height:1.45;color:#c7c6c8;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+  }
+
+  /* Right inspector */
+  .inspector{
+    grid-area:inspector;display:flex;flex-direction:column;min-height:0;overflow:hidden;
+    background:#17181d;border-left:1px solid var(--line-soft);
+  }
+  .insp-head{
+    flex:0 0 48px;display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:0 14px 0 16px;border-bottom:1px solid #23252b;
+  }
+  .insp-title{margin:0;font-size:9.5px;font-weight:650;letter-spacing:.16em;text-transform:uppercase;color:#a3a5ad}
+  .icon-btn{
+    width:26px;height:26px;display:grid;place-items:center;color:#9b9da5;
+    background:#1b1c22;border:1px solid #2e3038;border-radius:5px;
+  }
+  .icon-btn:hover{color:#e8e5df;border-color:#3b3d46}
+  .insp-body{padding:2px 16px 12px;min-height:0;overflow:hidden}
+  .group{border:0;border-bottom:1px solid #23252b;margin:0;padding:13px 0 14px;min-width:0}
+  .group:last-child{border-bottom:0}
+  legend{
+    display:block;width:100%;margin:0 0 8px;padding:0;border:0;
+    font-size:9px;font-weight:650;letter-spacing:.14em;text-transform:uppercase;color:#a3a5ad;
+  }
+  .sub-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+  .sub-title{margin:0;font-size:9px;font-weight:650;letter-spacing:.14em;text-transform:uppercase;color:#a3a5ad}
+  .ratio-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}
+  .res-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+  .count-grid{display:grid;grid-template-columns:repeat(10,1fr);gap:3px}
+  .sr-radio{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+  .ratio-opt,.res-opt{
+    display:flex;flex-direction:column;justify-content:center;gap:2px;min-height:42px;
+    padding:6px 8px;background:#1b1c22;border:1px solid #2c2e36;border-radius:5px;
+    cursor:pointer;text-align:left;min-width:0;
+  }
+  .ratio-opt:hover,.res-opt:hover{border-color:#3a3c45;background:#1e2026}
+  .ratio-opt .r{font-size:10.5px;font-weight:550;color:#cfcdc7;line-height:1.2}
+  .ratio-opt .s{font-family:var(--mono);font-size:7.5px;color:#898b93;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .res-opt .r{font-size:10.5px;font-weight:550;color:#cfcdc7;line-height:1.2}
+  .res-opt .s{font-family:var(--mono);font-size:7.5px;color:#898b93;line-height:1.2;white-space:nowrap}
+  .res-opt{min-height:44px}
+  .ratio-grid .sr-radio:checked + .ratio-opt,
+  .res-grid .sr-radio:checked + .res-opt{
+    background:rgba(211,168,106,.09);
+    border-color:rgba(211,168,106,.58);
+    box-shadow:inset 0 0 0 1px rgba(211,168,106,.12);
+  }
+  .ratio-grid .sr-radio:checked + .ratio-opt .r,
+  .res-grid .sr-radio:checked + .res-opt .r{color:#e9c894}
+  .ratio-grid .sr-radio:checked + .ratio-opt .s,
+  .res-grid .sr-radio:checked + .res-opt .s{color:#bda67f}
+  .ratio-grid .sr-radio:focus-visible + .ratio-opt,
+  .res-grid .sr-radio:focus-visible + .res-opt,
+  .count-grid .sr-radio:focus-visible + .count-opt{outline:2px solid var(--accent-strong);outline-offset:2px}
+  .hint{margin:7px 0 0;font-size:9px;line-height:1.45;color:#9698a0}
+  .count-opt{
+    height:28px;display:grid;place-items:center;background:#1b1c22;border:1px solid #2c2e36;
+    border-radius:4px;font-family:var(--mono);font-size:9.5px;color:#b9bbc2;cursor:pointer;
+  }
+  .count-opt:hover{border-color:#3a3c45;background:#1e2026}
+  .count-grid .sr-radio:checked + .count-opt{
+    background:linear-gradient(180deg,#dcb67d,#cca067);
+    border-color:#d4a96d;color:#1c1509;font-weight:650;
+  }
+  .ref-row{display:flex;align-items:center;gap:6px}
+  .ref-count{font-family:var(--mono);font-size:8.5px;color:#a5a7af;white-space:nowrap}
+  .ref-thumb{
+    width:62px;height:62px;position:relative;flex:0 0 62px;overflow:hidden;
+    border-radius:5px;border:1px solid #3b3d46;background:#101114;
+  }
+  .ref-thumb svg{display:block;width:100%;height:100%}
+  .ref-tag{
+    position:absolute;left:3px;bottom:3px;font-family:var(--mono);font-size:7px;line-height:1;
+    color:#e4e0d8;background:rgba(10,11,14,.9);border:1px solid #34363e;border-radius:3px;padding:2px 3px;
+  }
+  .ref-x{
+    position:absolute;top:3px;right:3px;width:14px;height:14px;border-radius:50%;
+    background:rgba(10,11,14,.9);border:1px solid #34363e;color:#bcbdc4;
+    display:grid;place-items:center;font-size:8px;line-height:1;
+  }
+  .ref-x:hover{color:#fff;border-color:#54565f}
+  .ref-add{
+    width:62px;height:62px;flex:0 0 62px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+    border:1px dashed #3b3e47;border-radius:5px;background:#191a20;color:#a6a8b0;
+  }
+  .ref-add:hover{border-color:#65553f;color:#d9b47c;background:#1c1d22}
+  .ref-add span{font-family:var(--mono);font-size:7px;line-height:1;letter-spacing:.04em}
+  .ref-note{margin:8px 0 0;font-size:9px;line-height:1.45;color:#9698a0}
+  .model-badge{
+    font-family:var(--mono);font-size:7px;line-height:1;color:#aebdc6;
+    border:1px solid #333d43;border-radius:3px;padding:3px 5px;white-space:nowrap;
+  }
+  .model-name{font-size:10.5px;font-weight:550;color:#d9d6d0;margin:1px 0 7px}
+  .model-list{display:grid;grid-template-columns:1fr auto;gap:4px 10px;margin:0}
+  .model-list dt{font-size:9px;color:#9698a0}
+  .model-list dd{margin:0;font-family:var(--mono);font-size:8.5px;color:#cbcac4;text-align:right;white-space:nowrap}
+
+  /* Command bar */
+  .command{
+    grid-area:command;display:flex;align-items:center;gap:18px;min-width:0;
+    padding:0 18px 0 20px;background:#16171c;border-top:1px solid var(--line);
+  }
+  .composer{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:5px}
+  .composer-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .composer-label{font-size:9px;font-weight:650;letter-spacing:.15em;text-transform:uppercase;color:#a3a5ad;cursor:pointer}
+  .composer-note{font-family:var(--mono);font-size:8px;color:#9698a0;white-space:nowrap}
+  .prompt{
+    display:block;width:100%;height:48px;padding:8px 10px;resize:none;overflow:hidden;
+    color:#e7e5df;background:#1b1c22;border:1px solid #2f3139;border-radius:6px;
+    font-family:var(--font);font-size:11.5px;line-height:1.4;
+  }
+  .prompt:hover{border-color:#3b3d46}
+  .prompt:focus-visible{outline:none;border-color:#c9a26a;box-shadow:0 0 0 2px rgba(211,168,106,.24)}
+  .request{flex:0 0 250px;display:flex;flex-direction:column;gap:4px}
+  .request-row{display:flex;align-items:baseline;justify-content:space-between;gap:10px;white-space:nowrap}
+  .request-k{font-family:var(--mono);font-size:8px;letter-spacing:.02em;color:#8f9199}
+  .request-v{font-family:var(--mono);font-size:8.5px;color:#ceccc6;text-align:right}
+  .primary{
+    flex:0 0 216px;height:60px;display:flex;align-items:center;gap:10px;padding:0 14px;
+    border-radius:7px;border:1px solid #e0bb81;color:var(--accent-ink);
+    background:linear-gradient(180deg,#dcb57c,#ca9d60);
+    text-align:left;
+  }
+  .primary .icon{width:18px;height:18px}
+  .primary:hover{background:linear-gradient(180deg,#e6c38c,#d3a76a)}
+  .primary:focus{outline:3px solid #f3d09b;outline-offset:3px;box-shadow:0 0 0 7px rgba(243,208,155,.12)}
+  .primary-title{display:block;font-size:12.5px;line-height:1.2;font-weight:650}
+  .primary-sub{display:block;margin-top:2px;font-family:var(--mono);font-size:9px;line-height:1.35;color:#3d2f19;white-space:nowrap}
+</style>
+</head>
+<body>
+
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-aperture" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="8.5"/>
+    <path d="M12 3.5l4.4 7.6M20.5 12h-8.8M16.4 20.5l-4.4-7.6M7.6 20.5l4.4-7.6M3.5 12h8.8M7.6 3.5l4.4 7.6"/>
+  </symbol>
+  <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="M14.5 6.5L9 12l5.5 5.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5.5v13M5.5 12h13"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.2 4.2L19 7"/></symbol>
+  <symbol id="i-retry" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.5l8 14H4z"/><path d="M12 9.5v4"/><circle cx="12" cy="16.2" r=".7" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-generate" viewBox="0 0 24 24"><path d="M12 3.5l2.1 6.4 6.4 2.1-6.4 2.1L12 20.5l-2.1-6.4L3.5 12l6.4-2.1z"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.4"/><path d="M4.5 17.5l5-5 4 4 2.5-2.5 3.5 3.5"/></symbol>
+  <symbol id="i-storage" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="6" rx="2"/><rect x="4" y="13" width="16" height="6" rx="2"/><path d="M7.5 8h.01M7.5 16h.01"/></symbol>
+
+  <symbol id="scene-coast" viewBox="0 0 600 400">
+    <defs>
+      <linearGradient id="cSky" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#0e1923"/><stop offset=".42" stop-color="#243846"/>
+        <stop offset=".68" stop-color="#56666c"/><stop offset=".83" stop-color="#9b8267"/>
+        <stop offset="1" stop-color="#c99b6c"/>
+      </linearGradient>
+      <linearGradient id="cSea" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#667370"/><stop offset=".22" stop-color="#34474e"/>
+        <stop offset="1" stop-color="#0d151a"/>
+      </linearGradient>
+      <radialGradient id="cGlow" cx=".5" cy=".5" r=".5">
+        <stop offset="0" stop-color="#f3c78c" stop-opacity=".52"/>
+        <stop offset="1" stop-color="#f3c78c" stop-opacity="0"/>
+      </radialGradient>
+      <linearGradient id="cRock" x1="0" y1="0" x2=".8" y2="1">
+        <stop offset="0" stop-color="#242727"/><stop offset=".55" stop-color="#14181a"/>
+        <stop offset="1" stop-color="#090c0e"/>
+      </linearGradient>
+      <linearGradient id="cBeam" x1="1" y1="0" x2="0" y2="0">
+        <stop offset="0" stop-color="#f7d9a1" stop-opacity=".22"/>
+        <stop offset="1" stop-color="#f7d9a1" stop-opacity="0"/>
+      </linearGradient>
+      <radialGradient id="cVig" cx=".5" cy=".47" r=".76">
+        <stop offset=".52" stop-color="#000" stop-opacity="0"/>
+        <stop offset="1" stop-color="#000" stop-opacity=".44"/>
+      </radialGradient>
+      <filter id="cSoft" x="-25%" y="-25%" width="150%" height="150%"><feGaussianBlur stdDeviation="10"/></filter>
+    </defs>
+    <rect width="600" height="400" fill="url(#cSky)"/>
+    <g filter="url(#cSoft)" opacity=".55">
+      <ellipse cx="168" cy="96" rx="150" ry="16" fill="#8798a3" opacity=".18"/>
+      <ellipse cx="430" cy="62" rx="118" ry="12" fill="#9aa7ae" opacity=".12"/>
+      <ellipse cx="326" cy="142" rx="180" ry="10" fill="#b0a596" opacity=".1"/>
+    </g>
+    <ellipse cx="402" cy="258" rx="205" ry="112" fill="url(#cGlow)"/>
+    <circle cx="402" cy="240" r="11" fill="#f2cd94" opacity=".88"/>
+    <rect y="252" width="600" height="148" fill="url(#cSea)"/>
+    <g stroke="#d4d9d2" stroke-width="1" opacity=".2">
+      <path d="M0 274h190"/><path d="M240 288h170"/><path d="M60 306h210"/>
+      <path d="M330 320h230"/><path d="M430 338h150"/><path d="M120 350h190"/>
+    </g>
+    <path d="M0 400V338l54-20 52 24 44-12 58 30 42-14 38 34 32 20z" fill="#0b0f12"/>
+    <path d="M362 400l10-64 22-34 6-42 26-8 18 28 14 4 9 42 20 26 12 48z" fill="url(#cRock)"/>
+    <g>
+      <path d="M448 170h30l-4 74h-22z" fill="#ddd7c9"/>
+      <path d="M450 190h26" stroke="#7a4438" stroke-width="7"/>
+      <path d="M452 218h22" stroke="#7a4438" stroke-width="6"/>
+      <rect x="452" y="158" width="22" height="12" fill="#22282c"/>
+      <rect x="455" y="162" width="16" height="6" fill="#f3d39a"/>
+      <path d="M450 158l13-14 13 14z" fill="#8c4a3b"/>
+      <path d="M455 162L300 130v40l155-4z" fill="url(#cBeam)"/>
+      <path d="M475 162l90-24v34l-90-6z" fill="url(#cBeam)" opacity=".7"/>
+    </g>
+    <g>
+      <path d="M480 300h56v42h-56z" fill="#272a29"/>
+      <path d="M472 302l36-24 36 24z" fill="#38312c"/>
+      <rect x="494" y="314" width="11" height="12" fill="#e0a965" opacity=".9"/>
+      <rect x="514" y="314" width="11" height="12" fill="#e0a965" opacity=".45"/>
+      <path d="M500 300v-16h8v16" fill="#1e2222"/>
+    </g>
+    <rect x="0" y="240" width="600" height="30" fill="#b7c3c2" opacity=".06"/>
+    <rect width="600" height="400" fill="url(#cVig)"/>
+  </symbol>
+
+  <symbol id="scene-dawn" viewBox="0 0 600 400">
+    <defs>
+      <linearGradient id="dSky" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#19202b"/><stop offset=".45" stop-color="#4b4450"/>
+        <stop offset=".72" stop-color="#996f60"/><stop offset="1" stop-color="#d8a577"/>
+      </linearGradient>
+      <linearGradient id="dSea" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#837267"/><stop offset=".24" stop-color="#3f4348"/>
+        <stop offset="1" stop-color="#10191d"/>
+      </linearGradient>
+      <radialGradient id="dGlow" cx=".5" cy=".5" r=".5">
+        <stop offset="0" stop-color="#f7d6a0" stop-opacity=".55"/>
+        <stop offset="1" stop-color="#f7d6a0" stop-opacity="0"/>
+      </radialGradient>
+      <linearGradient id="dRock" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#292828"/><stop offset=".6" stop-color="#16191a"/>
+        <stop offset="1" stop-color="#090c0d"/>
+      </linearGradient>
+      <radialGradient id="dVig" cx=".5" cy=".47" r=".78">
+        <stop offset=".5" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".45"/>
+      </radialGradient>
+      <filter id="dSoft" x="-25%" y="-25%" width="150%" height="150%"><feGaussianBlur stdDeviation="9"/></filter>
+    </defs>
+    <rect width="600" height="400" fill="url(#dSky)"/>
+    <g filter="url(#dSoft)" opacity=".55">
+      <ellipse cx="188" cy="86" rx="164" ry="13" fill="#c3a79b" opacity=".18"/>
+      <ellipse cx="420" cy="132" rx="150" ry="11" fill="#d4b39c" opacity=".16"/>
+    </g>
+    <ellipse cx="445" cy="255" rx="230" ry="120" fill="url(#dGlow)"/>
+    <circle cx="445" cy="246" r="18" fill="#f4ce9c" opacity=".9"/>
+    <rect y="258" width="600" height="142" fill="url(#dSea)"/>
+    <g stroke="#e2d3c1" stroke-width="1" opacity=".22">
+      <path d="M0 280h170"/><path d="M215 296h150"/><path d="M40 314h220"/>
+      <path d="M320 330h210"/><path d="M400 350h200"/>
+    </g>
+    <path d="M0 400V232l46-12 34 28 44 2 30 26 34 18 26 42 18 64z" fill="url(#dRock)"/>
+    <g>
+      <path d="M108 162h26l-4 72h-18z" fill="#d8d2c4"/>
+      <path d="M110 182h22" stroke="#77453a" stroke-width="6"/>
+      <path d="M112 210h18" stroke="#77453a" stroke-width="5"/>
+      <rect x="110" y="150" width="22" height="12" fill="#24282a"/>
+      <rect x="113" y="154" width="16" height="6" fill="#f4d79f"/>
+      <path d="M108 150l13-13 13 13z" fill="#84493c"/>
+      <path d="M130 154l150-26v36l-150-4z" fill="#f6dba5" opacity=".14"/>
+    </g>
+    <g>
+      <path d="M62 248h50v34H62z" fill="#2a2a28"/>
+      <path d="M55 250l32-20 32 20z" fill="#3a322b"/>
+      <rect x="78" y="260" width="9" height="10" fill="#e5b16e" opacity=".85"/>
+    </g>
+    <g stroke="#1a2025" stroke-width="1.5" fill="none" opacity=".7">
+      <path d="M330 118l10-6 10 6M356 106l8-5 8 5M302 140l8-4 8 4"/>
+    </g>
+    <rect x="0" y="244" width="600" height="26" fill="#d7c0ad" opacity=".06"/>
+    <rect width="600" height="400" fill="url(#dVig)"/>
+  </symbol>
+
+  <symbol id="scene-fog" viewBox="0 0 600 400">
+    <defs>
+      <linearGradient id="fSky" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#2c3a3d"/><stop offset=".55" stop-color="#657675"/>
+        <stop offset="1" stop-color="#9da5a0"/>
+      </linearGradient>
+      <linearGradient id="fSea" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#7c8885"/><stop offset=".35" stop-color="#465656"/>
+        <stop offset="1" stop-color="#1a2629"/>
+      </linearGradient>
+      <radialGradient id="fVig" cx=".5" cy=".45" r=".8">
+        <stop offset=".5" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".38"/>
+      </radialGradient>
+      <filter id="fSoft" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="14"/></filter>
+    </defs>
+    <rect width="600" height="400" fill="url(#fSky)"/>
+    <g filter="url(#fSoft)" opacity=".7">
+      <ellipse cx="220" cy="206" rx="280" ry="36" fill="#d3d5cd" opacity=".18"/>
+      <ellipse cx="430" cy="165" rx="250" ry="26" fill="#d8d9d0" opacity=".14"/>
+      <ellipse cx="130" cy="118" rx="220" ry="22" fill="#c9cec7" opacity=".1"/>
+    </g>
+    <rect y="258" width="600" height="142" fill="url(#fSea)"/>
+    <g stroke="#c9cbc2" stroke-width="1" opacity=".14">
+      <path d="M0 280h220"/><path d="M330 294h270"/><path d="M40 320h230"/><path d="M380 340h220"/>
+    </g>
+    <path d="M210 400l58-138h48l54 138z" fill="#20282a"/>
+    <g stroke="#0f1618" stroke-width="2" opacity=".8">
+      <path d="M248 282h88M244 300h96M238 320h106M232 342h116M226 364h128M220 386h140"/>
+    </g>
+    <g fill="#141d1f">
+      <path d="M268 400V286h9v114z"/><path d="M306 400V276h8v124z"/><path d="M340 400V292h9v108z"/>
+    </g>
+    <g>
+      <path d="M330 252v-52" stroke="#1a2223" stroke-width="3"/>
+      <circle cx="330" cy="196" r="4" fill="#f0c98e"/>
+      <circle cx="330" cy="196" r="14" fill="#f0c98e" opacity=".12"/>
+    </g>
+    <g stroke="#20292a" stroke-width="2" fill="none" opacity=".8">
+      <path d="M90 250l8-6 8 6M120 238l7-5 7 5M470 252l8-6 8 6"/>
+    </g>
+    <rect width="600" height="400" fill="url(#fVig)"/>
+  </symbol>
+
+  <symbol id="scene-ridge" viewBox="0 0 600 400">
+    <defs>
+      <linearGradient id="rSky" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#202b34"/><stop offset=".5" stop-color="#5a6a6b"/>
+        <stop offset="1" stop-color="#a89d88"/>
+      </linearGradient>
+      <linearGradient id="rFar" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#4c5b5b"/><stop offset="1" stop-color="#2b3739"/>
+      </linearGradient>
+      <linearGradient id="rMid" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#394749"/><stop offset="1" stop-color="#202d2f"/>
+      </linearGradient>
+      <linearGradient id="rNear" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#202a2b"/><stop offset="1" stop-color="#0d1415"/>
+      </linearGradient>
+      <radialGradient id="rGlow" cx=".5" cy=".5" r=".5">
+        <stop offset="0" stop-color="#f1d5a4" stop-opacity=".5"/><stop offset="1" stop-color="#f1d5a4" stop-opacity="0"/>
+      </radialGradient>
+      <radialGradient id="rVig" cx=".5" cy=".45" r=".8">
+        <stop offset=".5" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".4"/>
+      </radialGradient>
+      <filter id="rSoft" x="-25%" y="-25%" width="150%" height="150%"><feGaussianBlur stdDeviation="10"/></filter>
+    </defs>
+    <rect width="600" height="400" fill="url(#rSky)"/>
+    <circle cx="442" cy="116" r="20" fill="#f2d7a7" opacity=".8"/>
+    <ellipse cx="442" cy="120" rx="140" ry="80" fill="url(#rGlow)"/>
+    <g filter="url(#rSoft)" opacity=".6">
+      <ellipse cx="200" cy="152" rx="160" ry="14" fill="#c2c0af" opacity=".16"/>
+      <ellipse cx="440" cy="92" rx="130" ry="10" fill="#e2cfad" opacity=".14"/>
+    </g>
+    <path d="M0 276l84-88 58 42 72-86 68 76 54-46 86 82 50-44 78 74 50-24v138H0z" fill="url(#rFar)" opacity=".8"/>
+    <path d="M0 320l92-68 70 40 74-54 70 58 58-38 84 54 54-26 98 44v70H0z" fill="url(#rMid)"/>
+    <g opacity=".16" fill="#d9d5c3">
+      <rect x="0" y="306" width="600" height="12"/><rect x="0" y="342" width="600" height="8"/>
+    </g>
+    <path d="M0 400v-64l74-30 82 18 64-26 82 32 68-14 80 24 70-10 80 28v42z" fill="url(#rNear)"/>
+    <g fill="#1c2526">
+      <path d="M252 346l10-30 7 30zM274 350l12-38 9 38zM300 348l8-24 7 24z"/>
+    </g>
+    <g stroke="#182021" stroke-width="1.5" fill="none" opacity=".7">
+      <path d="M120 170l9-5 9 5M150 158l7-4 7 4M470 190l8-5 8 5"/>
+    </g>
+    <rect width="600" height="400" fill="url(#rVig)"/>
+  </symbol>
+
+  <symbol id="scene-ref" viewBox="0 0 600 400">
+    <defs>
+      <linearGradient id="refSky" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#586c72"/><stop offset=".58" stop-color="#98a197"/>
+        <stop offset="1" stop-color="#c6b292"/>
+      </linearGradient>
+      <linearGradient id="refSea" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#7d8b87"/><stop offset="1" stop-color="#39494a"/>
+      </linearGradient>
+      <linearGradient id="refStone" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#8a8173"/><stop offset="1" stop-color="#5d5a51"/>
+      </linearGradient>
+      <linearGradient id="refRoof" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#4b4640"/><stop offset="1" stop-color="#2e2c29"/>
+      </linearGradient>
+      <radialGradient id="refVig" cx=".5" cy=".46" r=".8">
+        <stop offset=".5" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".34"/>
+      </radialGradient>
+      <filter id="refSoft" x="-25%" y="-25%" width="150%" height="150%"><feGaussianBlur stdDeviation="8"/></filter>
+    </defs>
+    <rect width="600" height="400" fill="url(#refSky)"/>
+    <g filter="url(#refSoft)" opacity=".6">
+      <ellipse cx="160" cy="76" rx="150" ry="14" fill="#d3d7cd" opacity=".14"/>
+      <ellipse cx="440" cy="112" rx="130" ry="11" fill="#e0d8c6" opacity=".12"/>
+    </g>
+    <rect y="252" width="600" height="148" fill="url(#refSea)"/>
+    <g stroke="#d8ddd2" stroke-width="1" opacity=".18">
+      <path d="M0 272h180"/><path d="M300 286h240"/><path d="M60 304h230"/><path d="M380 322h220"/>
+    </g>
+    <path d="M0 400V286l62-18 58 22 58-12 72 26 64-14 86 22 68-12 82 20 50-8v88z" fill="#3a3a34"/>
+    <g>
+      <rect x="178" y="168" width="232" height="126" fill="url(#refStone)"/>
+      <path d="M156 174l138-88 140 88z" fill="url(#refRoof)"/>
+      <rect x="270" y="66" width="26" height="48" fill="#6c5f51"/>
+      <rect x="265" y="58" width="36" height="12" fill="#4a4038"/>
+      <rect x="212" y="208" width="34" height="50" fill="#3c3128"/>
+      <rect x="220" y="216" width="18" height="34" fill="#e0ae6c" opacity=".85"/>
+      <rect x="326" y="200" width="42" height="42" fill="#2f2c28"/>
+      <rect x="333" y="207" width="28" height="28" fill="#e7bb7b" opacity=".9"/>
+      <path d="M333 221h28M347 207v28" stroke="#4e4030" stroke-width="2" opacity=".8"/>
+      <path d="M178 230h232M178 262h232" stroke="#5e574c" stroke-width="1" opacity=".4"/>
+      <g stroke="#6d665b" stroke-width="1" opacity=".45">
+        <path d="M206 192h18M232 192h24M264 192h20M292 192h26M326 192h30M360 192h22M388 192h12"/>
+        <path d="M198 288h30M238 288h22M270 288h30M310 288h20M344 288h36"/>
+      </g>
+      <path d="M156 294l-16 34h304l-20-34z" fill="#31322d"/>
+    </g>
+    <rect x="0" y="238" width="600" height="22" fill="#cfd1c2" opacity=".07"/>
+    <rect width="600" height="400" fill="url(#refVig)"/>
+  </symbol>
+</svg>
+
+<div class="page">
+
+  <!-- ============================ SECTION 1 LABEL ============================ -->
+  <div class="label-row">
+    <span class="label-num">01</span>
+    <span class="label-title">EMPTY STATE</span>
+    <span class="label-meta">Studio Canvas is ready for the first batch</span>
+    <span class="label-rule"></span>
+    <span class="label-size">1440 x 948</span>
+  </div>
+
+  <!-- ============================ SECTION 1: EMPTY ============================ -->
+  <section class="app" aria-label="Studio Canvas, empty state">
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark"><svg class="icon" aria-hidden="true"><use href="#i-aperture"/></svg></span>
+        <span class="brand-name">Studio Canvas</span>
+        <span class="brand-mode">MOCKUP A</span>
+      </div>
+      <div class="crumb">
+        <span class="slash">/</span><span>Library</span><span class="slash">/</span><strong>Untitled batch</strong>
+      </div>
+      <div class="top-right">
+        <div class="provider"><span class="dot"></span><span class="k">Provider:</span><span class="v">local server</span></div>
+        <div class="storage-line"><svg class="icon" aria-hidden="true"><use href="#i-storage"/></svg><span>Local library / 12 saved</span></div>
+      </div>
+    </header>
+
+    <aside class="rail" aria-label="Library, current batch and presets">
+      <div class="rail-section">
+        <div class="rail-head">
+          <h2 class="rail-title">Library</h2>
+          <button class="rail-link" type="button">All 12</button>
+        </div>
+        <ul class="library">
+          <li>
+            <button class="lib-item" type="button">
+              <span class="lib-thumb"><svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-coast"/></svg></span>
+              <span class="lib-copy"><span class="lib-name">Blue hour tower</span><span class="lib-meta">2304 x 1728 / 16 Nov</span></span>
+            </button>
+          </li>
+          <li>
+            <button class="lib-item" type="button">
+              <span class="lib-thumb"><svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-dawn"/></svg></span>
+              <span class="lib-copy"><span class="lib-name">Dawn, same tower</span><span class="lib-meta">2304 x 1728 / 16 Nov</span></span>
+            </button>
+          </li>
+          <li>
+            <button class="lib-item" type="button">
+              <span class="lib-thumb"><svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-fog"/></svg></span>
+              <span class="lib-copy"><span class="lib-name">Fog station</span><span class="lib-meta">4096 x 3072 / 15 Nov</span></span>
+            </button>
+          </li>
+          <li>
+            <button class="lib-item" type="button">
+              <span class="lib-thumb"><svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-ridge"/></svg></span>
+              <span class="lib-copy"><span class="lib-name">Ridge light</span><span class="lib-meta">4736 x 3552 / 14 Nov</span></span>
+            </button>
+          </li>
+          <li>
+            <button class="lib-item" type="button">
+              <span class="lib-thumb"><svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-ref"/></svg></span>
+              <span class="lib-copy"><span class="lib-name">Cottage source</span><span class="lib-meta">2304 x 1728 / 14 Nov</span></span>
+            </button>
+          </li>
+        </ul>
+      </div>
+
+      <div class="rail-section">
+        <div class="rail-head">
+          <h2 class="rail-title">Current batch</h2>
+          <span class="rail-count">0 images</span>
+        </div>
+        <div class="batch-empty">
+          <svg class="icon" aria-hidden="true"><use href="#i-image"/></svg>
+          <strong>No active batch</strong>
+          <span>Write a prompt, then generate to fill batch 04.</span>
+        </div>
+      </div>
+
+      <div class="rail-section">
+        <div class="rail-head">
+          <h2 class="rail-title">Saved presets</h2>
+          <span class="rail-count">3</span>
+        </div>
+        <div class="preset-list">
+          <button class="preset" type="button"><span class="preset-swatch coast"></span><span class="preset-name">Blue hour coast</span><span class="preset-meta">4:3 / 4 MP</span></button>
+          <button class="preset" type="button"><span class="preset-swatch cinema"></span><span class="preset-name">Wide cinema</span><span class="preset-meta">21:9 / 16 MP</span></button>
+          <button class="preset" type="button"><span class="preset-swatch vertical"></span><span class="preset-name">Vertical study</span><span class="preset-meta">9:16 / 4 MP</span></button>
+        </div>
+      </div>
+
+      <div class="rail-foot">
+        <div class="disk-line"><span>Local library</span><span>4.1 GB of 120 GB</span></div>
+        <div class="disk-track"><div class="disk-fill"></div></div>
+        <div class="rail-note">Images are stored on this device when they arrive.</div>
+      </div>
+    </aside>
+
+    <main class="canvas">
+      <div class="canvas-head">
+        <div>
+          <div class="canvas-title">Untitled batch</div>
+          <div class="canvas-sub">No images yet. The canvas is ready for the first render.</div>
+        </div>
+        <div class="canvas-meta">4:3 / 2304 x 1728 / 4 MP</div>
+      </div>
+
+      <div class="stage stage-empty">
+        <div class="ghost">
+          <span class="ghost-tag">4:3 / 2304 x 1728</span>
+          <div class="ghost-inner">
+            <span class="ghost-icon"><svg class="icon" aria-hidden="true"><use href="#i-image"/></svg></span>
+            <div class="ghost-title">The canvas is ready</div>
+            <p class="ghost-copy">Write a prompt in the command bar, check the size in Controls, then generate. Your first batch will appear here.</p>
+            <div class="empty-steps">
+              <span><b class="n">1</b>Write a prompt</span>
+              <span class="pin">/</span>
+              <span><b class="n">2</b>Choose a size</span>
+              <span class="pin">/</span>
+              <span><b class="n">3</b>Generate</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="schedule" role="group" aria-label="Per image progress, not started">
+          <div class="schedule-head">
+            <span class="schedule-title">Per image progress</span>
+            <span class="schedule-time">6 steps, fixed / 00:00 so far <span class="idle">/ not started</span></span>
+          </div>
+          <div class="steps">
+            <div class="step"><span class="step-bar"></span><span class="step-name">1 Init</span></div>
+            <div class="step"><span class="step-bar"></span><span class="step-name">2 Layout</span></div>
+            <div class="step"><span class="step-bar"></span><span class="step-name">3 Structure</span></div>
+            <div class="step"><span class="step-bar"></span><span class="step-name">4 Detail</span></div>
+            <div class="step"><span class="step-bar"></span><span class="step-name">5 Light</span></div>
+            <div class="step"><span class="step-bar"></span><span class="step-name">6 Decode</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="revised">
+        <div class="revised-head">
+          <span class="revised-title">Revised prompt</span>
+          <span class="badge-enh">Enhanced</span>
+          <div class="revised-actions">
+            <button class="ghost-btn" type="button">Copy</button>
+            <button class="ghost-btn" type="button">Use original</button>
+          </div>
+        </div>
+        <p class="revised-text">A weathered stone lighthouse keeper's cottage on a basalt cliff at blue hour. The wet slate roof holds the last amber light while a cold teal sea breaks below, sending fine spray through the air. Shot on 35 mm film with soft grain, deep shadows and a calm cinematic mood.</p>
+      </div>
+    </main>
+
+    <aside class="inspector" aria-label="Generation controls">
+      <div class="insp-head">
+        <h2 class="insp-title">Controls</h2>
+        <button class="icon-btn" type="button" aria-label="Collapse controls panel" title="Collapse controls">
+          <svg class="icon" aria-hidden="true"><use href="#i-chevron-left"/></svg>
+        </button>
+      </div>
+      <div class="insp-body">
+        <fieldset class="group">
+          <legend>Aspect ratio</legend>
+          <div class="ratio-grid">
+            <input class="sr-radio" type="radio" name="aspect-empty" id="aspect-empty-11">
+            <label class="ratio-opt" for="aspect-empty-11"><span class="r">1:1</span><span class="s">Square</span></label>
+            <input class="sr-radio" type="radio" name="aspect-empty" id="aspect-empty-43" checked>
+            <label class="ratio-opt" for="aspect-empty-43"><span class="r">4:3</span><span class="s">Classic</span></label>
+            <input class="sr-radio" type="radio" name="aspect-empty" id="aspect-empty-32">
+            <label class="ratio-opt" for="aspect-empty-32"><span class="r">3:2</span><span class="s">Photo</span></label>
+            <input class="sr-radio" type="radio" name="aspect-empty" id="aspect-empty-169">
+            <label class="ratio-opt" for="aspect-empty-169"><span class="r">16:9</span><span class="s">Wide</span></label>
+            <input class="sr-radio" type="radio" name="aspect-empty" id="aspect-empty-916">
+            <label class="ratio-opt" for="aspect-empty-916"><span class="r">9:16</span><span class="s">Vertical</span></label>
+            <input class="sr-radio" type="radio" name="aspect-empty" id="aspect-empty-219">
+            <label class="ratio-opt" for="aspect-empty-219"><span class="r">21:9</span><span class="s">Cinema</span></label>
+          </div>
+        </fieldset>
+
+        <fieldset class="group">
+          <legend>Resolution</legend>
+          <div class="res-grid">
+            <input class="sr-radio" type="radio" name="res-empty" id="res-empty-4" checked>
+            <label class="res-opt" for="res-empty-4"><span class="r">4 MP</span><span class="s">2304 x 1728</span></label>
+            <input class="sr-radio" type="radio" name="res-empty" id="res-empty-8">
+            <label class="res-opt" for="res-empty-8"><span class="r">8 MP</span><span class="s">3328 x 2496</span></label>
+            <input class="sr-radio" type="radio" name="res-empty" id="res-empty-12">
+            <label class="res-opt" for="res-empty-12"><span class="r">12 MP</span><span class="s">4096 x 3072</span></label>
+            <input class="sr-radio" type="radio" name="res-empty" id="res-empty-16">
+            <label class="res-opt" for="res-empty-16"><span class="r">16 MP</span><span class="s">4736 x 3552</span></label>
+          </div>
+          <p class="hint">Sizes shown for 4:3. Any width and height in multiples of 32 px. 16 MP reaches 4736 x 3552.</p>
+        </fieldset>
+
+        <fieldset class="group">
+          <legend>Batch count</legend>
+          <div class="count-grid">
+            <input class="sr-radio" type="radio" name="count-empty" id="count-empty-1">
+            <label class="count-opt" for="count-empty-1">1</label>
+            <input class="sr-radio" type="radio" name="count-empty" id="count-empty-2">
+            <label class="count-opt" for="count-empty-2">2</label>
+            <input class="sr-radio" type="radio" name="count-empty" id="count-empty-3">
+            <label class="count-opt" for="count-empty-3">3</label>
+            <input class="sr-radio" type="radio" name="count-empty" id="count-empty-4" checked>
+            <label class="count-opt" for="count-empty-4">4</label>
+            <input class="sr-radio" type="radio" name="count-empty" id="count-empty-5">
+            <label class="count-opt" for="count-empty-5">5</label>
+            <input class="sr-radio" type="radio" name="count-empty" id="count-empty-6">
+            <label class="count-opt" for="count-empty-6">6</label>
+            <input class="sr-radio" type="radio" name="count-empty" id="count-empty-7">
+            <label class="count-opt" for="count-empty-7">7</label>
+            <input class="sr-radio" type="radio" name="count-empty" id="count-empty-8">
+            <label class="count-opt" for="count-empty-8">8</label>
+            <input class="sr-radio" type="radio" name="count-empty" id="count-empty-9">
+            <label class="count-opt" for="count-empty-9">9</label>
+            <input class="sr-radio" type="radio" name="count-empty" id="count-empty-10">
+            <label class="count-opt" for="count-empty-10">10</label>
+          </div>
+          <p class="hint">1 to 10 images per request. 4 selected. The provider renders the batch as one synchronous request.</p>
+        </fieldset>
+
+        <div class="group">
+          <div class="sub-head">
+            <h3 class="sub-title">References</h3>
+            <span class="ref-count">0 of 16</span>
+          </div>
+          <div class="ref-row">
+            <button class="ref-add" type="button" aria-label="Add a reference image">
+              <svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>
+              <span>Add</span>
+            </button>
+          </div>
+          <p class="ref-note">Up to 16 reference images. The first picture is the image being edited. Later pictures are addressed as &lt;Picture 2&gt; in the prompt.</p>
+        </div>
+
+        <div class="group">
+          <div class="sub-head">
+            <h3 class="sub-title">Model</h3>
+            <span class="model-badge">Open weights</span>
+          </div>
+          <div class="model-name">MiniMax H3 Image</div>
+          <dl class="model-list">
+            <dt>Sampling</dt><dd>6 steps, fixed</dd>
+            <dt>Guidance</dt><dd>1.0, fixed</dd>
+            <dt>Batch</dt><dd>1 to 10</dd>
+            <dt>References</dt><dd>Up to 16</dd>
+          </dl>
+        </div>
+      </div>
+    </aside>
+
+    <footer class="command">
+      <div class="composer">
+        <div class="composer-head">
+          <label class="composer-label" for="prompt-empty">Prompt</label>
+          <span class="composer-note">Enhancement on / revised prompt above</span>
+        </div>
+        <textarea class="prompt" id="prompt-empty" spellcheck="false">A stone lighthouse cottage on a basalt cliff at blue hour, wet slate roof, sea spray, 35 mm film, muted teal and amber.</textarea>
+      </div>
+      <div class="request" aria-label="Request estimate">
+        <div class="request-row"><span class="request-k">Batch</span><span class="request-v">4 images / 4:3 / 4 MP</span></div>
+        <div class="request-row"><span class="request-k">Estimate</span><span class="request-v">about 3 min 20 s</span></div>
+        <div class="request-row"><span class="request-k">Cost</span><span class="request-v">none, local GPU</span></div>
+      </div>
+      <button class="primary" type="button">
+        <svg class="icon" aria-hidden="true"><use href="#i-generate"/></svg>
+        <span>
+          <span class="primary-title">Generate 4 images</span>
+          <span class="primary-sub">about 3 min 20 s, no API cost</span>
+        </span>
+      </button>
+    </footer>
+  </section>
+
+  <!-- ============================ SECTION 2 LABEL ============================ -->
+  <div class="label-row">
+    <span class="label-num">02</span>
+    <span class="label-title">GENERATING WITH PARTIAL RESULTS</span>
+    <span class="label-meta">Batch 03 on a hosted API, with a mixed outcome</span>
+    <span class="label-rule"></span>
+    <span class="label-size">1440 x 948</span>
+  </div>
+
+  <!-- ============================ SECTION 2: GENERATING ============================ -->
+  <section class="app" aria-label="Studio Canvas, generating with partial results">
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark"><svg class="icon" aria-hidden="true"><use href="#i-aperture"/></svg></span>
+        <span class="brand-name">Studio Canvas</span>
+        <span class="brand-mode">MOCKUP A</span>
+      </div>
+      <div class="crumb">
+        <span class="slash">/</span><span>Library</span><span class="slash">/</span><span>Coastal light</span><span class="slash">/</span><strong>Batch 03</strong>
+      </div>
+      <div class="top-right">
+        <div class="provider"><span class="dot hosted"></span><span class="k">Provider:</span><span class="v">hosted API</span></div>
+        <div class="storage-line"><svg class="icon" aria-hidden="true"><use href="#i-storage"/></svg><span>Local library / 12 saved</span></div>
+      </div>
+    </header>
+
+    <aside class="rail" aria-label="Library, current batch and presets">
+      <div class="rail-section">
+        <div class="rail-head">
+          <h2 class="rail-title">Library</h2>
+          <button class="rail-link" type="button">All 12</button>
+        </div>
+        <ul class="library">
+          <li>
+            <button class="lib-item" type="button">
+              <span class="lib-thumb"><svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-coast"/></svg></span>
+              <span class="lib-copy"><span class="lib-name">Blue hour tower</span><span class="lib-meta">2304 x 1728 / 16 Nov</span></span>
+            </button>
+          </li>
+          <li>
+            <button class="lib-item" type="button">
+              <span class="lib-thumb"><svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-dawn"/></svg></span>
+              <span class="lib-copy"><span class="lib-name">Dawn, same tower</span><span class="lib-meta">2304 x 1728 / 16 Nov</span></span>
+            </button>
+          </li>
+          <li>
+            <button class="lib-item" type="button">
+              <span class="lib-thumb"><svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-fog"/></svg></span>
+              <span class="lib-copy"><span class="lib-name">Fog station</span><span class="lib-meta">4096 x 3072 / 15 Nov</span></span>
+            </button>
+          </li>
+          <li>
+            <button class="lib-item" type="button">
+              <span class="lib-thumb"><svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-ridge"/></svg></span>
+              <span class="lib-copy"><span class="lib-name">Ridge light</span><span class="lib-meta">4736 x 3552 / 14 Nov</span></span>
+            </button>
+          </li>
+          <li>
+            <button class="lib-item" type="button">
+              <span class="lib-thumb"><svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-ref"/></svg></span>
+              <span class="lib-copy"><span class="lib-name">Cottage source</span><span class="lib-meta">2304 x 1728 / 14 Nov</span></span>
+            </button>
+          </li>
+        </ul>
+      </div>
+
+      <div class="rail-section">
+        <div class="rail-head">
+          <h2 class="rail-title">Current batch</h2>
+          <span class="rail-count">4 images</span>
+        </div>
+        <ol class="batch-list">
+          <li class="batch-row done"><span class="batch-num">01</span><span class="batch-name">Image 1</span><span class="batch-status">Finished</span></li>
+          <li class="batch-row done"><span class="batch-num">02</span><span class="batch-name">Image 2</span><span class="batch-status">Finished</span></li>
+          <li class="batch-row run"><span class="batch-num">03</span><span class="batch-name">Image 3</span><span class="batch-status">Step 4 of 6</span></li>
+          <li class="batch-row fail"><span class="batch-num">04</span><span class="batch-name">Image 4</span><span class="batch-status">Failed</span></li>
+        </ol>
+      </div>
+
+      <div class="rail-section">
+        <div class="rail-head">
+          <h2 class="rail-title">Saved presets</h2>
+          <span class="rail-count">3</span>
+        </div>
+        <div class="preset-list">
+          <button class="preset" type="button"><span class="preset-swatch coast"></span><span class="preset-name">Blue hour coast</span><span class="preset-meta">4:3 / 4 MP</span></button>
+          <button class="preset" type="button"><span class="preset-swatch cinema"></span><span class="preset-name">Wide cinema</span><span class="preset-meta">21:9 / 16 MP</span></button>
+          <button class="preset" type="button"><span class="preset-swatch vertical"></span><span class="preset-name">Vertical study</span><span class="preset-meta">9:16 / 4 MP</span></button>
+        </div>
+      </div>
+
+      <div class="rail-foot">
+        <div class="disk-line"><span>Local library</span><span>4.1 GB of 120 GB</span></div>
+        <div class="disk-track"><div class="disk-fill"></div></div>
+        <div class="rail-note">Images are stored on this device when they arrive.</div>
+      </div>
+    </aside>
+
+    <main class="canvas">
+      <div class="canvas-head">
+        <div>
+          <div class="canvas-title">Batch 03 / Coastal light</div>
+          <div class="canvas-sub">Editing <span class="mono">&lt;Picture 1&gt;</span> / 2304 x 1728 / 4 MP / started 1:12 ago</div>
+        </div>
+        <div class="status-summary" aria-label="Batch status: 2 finished, 1 sampling, 1 failed">
+          <span class="item"><span class="sum-dot ok"></span>2 finished</span>
+          <span class="item"><span class="sum-dot run"></span>1 sampling</span>
+          <span class="item"><span class="sum-dot err"></span>1 failed</span>
+        </div>
+      </div>
+
+      <div class="stage stage-results">
+        <article class="tile" aria-label="Image 1 of 4, finished">
+          <svg class="art" viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-coast"/></svg>
+          <span class="tile-index">01</span>
+          <span class="tile-state ok"><svg class="icon icon-xs" aria-hidden="true"><use href="#i-check"/></svg>Finished</span>
+          <div class="tile-meta"><span>2304 x 1728</span><span>Finished in 1:06</span></div>
+        </article>
+
+        <article class="tile" aria-label="Image 2 of 4, finished">
+          <svg class="art" viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-dawn"/></svg>
+          <span class="tile-index">02</span>
+          <span class="tile-state ok"><svg class="icon icon-xs" aria-hidden="true"><use href="#i-check"/></svg>Finished</span>
+          <div class="tile-meta"><span>2304 x 1728</span><span>Finished in 1:02</span></div>
+        </article>
+
+        <article class="tile sampling" aria-label="Image 3 of 4, sampling, step 4 of 6">
+          <svg class="art" viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-ref"/></svg>
+          <div class="tile-veil"></div>
+          <span class="tile-index">03</span>
+          <span class="tile-state run">Sampling</span>
+          <div class="sampling-body">
+            <div class="sampling-top">
+              <span class="sampling-kicker">Image 3 of 4 / 6 step schedule</span>
+              <span class="sampling-elapsed">01:12 so far</span>
+            </div>
+            <div class="sampling-step">Step 4 of 6, Detail pass</div>
+            <div class="sampling-bar" aria-hidden="true">
+              <span class="seg fill"></span>
+              <span class="seg fill"></span>
+              <span class="seg fill"></span>
+              <span class="seg half"></span>
+              <span class="seg"></span>
+              <span class="seg"></span>
+            </div>
+            <div class="sampling-names" aria-hidden="true">
+              <span>Init</span><span>Layout</span><span>Structure</span><span>Detail</span><span>Light</span><span>Decode</span>
+            </div>
+            <div class="sampling-foot"><span>6 steps, fixed schedule</span><span>about 30 s left</span></div>
+          </div>
+        </article>
+
+        <article class="tile failed" aria-label="Image 4 of 4, failed">
+          <span class="tile-index">04</span>
+          <span class="tile-state err">Failed</span>
+          <span class="fail-icon"><svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg></span>
+          <div class="fail-title">Image 4 failed</div>
+          <p class="fail-msg">Hosted worker disconnected at step 5 of 6. The other images in this batch are unaffected.</p>
+          <button class="retry" type="button"><svg class="icon icon-xs" aria-hidden="true"><use href="#i-retry"/></svg>Retry image</button>
+        </article>
+      </div>
+
+      <div class="revised">
+        <div class="revised-head">
+          <span class="revised-title">Revised prompt</span>
+          <span class="badge-enh">Enhanced</span>
+          <div class="revised-actions">
+            <button class="ghost-btn" type="button">Copy</button>
+            <button class="ghost-btn" type="button">Use original</button>
+          </div>
+        </div>
+        <p class="revised-text">Using &lt;Picture 1&gt; as the source, move the camera closer to the waterline at first light. Preserve the stone cottage and tower on the basalt cliff, then add low sea fog and one warm lit window. Wide 35 mm view, soft dawn contrast.</p>
+      </div>
+    </main>
+
+    <aside class="inspector" aria-label="Generation controls">
+      <div class="insp-head">
+        <h2 class="insp-title">Controls</h2>
+        <button class="icon-btn" type="button" aria-label="Collapse controls panel" title="Collapse controls">
+          <svg class="icon" aria-hidden="true"><use href="#i-chevron-left"/></svg>
+        </button>
+      </div>
+      <div class="insp-body">
+        <fieldset class="group">
+          <legend>Aspect ratio</legend>
+          <div class="ratio-grid">
+            <input class="sr-radio" type="radio" name="aspect-gen" id="aspect-gen-11">
+            <label class="ratio-opt" for="aspect-gen-11"><span class="r">1:1</span><span class="s">Square</span></label>
+            <input class="sr-radio" type="radio" name="aspect-gen" id="aspect-gen-43" checked>
+            <label class="ratio-opt" for="aspect-gen-43"><span class="r">4:3</span><span class="s">Classic</span></label>
+            <input class="sr-radio" type="radio" name="aspect-gen" id="aspect-gen-32">
+            <label class="ratio-opt" for="aspect-gen-32"><span class="r">3:2</span><span class="s">Photo</span></label>
+            <input class="sr-radio" type="radio" name="aspect-gen" id="aspect-gen-169">
+            <label class="ratio-opt" for="aspect-gen-169"><span class="r">16:9</span><span class="s">Wide</span></label>
+            <input class="sr-radio" type="radio" name="aspect-gen" id="aspect-gen-916">
+            <label class="ratio-opt" for="aspect-gen-916"><span class="r">9:16</span><span class="s">Vertical</span></label>
+            <input class="sr-radio" type="radio" name="aspect-gen" id="aspect-gen-219">
+            <label class="ratio-opt" for="aspect-gen-219"><span class="r">21:9</span><span class="s">Cinema</span></label>
+          </div>
+        </fieldset>
+
+        <fieldset class="group">
+          <legend>Resolution</legend>
+          <div class="res-grid">
+            <input class="sr-radio" type="radio" name="res-gen" id="res-gen-4" checked>
+            <label class="res-opt" for="res-gen-4"><span class="r">4 MP</span><span class="s">2304 x 1728</span></label>
+            <input class="sr-radio" type="radio" name="res-gen" id="res-gen-8">
+            <label class="res-opt" for="res-gen-8"><span class="r">8 MP</span><span class="s">3328 x 2496</span></label>
+            <input class="sr-radio" type="radio" name="res-gen" id="res-gen-12">
+            <label class="res-opt" for="res-gen-12"><span class="r">12 MP</span><span class="s">4096 x 3072</span></label>
+            <input class="sr-radio" type="radio" name="res-gen" id="res-gen-16">
+            <label class="res-opt" for="res-gen-16"><span class="r">16 MP</span><span class="s">4736 x 3552</span></label>
+          </div>
+          <p class="hint">Sizes shown for 4:3. Any width and height in multiples of 32 px. 16 MP reaches 4736 x 3552.</p>
+        </fieldset>
+
+        <fieldset class="group">
+          <legend>Batch count</legend>
+          <div class="count-grid">
+            <input class="sr-radio" type="radio" name="count-gen" id="count-gen-1">
+            <label class="count-opt" for="count-gen-1">1</label>
+            <input class="sr-radio" type="radio" name="count-gen" id="count-gen-2">
+            <label class="count-opt" for="count-gen-2">2</label>
+            <input class="sr-radio" type="radio" name="count-gen" id="count-gen-3">
+            <label class="count-opt" for="count-gen-3">3</label>
+            <input class="sr-radio" type="radio" name="count-gen" id="count-gen-4" checked>
+            <label class="count-opt" for="count-gen-4">4</label>
+            <input class="sr-radio" type="radio" name="count-gen" id="count-gen-5">
+            <label class="count-opt" for="count-gen-5">5</label>
+            <input class="sr-radio" type="radio" name="count-gen" id="count-gen-6">
+            <label class="count-opt" for="count-gen-6">6</label>
+            <input class="sr-radio" type="radio" name="count-gen" id="count-gen-7">
+            <label class="count-opt" for="count-gen-7">7</label>
+            <input class="sr-radio" type="radio" name="count-gen" id="count-gen-8">
+            <label class="count-opt" for="count-gen-8">8</label>
+            <input class="sr-radio" type="radio" name="count-gen" id="count-gen-9">
+            <label class="count-opt" for="count-gen-9">9</label>
+            <input class="sr-radio" type="radio" name="count-gen" id="count-gen-10">
+            <label class="count-opt" for="count-gen-10">10</label>
+          </div>
+          <p class="hint">1 to 10 images per request. 4 selected. The provider renders the batch as one synchronous request.</p>
+        </fieldset>
+
+        <div class="group">
+          <div class="sub-head">
+            <h3 class="sub-title">References</h3>
+            <span class="ref-count">1 of 16</span>
+          </div>
+          <div class="ref-row">
+            <div class="ref-thumb">
+              <svg viewBox="0 0 600 400" preserveAspectRatio="xMidYMid slice" aria-hidden="true"><use href="#scene-coast"/></svg>
+              <span class="ref-tag">1</span>
+              <button class="ref-x" type="button" aria-label="Remove reference image 1">x</button>
+            </div>
+            <button class="ref-add" type="button" aria-label="Add a reference image">
+              <svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>
+              <span>Add</span>
+            </button>
+          </div>
+          <p class="ref-note">1 of 16 in use. Picture 1 is the image being edited. Later pictures are addressed as &lt;Picture 2&gt; in the prompt.</p>
+        </div>
+
+        <div class="group">
+          <div class="sub-head">
+            <h3 class="sub-title">Model</h3>
+            <span class="model-badge">Open weights</span>
+          </div>
+          <div class="model-name">MiniMax H3 Image</div>
+          <dl class="model-list">
+            <dt>Sampling</dt><dd>6 steps, fixed</dd>
+            <dt>Guidance</dt><dd>1.0, fixed</dd>
+            <dt>Batch</dt><dd>1 to 10</dd>
+            <dt>References</dt><dd>Up to 16</dd>
+          </dl>
+        </div>
+      </div>
+    </aside>
+
+    <footer class="command">
+      <div class="composer">
+        <div class="composer-head">
+          <label class="composer-label" for="prompt-gen">Prompt</label>
+          <span class="composer-note">Enhancement on / revised prompt above</span>
+        </div>
+        <textarea class="prompt" id="prompt-gen" spellcheck="false">Reframe &lt;Picture 1&gt; closer to the waterline at dawn. Keep the cottage, add sea fog and one lit window, wide 35 mm.</textarea>
+      </div>
+      <div class="request" aria-label="Request estimate">
+        <div class="request-row"><span class="request-k">Batch</span><span class="request-v">4 images / 4:3 / 4 MP</span></div>
+        <div class="request-row"><span class="request-k">Estimate</span><span class="request-v">about 1 min 40 s</span></div>
+        <div class="request-row"><span class="request-k">Cost</span><span class="request-v">$0.32 / 4 x $0.08</span></div>
+      </div>
+      <button class="primary" type="button">
+        <svg class="icon" aria-hidden="true"><use href="#i-generate"/></svg>
+        <span>
+          <span class="primary-title">Generate 4 images</span>
+          <span class="primary-sub">about 1 min 40 s, $0.32</span>
+        </span>
+      </button>
+    </footer>
+  </section>
+
+</div>
+</body>
+</html>
