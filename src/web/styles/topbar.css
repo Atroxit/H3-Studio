@@ -1,0 +1,103 @@
+/* The application top bar: one designed surface across the top of the window.
+   In the desktop shell it is also the window's title bar, so it carries the drag
+   region and keeps the space for the window control strip clear. */
+
+.studio {
+  /* 44 px is the height of the strip the Windows caption buttons are drawn in. */
+  --topbar-height: 44px;
+}
+
+/* The bar is a strip, not a page header: same surface as the window, one soft hairline. */
+.studio .topbar {
+  flex: 0 0 var(--topbar-height);
+  height: var(--topbar-height);
+  gap: var(--space-4);
+  padding: 0 var(--space-3);
+  background: var(--canvas-top);
+  border-bottom: 1px solid var(--line-soft);
+  box-shadow: none;
+}
+
+/* Left: the mark and the name at bar scale, not at page scale. */
+.studio .topbar .brand {
+  gap: var(--space-2);
+}
+
+.studio .topbar .brand-mark {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+
+.studio .topbar .brand-name {
+  font-size: var(--text-md);
+  font-weight: 500;
+}
+
+/* The view switch: one track with one selected segment. */
+.studio .topbar .seg-label {
+  min-height: 24px;
+  font-size: var(--text-sm);
+}
+
+.studio .topbar .seg-input:checked + .seg-label {
+  font-weight: 600;
+}
+
+/* Right: provider, totals, then the setup entry point. */
+.studio .topbar .topbar-meta {
+  gap: var(--space-3);
+}
+
+.studio .topbar .topbar-provider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.studio .topbar .topbar-provider .select {
+  max-width: 220px;
+}
+
+/* The popover takes the width of the trigger, and an option row spends 48 px of it on
+   padding and the selected check. The floor keeps a provider label readable in both. */
+.studio .topbar .topbar-provider .select-trigger {
+  height: 28px;
+  min-height: 28px;
+  min-width: 140px;
+  padding: 0 var(--space-2);
+  font-size: var(--text-sm);
+}
+
+/* Desktop shell: the bar stands in for the title bar.
+   The Windows overlay draws minimise, maximise and close over the page in a strip
+   about 138 px wide, so the bar keeps that space clear. The browser view keeps
+   neither the gap nor the drag region, because the class is only set there. */
+.is-desktop .studio .topbar {
+  padding-right: calc(138px + var(--space-3));
+  -webkit-app-region: drag;
+}
+
+/* A drag surface swallows clicks, so every control opts out of the drag region.
+   Everything else in the bar stays a drag handle, which is what gives double click
+   to maximise. */
+.is-desktop .studio .topbar button,
+.is-desktop .studio .topbar .seg,
+.is-desktop .studio .topbar .seg-option,
+.is-desktop .studio .topbar .seg-label,
+.is-desktop .studio .topbar .select-trigger {
+  -webkit-app-region: no-drag;
+}
+
+/* The setup screen replaces the studio, so it carries its own drag strip in the same
+   44 px band. Outside the desktop shell it is not in the layout at all. */
+.setup-drag {
+  display: none;
+}
+
+.is-desktop .setup-drag {
+  display: block;
+  height: 44px;
+  -webkit-app-region: drag;
+}

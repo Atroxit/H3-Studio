@@ -121,6 +121,11 @@ function createWindow(port) {
     title: 'H3 Studio',
     show: false,
     autoHideMenuBar: true,
+    // The page draws its own top bar. Windows still draws minimise, maximise and close in a
+    // 44 px strip over the page, so window snapping, the system menu and accessibility stay
+    // native while the surface above stops looking like a browser frame.
+    titleBarStyle: 'hidden',
+    titleBarOverlay: { color: '#0a0a0c', symbolColor: '#a0a0a8', height: 44 },
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

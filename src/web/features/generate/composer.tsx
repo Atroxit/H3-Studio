@@ -55,7 +55,7 @@ export function PromptComposer({
 
       <textarea
         id={promptId}
-        className="gen-prompt"
+        className="field-textarea gen-prompt"
         value={form.prompt}
         rows={3}
         spellCheck

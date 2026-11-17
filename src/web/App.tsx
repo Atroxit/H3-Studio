@@ -23,7 +23,15 @@ import {
   type ProviderHealth,
   type StudioStats,
 } from './api';
-import { Button, EmptyState, Field, SegmentedControl, Spinner, Toast } from './components';
+import { Button, EmptyState, Field, SegmentedControl, Select, Spinner, Toast } from './components';
+import './styles/topbar.css';
+
+// Checked once at startup: only the desktop shell reports Electron in its user agent.
+// The class lets CSS reserve the window control strip and make the top bar a drag
+// region. In the browser neither applies, so no mysterious gap appears there.
+if (typeof navigator !== 'undefined' && typeof document !== 'undefined' && navigator.userAgent.includes('Electron')) {
+  document.documentElement.classList.add('is-desktop');
+}
 
 export type StudioView = 'generate' | 'library';
 
@@ -336,21 +344,17 @@ export function App({ slots = {} }: AppProps): ReactNode {
             />
             <div className="topbar-meta">
               {provider === null ? null : (
-                <label className="provider-pill">
+                <div className="topbar-provider">
                   <span className="label">Provider</span>
-                  <select
+                  {/* Same choice as before: only an enabled provider is selectable, and
+                      the label carries the state the provider reports, like Mock (offline). */}
+                  <Select<string>
+                    ariaLabel="Provider"
                     value={provider.id}
-                    onChange={(event) => {
-                      setSelectedId(event.target.value);
-                    }}
-                  >
-                    {enabledProviders.map((candidate) => (
-                      <option key={candidate.id} value={candidate.id}>
-                        {candidate.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                    options={enabledProviders.map((candidate) => ({ value: candidate.id, label: candidate.label }))}
+                    onChange={setSelectedId}
+                  />
+                </div>
               )}
               <span className="stat">
                 <ImageIcon />
@@ -491,6 +495,10 @@ function SetupScreen({ providers, onEnabled, onDismiss }: SetupScreenProps): Rea
 
   return (
     <div className="setup">
+      {/* The setup screen replaces the studio, and with it the top bar. In the desktop
+          shell the window still needs somewhere to be grabbed, so this keeps a strip
+          the height of the bar as the drag surface. The browser renders nothing here. */}
+      <div className="setup-drag" aria-hidden="true" />
       <div className="setup-inner">
         <header className="setup-head">
           <div className="brand">

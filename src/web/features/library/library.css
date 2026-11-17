@@ -241,11 +241,46 @@
   top: 6px;
   left: 6px;
   z-index: 2;
-  width: 16px;
-  height: 16px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
   margin: 0;
-  accent-color: var(--accent);
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid var(--accent-line);
+  border-radius: 5px;
+  background: var(--scrim-strong);
   cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.lb-tile-select:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.lb-tile-select:checked {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.lb-tile-select:checked::after {
+  content: '';
+  width: 9px;
+  height: 5px;
+  border-bottom: 2px solid var(--accent-ink);
+  border-left: 2px solid var(--accent-ink);
+  transform: translateY(-1px) rotate(-45deg);
+}
+
+.lb-tile-select:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.lb-tile-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .lb-tile-download {

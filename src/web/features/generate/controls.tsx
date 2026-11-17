@@ -307,6 +307,7 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
                 step={multiple}
                 value={String(form.width)}
                 disabled={controller.running}
+                invalid={sizeInvalid}
                 hint={`Multiples of ${multiple} px`}
                 onChange={handleWidth}
               />
@@ -318,6 +319,7 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
                 step={multiple}
                 value={String(form.height)}
                 disabled={controller.running}
+                invalid={sizeInvalid}
                 onChange={handleHeight}
               />
             </div>
@@ -416,7 +418,7 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
               </label>
               <textarea
                 id={negativeId}
-                className="gen-textarea"
+                className="field-textarea gen-textarea"
                 rows={2}
                 value={form.negativePrompt}
                 disabled={controller.running}

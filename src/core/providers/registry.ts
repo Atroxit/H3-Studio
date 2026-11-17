@@ -2,16 +2,23 @@ import type { ProviderAdapter, ProviderConfig, ProviderKind } from '../types';
 
 type AdapterFactory = (config: ProviderConfig) => ProviderAdapter;
 
-interface AdapterModule {
-  readonly module: string;
-  readonly create: string;
-}
+/**
+ * Each kind loads lazily, so one broken adapter cannot break the others. The import
+ * specifiers are written out literally rather than built from a string: a bundler has to
+ * see them to include the modules, and the desktop build bundles this file.
+ */
+const ADAPTER_FACTORIES: Record<ProviderKind, () => Promise<unknown>> = {
+  mock: () => import('./mock'),
+  comfyui: () => import('./comfyui'),
+  'openai-images': () => import('./openai-images'),
+  a1111: () => import('./a1111'),
+};
 
-const ADAPTER_MODULES: Record<ProviderKind, AdapterModule> = {
-  mock: { module: './mock', create: 'createMockAdapter' },
-  comfyui: { module: './comfyui', create: 'createComfyUIAdapter' },
-  'openai-images': { module: './openai-images', create: 'createOpenAIImagesAdapter' },
-  a1111: { module: './a1111', create: 'createA1111Adapter' },
+const FACTORY_EXPORTS: Record<ProviderKind, string> = {
+  mock: 'createMockAdapter',
+  comfyui: 'createComfyUIAdapter',
+  'openai-images': 'createOpenAIImagesAdapter',
+  a1111: 'createA1111Adapter',
 };
 
 const MOCK_CONFIG: ProviderConfig = {
@@ -55,16 +62,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * cannot break the kinds that do exist.
  */
 async function loadFactory(kind: ProviderKind): Promise<AdapterFactory> {
-  const entry = ADAPTER_MODULES[kind];
+  const createName = FACTORY_EXPORTS[kind];
   let loaded: unknown;
   try {
-    loaded = await import(entry.module);
+    loaded = await ADAPTER_FACTORIES[kind]();
   } catch {
-    throw new Error(`No provider adapter module for kind "${kind}" (expected ${entry.module})`);
+    throw new Error(`No provider adapter module for kind "${kind}" (expected an export named ${createName})`);
   }
-  const exported = isRecord(loaded) ? loaded[entry.create] : undefined;
+  const exported = isRecord(loaded) ? loaded[createName] : undefined;
   if (typeof exported !== 'function') {
-    throw new Error(`Provider adapter module for kind "${kind}" does not export ${entry.create}`);
+    throw new Error(`Provider adapter module for kind "${kind}" does not export ${createName}`);
   }
   // The import is opaque at compile time: the module shape is trusted once the export is a function.
   return exported as AdapterFactory;

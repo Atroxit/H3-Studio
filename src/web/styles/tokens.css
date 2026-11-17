@@ -25,6 +25,8 @@
   --accent-line: rgba(244, 244, 245, 0.35);
   /* The pressed and hover fill for a primary action: the accent, one step down. */
   --accent-hover: #d9d9dc;
+  /* The pressed fill for a primary action, one step below the hover fill. */
+  --accent-pressed: #c2c2c6;
 
   /* Status, and the hairline and fill each one uses */
   --ok: #8fd694;
@@ -58,6 +60,10 @@
   --radius-panel: 10px;
   --radius-control: 8px;
   --radius-pill: 999px;
+
+  /* Controls: one height and one horizontal padding for every field, select and textarea */
+  --control-height: 32px;
+  --control-padding-x: 8px;
 
   /* Type */
   --font-display: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
