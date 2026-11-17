@@ -58,6 +58,12 @@ button {
   outline-offset: 2px;
 }
 
+/* A programmatic focus target such as a heading takes focus, not a ring: it is not a control. */
+[tabindex='-1']:focus,
+[tabindex='-1']:focus-visible {
+  outline: none;
+}
+
 ::selection {
   background: var(--accent);
   color: var(--accent-ink);

@@ -21,16 +21,18 @@ npm run verify
 
 ## Where your images live
 
-The library is a plain directory in this repository, created on first start:
+The library is a plain directory, created on first start. By default it is `.h3-studio` in your home directory; set `H3_DATA_DIR` to put it somewhere else.
 
 ```text
-.h3data/
-  index.json              batches, failure records and saved presets
+~/.h3-studio/
+  index.json              snapshot of batches, failures and presets
+  journal.ndjson          append only log of every change since that snapshot
+  providers.json          your provider settings, including any API key you entered
   images/<imageId>.png    every generated image, byte for byte
   references/<refId>.<ext>  reference images you attached
 ```
 
-An image is copied into `images/` as it arrives, so the library keeps working even if the provider that made it goes away. Deleting `.h3data/` starts you with an empty library; nothing outside that directory belongs to it. It is in `.gitignore`.
+An image is copied into `images/` as it arrives, so the library keeps working even if the provider that made it goes away. Every read is served from memory, and every change is appended to the journal before it is applied, which is what stops a polling browser from blocking a generation on Windows. Deleting the directory starts you with an empty library; nothing outside it belongs to the app.
 
 ## Connecting a backend
 
