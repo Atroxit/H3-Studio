@@ -90,7 +90,7 @@ function startServer(port, dataDir) {
   child.on('exit', (code, signal) => {
     if (code !== 0 && code !== null && !app.isQuitting) {
       const detail = serverLog.slice(-12).join('\n') || 'no output captured';
-      dialog.showErrorBox('H3 Studio stopped', `The local server exited with code ${code} (${signal ?? 'no signal'}).\n\n${detail}`);
+      reportError('H3 Studio stopped', `The local server exited with code ${code} (${signal ?? 'no signal'}).\n\n${detail}`);
     }
   });
   return child;
@@ -101,6 +101,14 @@ function stopServer() {
   const child = serverProcess;
   serverProcess = null;
   try { child.kill(); } catch { /* already gone */ }
+}
+
+function reportError(title, message) {
+  console.error(`[error] ${title}: ${message}`);
+  // H3_NO_DIALOG keeps a failed launch from blocking on a modal box, which matters when
+  // the shell is started by a script or a sandbox that has nobody to click OK.
+  if (process.env.H3_NO_DIALOG === '1') return;
+  dialog.showErrorBox(title, message);
 }
 
 function createWindow(port) {
@@ -164,7 +172,9 @@ async function boot() {
   if (!require('node:fs').existsSync(SERVER_ENTRY)) {
     throw new Error(`The server bundle is missing at ${SERVER_ENTRY}. Run: npm run desktop:build`);
   }
-  const dataDir = path.join(app.getPath('userData'), 'library');
+  // H3_DATA_DIR wins over the per-user application data folder, so the library can be
+  // pointed at an existing folder, or kept somewhere the sandbox will allow.
+  const dataDir = (process.env.H3_DATA_DIR ?? '').trim() || path.join(app.getPath('userData'), 'library');
   const port = await pickPort();
   serverProcess = startServer(port, dataDir);
   const healthy = await waitForHealth(port);
@@ -192,7 +202,7 @@ if (!lock) {
     try {
       await boot();
     } catch (error) {
-      dialog.showErrorBox('H3 Studio could not start', error instanceof Error ? error.message : String(error));
+      reportError('H3 Studio could not start', error instanceof Error ? error.message : String(error));
       app.isQuitting = true;
       stopServer();
       app.quit();

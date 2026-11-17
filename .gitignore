@@ -16,3 +16,7 @@ node_modules/
 dist/
 .h3data/
 *.log
+.desktop-profile/
+.desktop-out.log
+.desktop-err.log
+.desktop-launch.log
