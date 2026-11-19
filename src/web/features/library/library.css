@@ -398,24 +398,26 @@
 }
 
 .lb-rail-name {
+  display: -webkit-box;
   overflow: hidden;
   font-size: var(--text-sm);
   font-weight: 500;
   line-height: 1.35;
   color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .lb-rail-meta,
 .lb-rail-time {
-  overflow: hidden;
   font-family: var(--font-mono);
   font-size: var(--text-micro);
   line-height: 1.35;
   color: var(--text-muted);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .lb-rail-time {
