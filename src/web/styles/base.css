@@ -163,6 +163,7 @@ button {
 }
 
 .studio-body {
+  position: relative;
   flex: 1 1 auto;
   display: grid;
   grid-template-columns: var(--rail-width) minmax(0, 1fr) var(--inspector-width);
@@ -260,6 +261,7 @@ button {
 
 /* Left rail */
 .rail {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
@@ -268,6 +270,47 @@ button {
   overflow-y: auto;
   background: var(--panel);
   border-right: 1px solid var(--line);
+}
+
+/* Drag handles that sit on the seam between a sidebar and the canvas. */
+.pane-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 10;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.pane-resizer.is-rail {
+  left: calc(var(--rail-width) - 4px);
+}
+
+.pane-resizer.is-inspector {
+  right: calc(var(--inspector-width) - 4px);
+}
+
+.pane-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.pane-resizer:hover::after,
+.pane-resizer:focus-visible::after,
+.pane-resizer:active::after {
+  background: var(--accent);
+}
+
+.pane-resizer:focus-visible {
+  outline: none;
 }
 
 /* The one action that starts a fresh image, so it spans the rail and stays at the top. */
@@ -408,6 +451,7 @@ button {
 
 /* Right inspector */
 .inspector {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -1373,6 +1417,11 @@ button {
   .inspector {
     border-left: 0;
     border-top: 1px solid var(--line);
+  }
+
+  /* The stacked layout gives each pane the full width, so a seam drag handle is meaningless. */
+  .pane-resizer {
+    display: none;
   }
 
   .topbar {

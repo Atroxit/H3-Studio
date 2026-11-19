@@ -2,7 +2,18 @@
 // Feature screens mount into the slots below. Nothing here renders a features
 // screen, and nothing styles their internal markup.
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
 import type { Preset, ProviderCapabilities, ProviderConfig, ProviderKind } from '../core/types';
 import {
   checkProviderHealth,
@@ -334,6 +345,44 @@ function writeViewToLocation(next: StudioView): void {
 
 const SELECTED_PROVIDER_KEY = 'h3-studio:selected-provider';
 
+const RAIL_WIDTH_DEFAULT = 260;
+const RAIL_WIDTH_MIN = 200;
+const RAIL_WIDTH_MAX = 520;
+const RAIL_WIDTH_STORAGE_KEY = 'h3-studio.railWidth';
+
+const INSPECTOR_WIDTH_DEFAULT = 300;
+const INSPECTOR_WIDTH_MIN = 240;
+const INSPECTOR_WIDTH_MAX = 560;
+const INSPECTOR_WIDTH_STORAGE_KEY = 'h3-studio.inspectorWidth';
+
+const RESIZE_STEP = 16;
+
+function clampWidth(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function readStoredWidth(key: string, fallback: number, min: number, max: number): number {
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw === null) return fallback;
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isNaN(parsed)) return fallback;
+    return clampWidth(parsed, min, max);
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStoredWidth(key: string, value: number): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(key, String(value));
+  } catch {
+    // Private mode or a blocked storage area leaves the width in memory only.
+  }
+}
+
 function readSelectedProvider(): string | null {
   if (typeof window === 'undefined') return null;
   try {
@@ -364,6 +413,82 @@ export function App({ slots = {} }: AppProps): ReactNode {
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [setupOpen, setSetupOpen] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
+  const [railWidth, setRailWidth] = useState<number>(() =>
+    readStoredWidth(RAIL_WIDTH_STORAGE_KEY, RAIL_WIDTH_DEFAULT, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX),
+  );
+  const [inspectorWidth, setInspectorWidth] = useState<number>(() =>
+    readStoredWidth(INSPECTOR_WIDTH_STORAGE_KEY, INSPECTOR_WIDTH_DEFAULT, INSPECTOR_WIDTH_MIN, INSPECTOR_WIDTH_MAX),
+  );
+
+  const detachResizeRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    writeStoredWidth(RAIL_WIDTH_STORAGE_KEY, railWidth);
+  }, [railWidth]);
+
+  useEffect(() => {
+    writeStoredWidth(INSPECTOR_WIDTH_STORAGE_KEY, inspectorWidth);
+  }, [inspectorWidth]);
+
+  // A drag that is still running when the frame unmounts must not keep its window listeners.
+  useEffect(
+    () => () => {
+      detachResizeRef.current?.();
+    },
+    [],
+  );
+
+  const startResize = useCallback(
+    (side: 'rail' | 'inspector', event: ReactPointerEvent<HTMLDivElement>): void => {
+      event.preventDefault();
+      const startX = event.clientX;
+      const startWidth = side === 'rail' ? railWidth : inspectorWidth;
+      const min = side === 'rail' ? RAIL_WIDTH_MIN : INSPECTOR_WIDTH_MIN;
+      const max = side === 'rail' ? RAIL_WIDTH_MAX : INSPECTOR_WIDTH_MAX;
+      const apply = side === 'rail' ? setRailWidth : setInspectorWidth;
+
+      function handleMove(moveEvent: PointerEvent): void {
+        const delta = side === 'rail' ? moveEvent.clientX - startX : startX - moveEvent.clientX;
+        apply(clampWidth(startWidth + delta, min, max));
+      }
+
+      function detach(): void {
+        window.removeEventListener('pointermove', handleMove);
+        window.removeEventListener('pointerup', finish);
+        window.removeEventListener('pointercancel', finish);
+        if (detachResizeRef.current === detach) detachResizeRef.current = null;
+      }
+
+      function finish(): void {
+        detach();
+      }
+
+      detachResizeRef.current?.();
+      detachResizeRef.current = detach;
+      window.addEventListener('pointermove', handleMove);
+      window.addEventListener('pointerup', finish);
+      window.addEventListener('pointercancel', finish);
+    },
+    [railWidth, inspectorWidth],
+  );
+
+  const handleResizeKey = useCallback(
+    (side: 'rail' | 'inspector', event: ReactKeyboardEvent<HTMLDivElement>): void => {
+      const isRail = side === 'rail';
+      const current = isRail ? railWidth : inspectorWidth;
+      const min = isRail ? RAIL_WIDTH_MIN : INSPECTOR_WIDTH_MIN;
+      const max = isRail ? RAIL_WIDTH_MAX : INSPECTOR_WIDTH_MAX;
+      let next: number | null = null;
+      if (event.key === 'Home') next = isRail ? RAIL_WIDTH_DEFAULT : INSPECTOR_WIDTH_DEFAULT;
+      else if (event.key === 'ArrowLeft') next = current + (isRail ? -RESIZE_STEP : RESIZE_STEP);
+      else if (event.key === 'ArrowRight') next = current + (isRail ? RESIZE_STEP : -RESIZE_STEP);
+      if (next === null) return;
+      event.preventDefault();
+      if (isRail) setRailWidth(clampWidth(next, min, max));
+      else setInspectorWidth(clampWidth(next, min, max));
+    },
+    [railWidth, inspectorWidth],
+  );
 
   const load = useCallback(async (mode: 'initial' | 'refresh'): Promise<void> => {
     if (mode === 'initial') setPhase('loading');
@@ -624,6 +749,7 @@ export function App({ slots = {} }: AppProps): ReactNode {
             className={
               view === 'library' ? 'studio-body is-library' : inspectorOpen ? 'studio-body' : 'studio-body is-collapsed'
             }
+            style={{ '--rail-width': `${railWidth}px`, '--inspector-width': `${inspectorWidth}px` } as CSSProperties}
           >
             <aside className="rail" aria-label="Library summary and presets">
               <Button variant="primary" className="rail-new-btn" onClick={newImage}>
@@ -685,6 +811,27 @@ export function App({ slots = {} }: AppProps): ReactNode {
               </section>
             </aside>
 
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize left sidebar"
+              aria-valuemin={RAIL_WIDTH_MIN}
+              aria-valuemax={RAIL_WIDTH_MAX}
+              aria-valuenow={railWidth}
+              tabIndex={0}
+              className="pane-resizer is-rail"
+              title="Drag to resize, double click to reset"
+              onPointerDown={(event) => {
+                startResize('rail', event);
+              }}
+              onDoubleClick={() => {
+                setRailWidth(RAIL_WIDTH_DEFAULT);
+              }}
+              onKeyDown={(event) => {
+                handleResizeKey('rail', event);
+              }}
+            />
+
             <main className="centre">
               <h2 className="sr-only">{centreTitle}</h2>
               {centreSlot === undefined ? (
@@ -703,6 +850,29 @@ export function App({ slots = {} }: AppProps): ReactNode {
                 <div className="centre-panel">{centreSlot}</div>
               )}
             </main>
+
+            {view === 'generate' && inspectorOpen ? (
+              <div
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize right sidebar"
+                aria-valuemin={INSPECTOR_WIDTH_MIN}
+                aria-valuemax={INSPECTOR_WIDTH_MAX}
+                aria-valuenow={inspectorWidth}
+                tabIndex={0}
+                className="pane-resizer is-inspector"
+                title="Drag to resize, double click to reset"
+                onPointerDown={(event) => {
+                  startResize('inspector', event);
+                }}
+                onDoubleClick={() => {
+                  setInspectorWidth(INSPECTOR_WIDTH_DEFAULT);
+                }}
+                onKeyDown={(event) => {
+                  handleResizeKey('inspector', event);
+                }}
+              />
+            ) : null}
 
             {view === 'generate' ? (
               <aside
