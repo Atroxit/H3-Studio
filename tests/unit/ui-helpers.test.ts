@@ -14,7 +14,12 @@ import {
   type GenerationBatch,
   type GenerationTile,
 } from '../../src/web/features/generate/useGeneration';
-import { computeZoomScroll, type ZoomScrollInput } from '../../src/web/features/library/viewer';
+import {
+  computeZoomScroll,
+  computeZoomedDimensions,
+  stepZoomLevel,
+  type ZoomScrollInput,
+} from '../../src/web/features/library/viewer';
 
 describe('ratioOf', () => {
   it('names the canonical ratios the presets actually mean', () => {
@@ -149,6 +154,48 @@ describe('computeZoomScroll', () => {
         scrollHeight: 300,
       }),
     ).toEqual({ left: 0, top: 0 });
+  });
+});
+
+describe('computeZoomedDimensions', () => {
+  it('scales the fitted square image up by the requested amount', () => {
+    expect(computeZoomedDimensions(1024, 1024, 800, 600, 2)).toEqual({ width: 1200, height: 1200 });
+  });
+
+  it('keeps the fitted aspect ratio for a wide image', () => {
+    expect(computeZoomedDimensions(2000, 1000, 800, 600, 1.5)).toEqual({ width: 1200, height: 600 });
+  });
+
+  it('returns the fitted size at a scale of one', () => {
+    expect(computeZoomedDimensions(2000, 1000, 800, 600, 1)).toEqual({ width: 800, height: 400 });
+  });
+
+  it('never returns a zero dimension', () => {
+    expect(computeZoomedDimensions(0, 0, 0, 0, 1)).toEqual({ width: 1, height: 1 });
+  });
+});
+
+describe('stepZoomLevel', () => {
+  it('walks the zoom steps in and stops at eight', () => {
+    expect(stepZoomLevel(1, 'in')).toBe(1.5);
+    expect(stepZoomLevel(1.5, 'in')).toBe(2);
+    expect(stepZoomLevel(4, 'in')).toBe(6);
+    expect(stepZoomLevel(8, 'in')).toBe(8);
+  });
+
+  it('walks the zoom steps out and stops at one', () => {
+    expect(stepZoomLevel(8, 'out')).toBe(6);
+    expect(stepZoomLevel(2, 'out')).toBe(1.5);
+    expect(stepZoomLevel(1.5, 'out')).toBe(1);
+    expect(stepZoomLevel(1, 'out')).toBe(1);
+  });
+
+  it('cycles a click through one, two, four, and back to one', () => {
+    const first = stepZoomLevel(1, 'cycle');
+    const second = stepZoomLevel(first, 'cycle');
+    const third = stepZoomLevel(second, 'cycle');
+    expect([first, second, third]).toEqual([2, 4, 1]);
+    expect(stepZoomLevel(4, 'cycle')).toBe(1);
   });
 });
 

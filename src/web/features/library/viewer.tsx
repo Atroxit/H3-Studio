@@ -24,6 +24,51 @@ const FOCUSABLE_SELECTOR =
 /** The drag distance, in pixels, that turns a click into a pan. */
 const DRAG_THRESHOLD = 4;
 
+/** Zoom levels relative to the fitted image size. */
+export const ZOOM_STEPS: readonly number[] = [1, 1.5, 2, 3, 4, 6, 8];
+
+/** The scales a plain click cycles through: Fit, 2x, 4x, back to Fit. */
+export const CLICK_ZOOM_CYCLE: readonly number[] = [1, 2, 4];
+
+/**
+ * The rendered pixel size of an image at a zoom scale on top of its fitted size.
+ * Both the fitted size and the zoomed size are safe against zero dimensions.
+ */
+export function computeZoomedDimensions(
+  imageWidth: number,
+  imageHeight: number,
+  viewportWidth: number,
+  viewportHeight: number,
+  scale: number,
+): { width: number; height: number } {
+  const w = Math.max(1, imageWidth);
+  const h = Math.max(1, imageHeight);
+  const vw = Math.max(1, viewportWidth);
+  const vh = Math.max(1, viewportHeight);
+  const fitScale = Math.min(vw / w, vh / h);
+  const baseWidth = w * fitScale;
+  const baseHeight = h * fitScale;
+  return {
+    width: Math.max(1, Math.round(baseWidth * scale)),
+    height: Math.max(1, Math.round(baseHeight * scale)),
+  };
+}
+
+/** The next scale in a direction, walking the exported zoom steps. */
+export function stepZoomLevel(current: number, direction: 'in' | 'out' | 'cycle'): number {
+  if (direction === 'cycle') {
+    if (current < 2) return 2;
+    if (current < 4) return 4;
+    return 1;
+  }
+  if (direction === 'in') {
+    const next = ZOOM_STEPS.find((step) => step > current + 0.01);
+    return next ?? ZOOM_STEPS[ZOOM_STEPS.length - 1] ?? 8;
+  }
+  const lower = [...ZOOM_STEPS].reverse().find((step) => step < current - 0.01);
+  return lower ?? 1;
+}
+
 export interface ZoomScrollInput {
   /** Normalized click point inside the fitted image, 0..1. */
   ratioX: number;
@@ -113,7 +158,11 @@ export function ImageViewer({
     const found = images.findIndex((image) => image.id === imageId);
     return found === -1 ? 0 : found;
   });
-  const [zoom, setZoom] = useState<'fit' | 'actual'>('fit');
+  const [zoomScale, setZoomScale] = useState<number>(1);
+  const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>({
+    width: 960,
+    height: 720,
+  });
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
@@ -123,7 +172,11 @@ export function ImageViewer({
   const suppressClickRef = useRef(false);
   const dragRef = useRef<DragStart | null>(null);
   const detachDragListenersRef = useRef<(() => void) | null>(null);
+  const zoomScaleRef = useRef(zoomScale);
   const [isDragging, setIsDragging] = useState(false);
+  const isZoomed = zoomScale > 1;
+
+  zoomScaleRef.current = zoomScale;
 
   // The overlay takes focus, and hands it back to the opener when it closes.
   useEffect(() => {
@@ -143,6 +196,67 @@ export function ImageViewer({
       document.body.style.overflow = previousOverflow;
     };
   }, []);
+
+  const safePosition = images.length === 0 ? 0 : Math.min(position, images.length - 1);
+  const image = images[safePosition];
+
+  // Anchor the next zoom step on whatever part of the image sits at the viewport
+  // centre, so the header buttons and the keyboard shortcuts keep the panned spot.
+  const anchorZoomAtViewportCenter = (): void => {
+    const wrap = wrapRef.current;
+    const img = imageRef.current;
+    if (wrap === null || img === null) {
+      pendingZoomRef.current = null;
+      return;
+    }
+    const wrapRect = wrap.getBoundingClientRect();
+    const imgRect = img.getBoundingClientRect();
+    if (imgRect.width <= 0 || imgRect.height <= 0) {
+      pendingZoomRef.current = null;
+      return;
+    }
+    pendingZoomRef.current = {
+      ratioX: (wrapRect.left + wrap.clientWidth / 2 - imgRect.left) / imgRect.width,
+      ratioY: (wrapRect.top + wrap.clientHeight / 2 - imgRect.top) / imgRect.height,
+      clientX: null,
+      clientY: null,
+    };
+  };
+
+  const resetZoom = (): void => {
+    pendingZoomRef.current = null;
+    setZoomScale(1);
+  };
+
+  const zoomIn = (): void => {
+    suppressClickRef.current = false;
+    const nextScale = stepZoomLevel(zoomScaleRef.current, 'in');
+    if (nextScale === zoomScaleRef.current) return;
+    anchorZoomAtViewportCenter();
+    setZoomScale(nextScale);
+  };
+
+  const zoomOut = (): void => {
+    suppressClickRef.current = false;
+    const nextScale = stepZoomLevel(zoomScaleRef.current, 'out');
+    if (nextScale === zoomScaleRef.current) return;
+    if (nextScale <= 1) {
+      resetZoom();
+      return;
+    }
+    anchorZoomAtViewportCenter();
+    setZoomScale(nextScale);
+  };
+
+  const toggleZoom = (): void => {
+    suppressClickRef.current = false;
+    if (zoomScaleRef.current > 1) {
+      resetZoom();
+      return;
+    }
+    anchorZoomAtViewportCenter();
+    setZoomScale(2);
+  };
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -169,6 +283,21 @@ export function ImageViewer({
         }
         return;
       }
+      if (event.key === '+' || event.key === '=') {
+        event.preventDefault();
+        zoomIn();
+        return;
+      }
+      if (event.key === '-' || event.key === '_') {
+        event.preventDefault();
+        zoomOut();
+        return;
+      }
+      if (event.key === '0') {
+        event.preventDefault();
+        resetZoom();
+        return;
+      }
       if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
         event.preventDefault();
         setPosition((current) => Math.max(0, current - 1));
@@ -183,7 +312,7 @@ export function ImageViewer({
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [images.length, onClose]);
+  }, [images.length, onClose, resetZoom, zoomIn, zoomOut]);
 
   // Drop any window pan listeners if the viewer unmounts mid drag.
   useEffect(
@@ -194,14 +323,70 @@ export function ImageViewer({
     [],
   );
 
-  // Apply the pending zoom target once the 1:1 layout exists and before paint.
+  // The wheel listener has to be non-passive so preventDefault stops the page and the
+  // container from scrolling while the image zooms under the cursor.
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (wrap === null) return;
+    const handleWheel = (event: WheelEvent): void => {
+      const current = zoomScaleRef.current;
+      const nextScale = stepZoomLevel(current, event.deltaY < 0 ? 'in' : 'out');
+      if (nextScale === current) return;
+      event.preventDefault();
+      const img = imageRef.current;
+      if (nextScale > 1 && img !== null) {
+        const imgRect = img.getBoundingClientRect();
+        if (imgRect.width > 0 && imgRect.height > 0) {
+          pendingZoomRef.current = {
+            ratioX: (event.clientX - imgRect.left) / imgRect.width,
+            ratioY: (event.clientY - imgRect.top) / imgRect.height,
+            clientX: event.clientX,
+            clientY: event.clientY,
+          };
+        }
+      } else {
+        pendingZoomRef.current = null;
+      }
+      setZoomScale(nextScale);
+    };
+    wrap.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      wrap.removeEventListener('wheel', handleWheel);
+    };
+  }, [image?.id]);
+
+  // Size the image and place the pending zoom scroll in the same layout pass, before
+  // paint, so the cursor stays on the exact pixel it pointed at on the first frame.
   useLayoutEffect(() => {
-    if (zoom !== 'actual') return;
     const wrap = wrapRef.current;
     const img = imageRef.current;
+    if (wrap === null || img === null) return;
+    const measuredWidth = wrap.clientWidth;
+    const measuredHeight = wrap.clientHeight;
+    if (
+      measuredWidth > 0 &&
+      measuredHeight > 0 &&
+      (measuredWidth !== viewportSize.width || measuredHeight !== viewportSize.height)
+    ) {
+      setViewportSize({ width: measuredWidth, height: measuredHeight });
+    }
+    if (isZoomed && image !== undefined) {
+      const dims = computeZoomedDimensions(
+        image.width,
+        image.height,
+        measuredWidth || viewportSize.width,
+        measuredHeight || viewportSize.height,
+        zoomScale,
+      );
+      img.style.width = `${dims.width}px`;
+      img.style.height = `${dims.height}px`;
+    } else {
+      img.style.width = '';
+      img.style.height = '';
+    }
     const pending = pendingZoomRef.current;
     pendingZoomRef.current = null;
-    if (wrap === null || img === null || pending === null) return;
+    if (pending === null) return;
     const wrapRect = wrap.getBoundingClientRect();
     const imgRect = img.getBoundingClientRect();
     if (imgRect.width <= 0 || imgRect.height <= 0) return;
@@ -225,47 +410,33 @@ export function ImageViewer({
     });
     wrap.scrollLeft = next.left;
     wrap.scrollTop = next.top;
-  }, [zoom]);
+  }, [zoomScale, image?.id]);
 
-  const safePosition = images.length === 0 ? 0 : Math.min(position, images.length - 1);
-  const image = images[safePosition];
-
-  // A different image always opens fitted, so a stale 1:1 offset never carries over.
+  // A different image always opens fitted, so a stale zoom offset never carries over.
   // A pending drag is dropped too, and its listeners are detached, so navigating with
   // the arrow keys mid-drag cannot leave the pan state stuck.
-  useEffect(() => {
+  useLayoutEffect(() => {
     detachDragListenersRef.current?.();
     detachDragListenersRef.current = null;
     dragRef.current = null;
-    setZoom('fit');
+    setZoomScale(1);
     setIsDragging(false);
     pendingZoomRef.current = null;
     suppressClickRef.current = false;
   }, [image?.id]);
-
-  const toggleZoom = (): void => {
-    suppressClickRef.current = false;
-    if (zoom === 'actual') {
-      pendingZoomRef.current = null;
-      setZoom('fit');
-      return;
-    }
-    pendingZoomRef.current = { ratioX: 0.5, ratioY: 0.5, clientX: null, clientY: null };
-    setZoom('actual');
-  };
 
   const handleImageClick = (event: ReactMouseEvent<HTMLButtonElement>): void => {
     if (suppressClickRef.current) {
       suppressClickRef.current = false;
       return;
     }
-    if (zoom === 'actual') {
-      setZoom('fit');
+    const nextScale = stepZoomLevel(zoomScaleRef.current, 'cycle');
+    if (nextScale <= 1) {
+      resetZoom();
       return;
     }
-    const wrap = wrapRef.current;
     const img = imageRef.current;
-    if (event.detail > 0 && wrap !== null && img !== null) {
+    if (img !== null) {
       const imgRect = img.getBoundingClientRect();
       if (imgRect.width > 0 && imgRect.height > 0) {
         pendingZoomRef.current = {
@@ -274,16 +445,14 @@ export function ImageViewer({
           clientX: event.clientX,
           clientY: event.clientY,
         };
-        setZoom('actual');
-        return;
       }
     }
-    toggleZoom();
+    setZoomScale(nextScale);
   };
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>): void => {
     suppressClickRef.current = false;
-    if (zoom !== 'actual' || event.button !== 0) return;
+    if (!isZoomed || event.button !== 0) return;
     const wrap = wrapRef.current;
     if (wrap === null) return;
     detachDragListenersRef.current?.();
@@ -360,7 +529,7 @@ export function ImageViewer({
 
   return (
     <div
-      className={zoom === 'actual' ? 'lb-viewer is-actual' : 'lb-viewer'}
+      className={isZoomed ? 'lb-viewer is-actual' : 'lb-viewer'}
       ref={overlayRef}
       role="dialog"
       aria-modal="true"
@@ -394,8 +563,34 @@ export function ImageViewer({
                 Alter this image
               </Button>
             )}
-            <Button variant="ghost" size="sm" onClick={toggleZoom} aria-pressed={zoom === 'actual'}>
-              {zoom === 'actual' ? 'Fit' : '1:1'}
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={zoomScale <= 1}
+              onClick={zoomOut}
+              aria-label="Zoom out"
+              title="Zoom out (-)"
+            >
+              -
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={toggleZoom}
+              aria-pressed={isZoomed}
+              title={isZoomed ? 'Reset zoom to fit (0)' : 'Zoom in to 2x'}
+            >
+              {isZoomed ? `${zoomScale}x` : 'Fit'}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={zoomScale >= 8}
+              onClick={zoomIn}
+              aria-label="Zoom in"
+              title="Zoom in (+)"
+            >
+              +
             </Button>
             {image === undefined ? null : (
               <a
@@ -441,7 +636,7 @@ export function ImageViewer({
             <div
               className={[
                 'lb-viewer-image-wrap',
-                zoom === 'actual' ? 'is-actual' : '',
+                isZoomed ? 'is-actual' : '',
                 isDragging ? 'is-dragging' : '',
               ]
                 .filter(Boolean)
@@ -453,8 +648,8 @@ export function ImageViewer({
                 className="lb-viewer-image-button"
                 onClick={handleImageClick}
                 onPointerDown={handlePointerDown}
-                aria-label={zoom === 'actual' ? 'Fit the image to the window' : 'Show the image at actual pixels'}
-                aria-pressed={zoom === 'actual'}
+                aria-label={isZoomed ? 'Reset the image to fit the window' : 'Zoom the image in'}
+                aria-pressed={isZoomed}
               >
                 <img
                   className="lb-viewer-image"
@@ -526,8 +721,7 @@ export function ImageViewer({
         </dl>
 
         <p className="lb-viewer-hint">
-          Arrow keys move between images. Escape closes the viewer. Click any spot to zoom to 1:1, drag to pan, and
-          click again to fit.
+          Arrow keys move between images. Escape closes the viewer. Click or scroll to zoom up to 8x, and drag to pan.
         </p>
       </div>
     </div>
