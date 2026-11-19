@@ -159,6 +159,7 @@ button {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  overflow: hidden;
   background: linear-gradient(180deg, var(--canvas-top), var(--canvas-bottom));
 }
 
@@ -167,7 +168,9 @@ button {
   flex: 1 1 auto;
   display: grid;
   grid-template-columns: var(--rail-width) minmax(0, 1fr) var(--inspector-width);
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
+  overflow: hidden;
 }
 
 .studio-body.is-collapsed {
@@ -1406,6 +1409,7 @@ button {
   .studio-body.is-collapsed,
   .studio-body.is-library {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
     overflow-y: auto;
   }
 
