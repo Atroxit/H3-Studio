@@ -1,6 +1,10 @@
 // The results grid: one tile per requested index, with its own waiting, sampling,
 // finished and failed state. Partial failure is a normal outcome here, not an
 // error banner that hides the images that did arrive.
+//
+// A local run can be slow and a healthy provider may report no step progress at all,
+// so elapsed time is the only liveness signal this surface can honestly show. There is
+// no percentage and no ETA: the adapter knows neither.
 
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import { imageUrl } from '../../api';
@@ -64,23 +68,111 @@ function stateClass(tile: GenerationTile): string {
   return tile.phase === 'running' ? 'is-running' : tile.phase === 'done' ? 'is-done' : tile.phase === 'failed' ? 'is-failed' : 'is-waiting';
 }
 
+function isGoing(tile: GenerationTile): boolean {
+  return tile.phase === 'waiting' || tile.phase === 'running';
+}
+
+/** The elapsed clock of one tile's current attempt. */
+interface TileClock {
+  /** When the attempt started, in epoch milliseconds. */
+  startedAt: number;
+  /** When it settled, in epoch milliseconds. Null while it is still going. */
+  settledAt: number | null;
+}
+
+// Module scope, so a settled duration outlives this surface unmounting, which switching
+// to the library does. Only one batch is on screen, so this holds one run: a new run
+// replaces the map instead of adding to it.
+let clockRun = 0;
+let clocks = new Map<number, TileClock>();
+let clockRunning = false;
+
+/**
+ * Keeps the clocks in step with the tiles: one starts when a tile begins waiting, gets
+ * stamped when the tile settles, and restarts for a retry. It only writes the clock it
+ * has just read, so running twice, as StrictMode does, changes nothing.
+ */
+function reconcileClocks(batch: GenerationBatch | null, running: boolean): Map<number, TileClock> {
+  if (batch === null) {
+    clockRunning = running;
+    return clocks;
+  }
+  const now = Date.now();
+  if (clockRun !== batch.startedAt) {
+    clockRun = batch.startedAt;
+    clocks = new Map();
+  } else if (running && !clockRunning) {
+    // A retry begins a fresh attempt for every tile that has not settled yet, including
+    // the ones an earlier cancel put back to waiting.
+    for (const tile of batch.tiles) {
+      if (isGoing(tile)) clocks.set(tile.index, { startedAt: now, settledAt: null });
+    }
+  }
+  clockRunning = running;
+
+  const present = new Set<number>();
+  for (const tile of batch.tiles) {
+    present.add(tile.index);
+    const clock = clocks.get(tile.index);
+    if (isGoing(tile)) {
+      if (clock === undefined) {
+        clocks.set(tile.index, { startedAt: batch.startedAt, settledAt: null });
+      } else if (clock.settledAt !== null) {
+        clocks.set(tile.index, { startedAt: now, settledAt: null });
+      }
+      continue;
+    }
+    if (clock !== undefined && clock.settledAt === null) {
+      clocks.set(tile.index, { startedAt: clock.startedAt, settledAt: now });
+    }
+  }
+  // A tile that was already settled when it first appeared, such as one folded in from a
+  // stored record, has no honest start, so it gets no clock and shows no duration.
+  for (const index of clocks.keys()) {
+    if (!present.has(index)) clocks.delete(index);
+  }
+  return clocks;
+}
+
+/** Seconds under a minute, then m:ss. */
+function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  if (total < 60) return `${total}s`;
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function elapsedLabel(clock: TileClock | undefined, now: number): string | null {
+  if (clock === undefined) return null;
+  return formatElapsed((clock.settledAt ?? now) - clock.startedAt);
+}
+
 interface ResultTileProps {
   tile: GenerationTile;
   total: number;
   width: number;
   height: number;
+  /** Elapsed time in a display form, or null when there is no honest start to count from. */
+  elapsed: string | null;
   settled: boolean;
   canRetry: boolean;
   onRetry: (index: number) => void;
 }
 
-function ResultTile({ tile, total, width, height, settled, canRetry, onRetry }: ResultTileProps): ReactNode {
+function ResultTile({ tile, total, width, height, elapsed, settled, canRetry, onRetry }: ResultTileProps): ReactNode {
   const label = `Image ${tile.index + 1} of ${total}`;
 
   return (
     <article className={`gen-tile ${stateClass(tile)}`} style={ratioStyle(width, height)} aria-label={label}>
       <span className="gen-tile-index">{String(tile.index + 1).padStart(2, '0')}</span>
-      <span className={`gen-tile-state ${stateClass(tile)}`}>{stateLabel(tile)}</span>
+      <span className="gen-tile-tags">
+        {elapsed === null ? null : (
+          // role=timer keeps the once a second change out of live announcements.
+          <span className={tile.phase === 'running' ? 'gen-tile-elapsed is-live' : 'gen-tile-elapsed'} role="timer">
+            {elapsed}
+          </span>
+        )}
+        <span className={`gen-tile-state ${stateClass(tile)}`}>{stateLabel(tile)}</span>
+      </span>
 
       {tile.phase === 'done' && tile.imageId !== null ? (
         <img className="gen-tile-image" src={imageUrl(tile.imageId)} alt={`Generated result ${tile.index + 1} of ${total}`} />
@@ -102,13 +194,19 @@ function ResultTile({ tile, total, width, height, settled, canRetry, onRetry }: 
       {tile.phase === 'running' ? (
         <div className="gen-tile-body gen-tile-progress">
           <p className="gen-tile-stage">{tile.stage ?? 'Sampling'}</p>
-          <p className="gen-tile-step">
-            {tile.step !== null && tile.totalSteps !== null ? `step ${tile.step} of ${tile.totalSteps}` : 'working'}
-            {tile.percent === null ? '' : ` / ${tile.percent}%`}
-          </p>
-          <span className="gen-bar" role="presentation">
-            <span className="gen-bar-fill" style={{ width: `${tile.percent ?? 0}%` }} />
-          </span>
+          {/* A provider that reports no step progress sends no percent, so there is no
+              bar to fill and no number to show. The elapsed clock is the whole signal. */}
+          {tile.percent === null ? null : (
+            <>
+              <p className="gen-tile-step">
+                {tile.step !== null && tile.totalSteps !== null ? `step ${tile.step} of ${tile.totalSteps}` : 'working'}
+                {` / ${tile.percent}%`}
+              </p>
+              <span className="gen-bar" role="presentation">
+                <span className="gen-bar-fill" style={{ width: `${tile.percent}%` }} />
+              </span>
+            </>
+          )}
         </div>
       ) : null}
 
@@ -176,6 +274,22 @@ export function ResultsGrid({
   onReload,
   onUseStarter,
 }: ResultsGridProps): ReactNode {
+  const tickClocks = reconcileClocks(batch, running);
+  const going = batch !== null && batch.tiles.some(isGoing);
+  const [now, setNow] = useState(() => Date.now());
+
+  // One interval for the whole surface, and only while a tile is still going: a timer per
+  // tile would fire for the same second and update state per tile. Nothing outside this
+  // subtree re-renders, because the tick lives here.
+  useEffect(() => {
+    if (!running || !going) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [running, going]);
+
   if (batch === null) {
     return (
       <section className="gen-results" aria-label="Batch results">
@@ -242,7 +356,12 @@ export function ResultsGrid({
           <span className="gen-progress-count">
             {settled} of {batch.tiles.length} settled
           </span>
-          <span className="gen-progress-percent">{summary === null ? 0 : summary.percent}%</span>
+          <span className="gen-progress-meta">
+            <span className="gen-progress-elapsed" role="timer">
+              {formatElapsed(now - batch.startedAt)}
+            </span>
+            <span className="gen-progress-percent">{summary === null ? 0 : summary.percent}%</span>
+          </span>
         </p>
       ) : null}
 
@@ -274,6 +393,7 @@ export function ResultsGrid({
             total={batch.tiles.length}
             width={batch.width}
             height={batch.height}
+            elapsed={elapsedLabel(tickClocks.get(tile.index), now)}
             settled={!running}
             canRetry={canRetry}
             onRetry={(index) => onRetry([index])}

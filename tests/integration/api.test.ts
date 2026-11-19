@@ -264,6 +264,95 @@ describe('health and the provider surface', () => {
     expect(errorOf(await response.json()).code).toBe('invalid_body');
   });
 
+  it('rejects saved provider options that would otherwise fail during a generation', async () => {
+    const countProviders = async (): Promise<number> =>
+      bodyOf(await api<ProviderConfig[]>('GET', '/api/providers')).length;
+    const before = await countProviders();
+
+    const badTemplate = await api('POST', '/api/providers', {
+      kind: 'comfyui',
+      label: 'Broken template',
+      baseUrl: 'http://127.0.0.1:8188',
+      options: { workflowTemplate: '{"3": ' },
+    });
+    expect(badTemplate.status).toBe(400);
+    const templateError = errorOf(badTemplate.body);
+    expect(templateError.code).toBe('invalid_body');
+    expect(templateError.message).toContain('options.workflowTemplate');
+
+    const badCapabilities = await api('POST', '/api/providers', {
+      kind: 'comfyui',
+      label: 'Broken capabilities',
+      baseUrl: 'http://127.0.0.1:8188',
+      options: { capabilities: { fixedSteps: 'six' } },
+    });
+    expect(badCapabilities.status).toBe(400);
+    const capabilitiesError = errorOf(badCapabilities.body);
+    expect(capabilitiesError.code).toBe('invalid_body');
+    expect(capabilitiesError.message).toContain('options.capabilities.fixedSteps');
+
+    const typo = await api('POST', '/api/providers', {
+      kind: 'comfyui',
+      label: 'Typo capabilities',
+      baseUrl: 'http://127.0.0.1:8188',
+      options: { capabilities: { fixedStep: 6 } },
+    });
+    expect(typo.status).toBe(400);
+    expect(errorOf(typo.body).message).toContain('fixedStep');
+
+    // A PATCH is refused the same way and leaves the stored provider alone.
+    const patched = await api('PATCH', '/api/providers/comfyui', {
+      options: { workflowTemplate: '[]' },
+    });
+    expect(patched.status).toBe(400);
+    expect(errorOf(patched.body).code).toBe('invalid_body');
+    const unchanged = bodyOf(await api<ProviderConfig[]>('GET', '/api/providers')).find(
+      (config) => config.id === 'comfyui',
+    );
+    expect(unchanged?.options).toBeUndefined();
+
+    // Nothing was saved, so no later generation can meet the bad payload.
+    expect(await countProviders()).toBe(before);
+  });
+
+  it('accepts a valid workflow template and capabilities override and serves the declared capabilities', async () => {
+    const template = {
+      '3': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: '{{ckpt}}' } },
+      '4': { class_type: 'CLIPTextEncode', inputs: { text: '{{prompt}}', clip: ['3', 1] } },
+      '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'h3-studio', images: ['4', 0] } },
+    };
+    const created = await api<ProviderConfig>('POST', '/api/providers', {
+      kind: 'comfyui',
+      label: 'MiniMax H3',
+      baseUrl: 'http://127.0.0.1:8188',
+      enabled: false,
+      options: {
+        workflowTemplate: JSON.stringify(template),
+        capabilities: { negativePrompt: false, fixedSteps: 6, adjustableSteps: false },
+      },
+    });
+    expect(created.status).toBe(201);
+    const provider = bodyOf(created);
+    expect(provider.options?.['workflowTemplate']).toBe(JSON.stringify(template));
+
+    // The saved override is what the inspector reads: capabilities() touches no network.
+    const capabilities = await api<ProviderCapabilities>(
+      'GET',
+      `/api/providers/${encodeURIComponent(provider.id)}/capabilities`,
+    );
+    expect(capabilities.status).toBe(200);
+    const declared = bodyOf(capabilities);
+    expect(declared.negativePrompt).toBe(false);
+    expect(declared.fixedSteps).toBe(6);
+    expect(declared.adjustableSteps).toBe(false);
+    // Fields the override leaves out still describe the standard graph.
+    expect(declared.seed).toBe(true);
+    expect(declared.maxBatch).toBe(4);
+
+    const removed = await api('DELETE', `/api/providers/${encodeURIComponent(provider.id)}`);
+    expect(removed.status).toBe(200);
+  });
+
   it('reports capabilities and health for a provider', async () => {
     const capabilities = await api<ProviderCapabilities>('GET', '/api/providers/mock/capabilities');
     expect(capabilities.status).toBe(200);

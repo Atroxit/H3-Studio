@@ -168,6 +168,17 @@
   color: var(--text-muted);
 }
 
+.gen-progress-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.gen-progress-elapsed {
+  color: var(--text-muted);
+}
+
 .gen-progress-percent {
   color: var(--text);
 }
@@ -246,11 +257,11 @@
   object-fit: cover;
 }
 
+/* The index sits at the top left. The state and, beside it, the elapsed clock read as one
+   row at the top right, so a tile with no clock leaves no gap. */
 .gen-tile-index,
-.gen-tile-state {
-  position: absolute;
-  top: var(--space-2);
-  z-index: 2;
+.gen-tile-state,
+.gen-tile-elapsed {
   padding: 3px var(--space-2);
   border: 1px solid var(--line);
   border-radius: var(--radius-pill);
@@ -262,14 +273,37 @@
 }
 
 .gen-tile-index {
+  position: absolute;
+  top: var(--space-2);
   left: var(--space-2);
+  z-index: 2;
   color: var(--text);
 }
 
-.gen-tile-state {
+.gen-tile-tags {
+  position: absolute;
+  top: var(--space-2);
   right: var(--space-2);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  pointer-events: none;
+}
+
+.gen-tile-state {
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+/* Tabular figures, so a digit that changes width cannot shift the row once a second.
+   No animation: the number itself is the change. */
+.gen-tile-elapsed {
+  font-variant-numeric: tabular-nums;
+}
+
+.gen-tile-elapsed.is-live {
+  color: var(--text);
 }
 
 .gen-tile-state.is-done {

@@ -6,6 +6,7 @@ import type {
   ProviderAdapter,
   ProviderCapabilities,
   ProviderConfig,
+  SizePreset,
 } from '../types';
 
 /** One node of a ComfyUI API format workflow. */
@@ -86,7 +87,26 @@ export const defaultWorkflowTemplate: WorkflowGraph = {
 
 type Replacement = string | number;
 
-function comfyuiCapabilities(): ProviderCapabilities {
+const CAPABILITY_FIELDS: readonly string[] = [
+  'seed',
+  'negativePrompt',
+  'adjustableSteps',
+  'fixedSteps',
+  'guidance',
+  'maxReferenceImages',
+  'maxBatch',
+  'arbitrarySize',
+  'sizeMultiple',
+  'presets',
+  'outputFormats',
+  'streamingProgress',
+  'notes',
+];
+
+const PRESET_FIELDS: readonly string[] = ['id', 'label', 'width', 'height'];
+
+/** A standard text to image graph can do all of this. */
+function baseCapabilities(): ProviderCapabilities {
   return {
     seed: true,
     negativePrompt: true,
@@ -110,6 +130,136 @@ function comfyuiCapabilities(): ProviderCapabilities {
       'Progress is polled from the ComfyUI history endpoint, not streamed by the server.',
     ],
   };
+}
+
+function invalidCapability(field: string, expected: string): ComfyUIError {
+  return new ComfyUIError(`ComfyUI options.capabilities.${field} must be ${expected}`, 'invalid_capabilities');
+}
+
+function readBooleanCapability(field: string, value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  throw invalidCapability(field, 'a boolean');
+}
+
+function readPositiveIntegerCapability(field: string, value: unknown): number {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value;
+  throw invalidCapability(field, 'a positive integer');
+}
+
+function readReferenceCountCapability(field: string, value: unknown): number {
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value;
+  throw invalidCapability(field, 'a non negative integer');
+}
+
+function readFixedStepsCapability(value: unknown): number | null {
+  if (value === null) return null;
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value;
+  throw invalidCapability('fixedSteps', 'a positive integer or null');
+}
+
+function readStringListCapability(field: string, value: unknown): string[] {
+  if (!Array.isArray(value)) throw invalidCapability(field, 'an array of strings');
+  const entries: unknown[] = value;
+  const strings: string[] = [];
+  for (const entry of entries) {
+    if (typeof entry !== 'string') throw invalidCapability(field, 'an array of strings');
+    strings.push(entry);
+  }
+  return strings;
+}
+
+function readPresetsCapability(value: unknown): SizePreset[] {
+  if (!Array.isArray(value)) {
+    throw invalidCapability('presets', 'an array of size presets with id, label, width and height');
+  }
+  const entries: unknown[] = value;
+  return entries.map((entry, index) => {
+    const field = `presets[${index}]`;
+    if (!isRecord(entry)) throw invalidCapability(field, 'an object with id, label, width and height');
+    for (const key of Object.keys(entry)) {
+      if (!PRESET_FIELDS.includes(key)) {
+        throw new ComfyUIError(
+          `ComfyUI options.capabilities.${field}.${key} is not a size preset field. Use id, label, width or height`,
+          'invalid_capabilities',
+        );
+      }
+    }
+    const id = entry['id'];
+    const label = entry['label'];
+    if (typeof id !== 'string' || id.length === 0) throw invalidCapability(`${field}.id`, 'a non empty string');
+    if (typeof label !== 'string' || label.length === 0) {
+      throw invalidCapability(`${field}.label`, 'a non empty string');
+    }
+    return {
+      id,
+      label,
+      width: readPositiveIntegerCapability(`${field}.width`, entry['width']),
+      height: readPositiveIntegerCapability(`${field}.height`, entry['height']),
+    };
+  });
+}
+
+/** Applies one override field, or throws when the name or the shape is not one this contract knows. */
+function assignCapability(override: Partial<ProviderCapabilities>, field: string, value: unknown): void {
+  switch (field) {
+    case 'seed':
+    case 'negativePrompt':
+    case 'adjustableSteps':
+    case 'guidance':
+    case 'arbitrarySize':
+    case 'streamingProgress':
+      override[field] = readBooleanCapability(field, value);
+      return;
+    case 'fixedSteps':
+      override.fixedSteps = readFixedStepsCapability(value);
+      return;
+    case 'maxReferenceImages':
+      override.maxReferenceImages = readReferenceCountCapability(field, value);
+      return;
+    case 'maxBatch':
+    case 'sizeMultiple':
+      override[field] = readPositiveIntegerCapability(field, value);
+      return;
+    case 'presets':
+      override.presets = readPresetsCapability(value);
+      return;
+    case 'outputFormats':
+      override.outputFormats = readStringListCapability(field, value);
+      return;
+    case 'notes':
+      override.notes = readStringListCapability(field, value);
+      return;
+    default:
+      throw new ComfyUIError(
+        `ComfyUI options.capabilities.${field} is not a capability. Use one of: ${CAPABILITY_FIELDS.join(', ')}`,
+        'invalid_capabilities',
+      );
+  }
+}
+
+function readCapabilityOverride(options: Record<string, unknown>): Partial<ProviderCapabilities> {
+  const raw = options['capabilities'];
+  if (raw === undefined) return {};
+  if (!isRecord(raw)) {
+    throw new ComfyUIError(
+      'ComfyUI options.capabilities must be an object of capability fields',
+      'invalid_capabilities',
+    );
+  }
+  const override: Partial<ProviderCapabilities> = {};
+  for (const [field, value] of Object.entries(raw)) {
+    assignCapability(override, field, value);
+  }
+  return override;
+}
+
+/**
+ * The capabilities of the model this provider serves: the text to image defaults with
+ * options.capabilities merged over them field by field. A typo or a wrong type throws, so
+ * the inspector never quietly renders controls the served model does not have.
+ */
+function comfyuiCapabilities(options: Record<string, unknown>): ProviderCapabilities {
+  return { ...baseCapabilities(), ...readCapabilityOverride(options) };
 }
 
 function errorMessage(error: unknown): string {
@@ -475,7 +625,7 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
     label: config.label,
     kind: 'comfyui',
     health: () => health(baseUrl),
-    capabilities: async () => comfyuiCapabilities(),
+    capabilities: async () => comfyuiCapabilities(options),
     generate,
   };
 }

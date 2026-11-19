@@ -16,6 +16,133 @@ const SETTINGS_FILE = 'providers.json';
 
 const providerKindSchema = z.enum(['mock', 'comfyui', 'openai-images', 'a1111']);
 
+const MAX_WORKFLOW_TEMPLATE_LENGTH = 512_000;
+
+/** The capability fields a provider may override, checked at the primitive level. */
+const capabilitiesSchema = z
+  .object({
+    seed: z.boolean(),
+    negativePrompt: z.boolean(),
+    adjustableSteps: z.boolean(),
+    fixedSteps: z.number().nullable(),
+    guidance: z.boolean(),
+    maxReferenceImages: z.number(),
+    maxBatch: z.number(),
+    arbitrarySize: z.boolean(),
+    sizeMultiple: z.number(),
+    presets: z.array(
+      z
+        .object({ id: z.string(), label: z.string(), width: z.number(), height: z.number() })
+        .strict(),
+    ),
+    outputFormats: z.array(z.string()),
+    streamingProgress: z.boolean(),
+    notes: z.array(z.string()),
+  })
+  .partial()
+  .strict();
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function receivedKind(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'an array';
+  if (typeof value === 'string') return 'a string';
+  if (typeof value === 'number') return 'a number';
+  if (typeof value === 'boolean') return 'a boolean';
+  if (typeof value === 'object') return 'an object';
+  return `a ${typeof value}`;
+}
+
+/**
+ * A saved template must be the API format graph the adapter substitutes into, so a malformed
+ * one is refused at save time with a readable 400 instead of failing during a generation.
+ */
+function checkWorkflowTemplate(raw: unknown, ctx: z.RefinementCtx): void {
+  if (raw === undefined) return;
+  if (typeof raw !== 'string') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['workflowTemplate'],
+      message: `Invalid input: expected a JSON string, received ${receivedKind(raw)}`,
+    });
+    return;
+  }
+  if (raw.length > MAX_WORKFLOW_TEMPLATE_LENGTH) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['workflowTemplate'],
+      message: `Invalid input: expected at most ${MAX_WORKFLOW_TEMPLATE_LENGTH} characters, received ${raw.length}`,
+    });
+    return;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    ctx.addIssue({
+      code: 'custom',
+      path: ['workflowTemplate'],
+      message: `Invalid input: expected valid JSON, received text that does not parse (${detail})`,
+    });
+    return;
+  }
+  if (!isPlainObject(parsed)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['workflowTemplate'],
+      message: `Invalid input: expected an object of node id to node, received ${receivedKind(parsed)}`,
+    });
+    return;
+  }
+  for (const [nodeId, node] of Object.entries(parsed)) {
+    if (!isPlainObject(node)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['workflowTemplate', nodeId],
+        message: `Invalid input: expected a node object with a string class_type and an object inputs, received ${receivedKind(node)}`,
+      });
+      continue;
+    }
+    if (typeof node['class_type'] !== 'string') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['workflowTemplate', nodeId, 'class_type'],
+        message: `Invalid input: expected a string, received ${receivedKind(node['class_type'])}`,
+      });
+    }
+    if (!isPlainObject(node['inputs'])) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['workflowTemplate', nodeId, 'inputs'],
+        message: `Invalid input: expected an object, received ${receivedKind(node['inputs'])}`,
+      });
+    }
+  }
+}
+
+/** Options are open across providers, but these two are read by an adapter, so they are checked here. */
+function checkCapabilities(raw: unknown, ctx: z.RefinementCtx): void {
+  if (raw === undefined) return;
+  const result = capabilitiesSchema.safeParse(raw);
+  if (result.success) return;
+  for (const issue of result.error.issues) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['capabilities', ...issue.path],
+      message: issue.message,
+    });
+  }
+}
+
+const providerOptionsSchema = z.record(z.string(), z.unknown()).superRefine((options, ctx) => {
+  checkWorkflowTemplate(options['workflowTemplate'], ctx);
+  checkCapabilities(options['capabilities'], ctx);
+});
+
 /** The persisted shape of one provider. Also the validation for a request body. */
 export const providerConfigSchema = z.object({
   id: z.string().min(1).max(128),
@@ -25,7 +152,7 @@ export const providerConfigSchema = z.object({
   apiKey: z.string().max(4096).optional(),
   model: z.string().max(200).optional(),
   enabled: z.boolean().optional(),
-  options: z.record(z.string(), z.unknown()).optional(),
+  options: providerOptionsSchema.optional(),
 });
 
 /** POST /api/providers: the id is assigned by the server. */

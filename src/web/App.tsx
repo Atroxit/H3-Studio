@@ -7,12 +7,13 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type ReactNode,
 } from 'react';
-import type { Preset, ProviderConfig, ProviderKind } from '../core/types';
+import type { Preset, ProviderCapabilities, ProviderConfig, ProviderKind } from '../core/types';
 import {
   checkProviderHealth,
   createProvider,
@@ -24,6 +25,7 @@ import {
   type StudioStats,
 } from './api';
 import { Button, EmptyState, Field, SegmentedControl, Select, Spinner, Toast } from './components';
+import { H3_IMAGE_TEMPLATE_JSON } from './data/h3ImageTemplate';
 import './styles/topbar.css';
 
 // Checked once at startup: only the desktop shell reports Electron in its user agent.
@@ -125,6 +127,46 @@ const PROVIDER_KINDS: ReadonlyArray<ProviderKindMeta> = [
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
 
+/** The names the ComfyUI adapter substitutes inside string values of a workflow graph. */
+const WORKFLOW_PLACEHOLDERS = [
+  'prompt',
+  'negativePrompt',
+  'width',
+  'height',
+  'seed',
+  'steps',
+  'cfg',
+  'ckpt',
+  'batch',
+] as const;
+
+/**
+ * MiniMax H3 image generation is fixed: six sampling steps, guidance at 1, and a
+ * negative prompt is rejected. Nothing here is guessed by the adapter, so the card
+ * can state it once and save it as an override.
+ */
+const H3_IMAGE_CAPABILITIES: ProviderCapabilities = {
+  seed: true,
+  negativePrompt: false,
+  adjustableSteps: false,
+  fixedSteps: 6,
+  guidance: false,
+  maxReferenceImages: 0,
+  maxBatch: 1,
+  arbitrarySize: true,
+  sizeMultiple: 32,
+  presets: [
+    { id: '4096x4096', label: '4096x4096', width: 4096, height: 4096 },
+    { id: '4736x3552', label: '4736x3552', width: 4736, height: 3552 },
+    { id: '3552x4736', label: '3552x4736', width: 3552, height: 4736 },
+    { id: '5472x3072', label: '5472x3072', width: 5472, height: 3072 },
+    { id: '3072x5472', label: '3072x5472', width: 3072, height: 5472 },
+  ],
+  outputFormats: ['png'],
+  streamingProgress: true,
+  notes: ['H3 fixes 6 steps and guidance 1, and it rejects a negative prompt.'],
+};
+
 function formatBytes(bytes: number): string {
   let value = Math.max(0, bytes);
   let unitIndex = 0;
@@ -144,6 +186,68 @@ function describeError(error: unknown): string {
 
 function findProvider(providers: ProviderConfig[], kind: ProviderKind): ProviderConfig | null {
   return providers.find((candidate) => candidate.kind === kind) ?? null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** The saved graph, or an empty string: the adapter falls back to its own graph. */
+function savedWorkflowTemplate(existing: ProviderConfig | null): string {
+  const raw = existing?.options?.['workflowTemplate'];
+  return typeof raw === 'string' ? raw : '';
+}
+
+function savedCapabilityOverride(existing: ProviderConfig | null): Record<string, unknown> | null {
+  const raw = existing?.options?.['capabilities'];
+  return isRecord(raw) ? raw : null;
+}
+
+/**
+ * Checks the text against the ComfyUI API format the adapter reads: an object of
+ * node id to node, and every node carries a string class_type and an object inputs.
+ * Empty is allowed, and nothing here ever throws: the first problem is returned.
+ */
+function workflowTemplateProblem(text: string): string | null {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : 'the text does not parse';
+    return `This is not valid JSON yet. ${detail}`;
+  }
+  if (!isRecord(parsed)) {
+    return 'The graph must be a JSON object of node id to node, not a list or a single value.';
+  }
+  for (const [nodeId, node] of Object.entries(parsed)) {
+    if (!isRecord(node)) return `Node ${nodeId} must be an object with class_type and inputs.`;
+    const classType = node['class_type'];
+    if (typeof classType !== 'string' || classType.length === 0) {
+      return `Node ${nodeId} needs a class_type string, like "KSampler".`;
+    }
+    if (!isRecord(node['inputs'])) return `Node ${nodeId} needs an inputs object.`;
+  }
+  return null;
+}
+
+/** A short description of a saved override, read from the fields the studio can name. */
+function describeCapabilityOverride(override: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const fixedSteps = override['fixedSteps'];
+  if (typeof fixedSteps === 'number') parts.push(`${fixedSteps} fixed steps`);
+  if (override['negativePrompt'] === false) parts.push('negative prompt off');
+  if (override['guidance'] === false) parts.push('guidance off');
+  const presets = override['presets'];
+  if (Array.isArray(presets)) {
+    parts.push(presets.length === 1 ? '1 size preset' : `${presets.length} size presets`);
+  }
+  if (parts.length === 0) {
+    const count = Object.keys(override).length;
+    return `Capability override active: ${count === 1 ? '1 field' : `${count} fields`} set.`;
+  }
+  return `Capability override active: ${parts.join(', ')}.`;
 }
 
 /** ?view=library or ?view=generate, so a screenshot or a bookmark opens where it points. */
@@ -542,24 +646,56 @@ interface SetupCardProps {
 }
 
 function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
+  const graphId = useId();
+  const workflowId = `${graphId}-workflow`;
+  const workflowHintId = `${graphId}-workflow-hint`;
+  // Only ComfyUI reads a graph, so only its card grows the advanced section.
+  const isComfy = meta.kind === 'comfyui';
+
   const [baseUrl, setBaseUrl] = useState(existing === null ? meta.defaultBaseUrl : existing.baseUrl);
   const [configId, setConfigId] = useState<string | null>(existing === null ? null : existing.id);
-  const [busy, setBusy] = useState<'none' | 'testing' | 'enabling'>('none');
+  const [busy, setBusy] = useState<'none' | 'testing' | 'enabling' | 'saving'>('none');
   const [status, setStatus] = useState<{ tone: 'ok' | 'error'; message: string } | null>(null);
+  const [graphOpen, setGraphOpen] = useState(false);
+  const [workflow, setWorkflow] = useState<string>(() => savedWorkflowTemplate(existing));
+  const [capabilities, setCapabilities] = useState<Record<string, unknown> | null>(() =>
+    savedCapabilityOverride(existing),
+  );
 
+  const workflowProblem = workflowTemplateProblem(workflow);
   const trimmedUrl = baseUrl.trim();
   const idle = busy === 'none';
-  const canSave = idle && trimmedUrl.length > 0;
+  const canSave = idle && trimmedUrl.length > 0 && workflowProblem === null;
+
+  /**
+   * The options the server stores. Other keys a saved config carries are kept, and
+   * the graph keys are always present, so clearing the last one clears it on disk.
+   */
+  const optionsDraft = useCallback((): Record<string, unknown> | undefined => {
+    if (!isComfy) return undefined;
+    const next: Record<string, unknown> = { ...(existing?.options ?? {}) };
+    delete next['workflowTemplate'];
+    delete next['capabilities'];
+    const template = workflow.trim();
+    if (template.length > 0) next['workflowTemplate'] = template;
+    if (capabilities !== null) next['capabilities'] = capabilities;
+    return next;
+  }, [capabilities, existing, isComfy, workflow]);
+
+  const draft = useCallback((): Omit<ProviderConfig, 'id'> => {
+    const base: Omit<ProviderConfig, 'id'> = { kind: meta.kind, label: meta.label, baseUrl: trimmedUrl };
+    const options = optionsDraft();
+    return options === undefined ? base : { ...base, options };
+  }, [meta.kind, meta.label, optionsDraft, trimmedUrl]);
 
   const persist = useCallback(async (): Promise<ProviderConfig> => {
-    const draft = { kind: meta.kind, label: meta.label, baseUrl: trimmedUrl };
     if (configId === null) {
-      const created = await createProvider({ ...draft, enabled: false });
+      const created = await createProvider({ ...draft(), enabled: false });
       setConfigId(created.id);
       return created;
     }
-    return updateProvider(configId, draft);
-  }, [configId, meta.kind, meta.label, trimmedUrl]);
+    return updateProvider(configId, draft());
+  }, [configId, draft]);
 
   const testConnection = useCallback(async (): Promise<void> => {
     setBusy('testing');
@@ -579,14 +715,27 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
     }
   }, [persist]);
 
+  const saveGraph = useCallback(async (): Promise<void> => {
+    setBusy('saving');
+    setStatus(null);
+    try {
+      await persist();
+      setStatus({ tone: 'ok', message: 'The graph is saved. This provider uses it on the next run.' });
+    } catch (error) {
+      setStatus({ tone: 'error', message: describeError(error) });
+    } finally {
+      setBusy('none');
+    }
+  }, [persist]);
+
   const enable = useCallback(async (): Promise<void> => {
     setBusy('enabling');
     setStatus(null);
     try {
       const saved =
         configId === null
-          ? await createProvider({ kind: meta.kind, label: meta.label, baseUrl: trimmedUrl, enabled: true })
-          : await updateProvider(configId, { baseUrl: trimmedUrl, enabled: true });
+          ? await createProvider({ ...draft(), enabled: true })
+          : await updateProvider(configId, { ...draft(), enabled: true });
       setConfigId(saved.id);
       setBusy('none');
       onEnabled(saved);
@@ -594,7 +743,7 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
       setStatus({ tone: 'error', message: describeError(error) });
       setBusy('none');
     }
-  }, [configId, existing, meta.kind, meta.label, onEnabled, trimmedUrl]);
+  }, [configId, draft, onEnabled]);
 
   return (
     <section className="setup-card" aria-labelledby={`setup-${meta.kind}`}>
@@ -629,6 +778,113 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
           {status.message}
         </p>
       )}
+      {isComfy ? (
+        <section className="setup-advanced" aria-labelledby={`${graphId}-title`}>
+          <button
+            type="button"
+            className="setup-advanced-toggle"
+            aria-expanded={graphOpen}
+            aria-controls={`${graphId}-panel`}
+            onClick={() => {
+              setGraphOpen(!graphOpen);
+            }}
+          >
+            <svg className="icon setup-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M9.5 6.5L15 12l-5.5 5.5" />
+            </svg>
+            <span className="setup-advanced-title" id={`${graphId}-title`}>
+              Advanced graph
+            </span>
+            <span className="setup-advanced-count">
+              {workflow.trim().length === 0 ? 'Default graph' : 'Custom graph'}
+            </span>
+          </button>
+          <div className="setup-advanced-panel" id={`${graphId}-panel`} hidden={!graphOpen}>
+            <div className="field">
+              <label className="field-label" htmlFor={workflowId}>
+                Workflow template
+              </label>
+              <textarea
+                id={workflowId}
+                className="field-textarea setup-code"
+                rows={10}
+                spellCheck={false}
+                autoComplete="off"
+                value={workflow}
+                disabled={!idle}
+                aria-invalid={workflowProblem === null ? undefined : true}
+                aria-describedby={workflowProblem === null ? workflowHintId : `${workflowHintId} ${workflowId}-error`}
+                placeholder={`{\n  "3": {\n    "class_type": "KSampler",\n    "inputs": { "seed": "{{seed}}", "steps": "{{steps}}" }\n  }\n}`}
+                onChange={(event) => {
+                  setWorkflow(event.target.value);
+                }}
+              />
+              <p className="field-hint" id={workflowHintId}>
+                Available placeholders:{' '}
+                {WORKFLOW_PLACEHOLDERS.map((name, index) => (
+                  <span key={name}>
+                    {index === 0 ? null : ', '}
+                    <code className="setup-token">{`{{${name}}}`}</code>
+                  </span>
+                ))}
+                . The value must be in ComfyUI API format (Workflow menu, Export (API)), not the normal saved
+                workflow. An empty value keeps the adapter's built in graph.
+              </p>
+              {workflowProblem === null ? null : (
+                <p className="field-error" id={`${workflowId}-error`} role="alert">
+                  {workflowProblem}
+                </p>
+              )}
+            </div>
+            <div className="setup-advanced-actions">
+              <Button
+                variant="secondary"
+                size="sm"
+                busy={busy === 'saving'}
+                disabled={!canSave}
+                onClick={() => void saveGraph()}
+              >
+                Save graph
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!idle}
+                onClick={() => {
+                  setWorkflow(H3_IMAGE_TEMPLATE_JSON);
+                }}
+              >
+                Load H3 Image graph
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!idle}
+                onClick={() => {
+                  setCapabilities({ ...H3_IMAGE_CAPABILITIES });
+                }}
+              >
+                H3 Image capabilities
+              </Button>
+            </div>
+            {capabilities === null ? null : (
+              <div className="setup-override">
+                <p className="setup-override-summary">{describeCapabilityOverride(capabilities)}</p>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={!idle}
+                  onClick={() => {
+                    setCapabilities(null);
+                  }}
+                >
+                  Clear override
+                </Button>
+              </div>
+            )}
+          </div>
+        </section>
+      ) : null}
     </section>
   );
 }

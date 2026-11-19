@@ -431,6 +431,100 @@ describe('ComfyUI adapter', () => {
     expect(notes).toContain('polled');
   });
 
+  it('merges a capabilities override over the defaults field by field', async () => {
+    const adapter = createComfyUIAdapter(
+      comfyConfig('http://127.0.0.1:1', {
+        capabilities: {
+          maxBatch: 2,
+          sizeMultiple: 64,
+          presets: [
+            { id: 'h3-1024', label: '1024 x 1024', width: 1024, height: 1024 },
+            { id: 'h3-1536', label: '1536 x 864', width: 1536, height: 864 },
+          ],
+          notes: ['The H3 graph takes a size and a seed, and nothing else.'],
+        },
+      }),
+    );
+
+    const capabilities = await adapter.capabilities();
+
+    expect(capabilities.maxBatch).toBe(2);
+    expect(capabilities.sizeMultiple).toBe(64);
+    expect(capabilities.presets.map((preset) => preset.id)).toEqual(['h3-1024', 'h3-1536']);
+    expect(capabilities.presets[0]?.label).toBe('1024 x 1024');
+    expect(capabilities.notes).toEqual(['The H3 graph takes a size and a seed, and nothing else.']);
+    // Fields the override does not name keep the text to image defaults.
+    expect(capabilities.seed).toBe(true);
+    expect(capabilities.negativePrompt).toBe(true);
+    expect(capabilities.adjustableSteps).toBe(true);
+    expect(capabilities.fixedSteps).toBeNull();
+    expect(capabilities.guidance).toBe(true);
+    expect(capabilities.maxReferenceImages).toBe(0);
+    expect(capabilities.arbitrarySize).toBe(true);
+    expect(capabilities.outputFormats).toEqual(['png']);
+    expect(capabilities.streamingProgress).toBe(true);
+  });
+
+  it('can declare a model with fixed sampling and no negative prompt', async () => {
+    const adapter = createComfyUIAdapter(
+      comfyConfig('http://127.0.0.1:1', {
+        capabilities: { negativePrompt: false, fixedSteps: 6, adjustableSteps: false, guidance: false },
+      }),
+    );
+
+    const capabilities = await adapter.capabilities();
+
+    expect(capabilities.negativePrompt).toBe(false);
+    expect(capabilities.fixedSteps).toBe(6);
+    expect(capabilities.adjustableSteps).toBe(false);
+    expect(capabilities.guidance).toBe(false);
+    // Everything else still describes a text to image graph.
+    expect(capabilities.seed).toBe(true);
+    expect(capabilities.maxBatch).toBe(4);
+    expect(capabilities.sizeMultiple).toBe(8);
+    expect(capabilities.presets).toHaveLength(4);
+    expect(capabilities.notes).toHaveLength(2);
+  });
+
+  it('rejects an unknown capability name instead of ignoring it', async () => {
+    const adapter = createComfyUIAdapter(comfyConfig('http://127.0.0.1:1', { capabilities: { seeds: true } }));
+
+    const failure = await adapter.capabilities().then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(ComfyUIError);
+    if (!(failure instanceof ComfyUIError)) throw new Error('expected a ComfyUIError');
+    expect(failure.code).toBe('invalid_capabilities');
+    expect(failure.message).toContain('options.capabilities.seeds');
+    expect(failure.message).toContain('negativePrompt');
+  });
+
+  it('rejects a wrong capability type and a malformed preset with the field named', async () => {
+    const wrongType = createComfyUIAdapter(comfyConfig('http://127.0.0.1:1', { capabilities: { maxBatch: '4' } }));
+    await expect(wrongType.capabilities()).rejects.toThrow(
+      /options\.capabilities\.maxBatch must be a positive integer/,
+    );
+    await expect(wrongType.capabilities()).rejects.toMatchObject({ code: 'invalid_capabilities' });
+
+    const badPreset = createComfyUIAdapter(
+      comfyConfig('http://127.0.0.1:1', {
+        capabilities: { presets: [{ id: 'wide', label: 'Wide', width: 0, height: 512 }] },
+      }),
+    );
+    await expect(badPreset.capabilities()).rejects.toThrow(/options\.capabilities\.presets\[0\]\.width/);
+
+    const unknownPresetField = createComfyUIAdapter(
+      comfyConfig('http://127.0.0.1:1', {
+        capabilities: { presets: [{ id: 'wide', label: 'Wide', width: 512, height: 512, shade: 2 }] },
+      }),
+    );
+    await expect(unknownPresetField.capabilities()).rejects.toThrow(
+      /options\.capabilities\.presets\[0\]\.shade is not a size preset field/,
+    );
+  });
+
   it('ships a default text to image template with the contract node classes', () => {
     const classTypes = Object.values(defaultWorkflowTemplate).map((node) => node.class_type);
     expect(classTypes.filter((type) => type === 'CLIPTextEncode')).toHaveLength(2);
