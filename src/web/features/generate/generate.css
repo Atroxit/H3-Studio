@@ -851,6 +851,11 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+.gen-chips:not(.is-stacked) .gen-chip-body {
+  align-items: center;
+  text-align: center;
+}
+
 /* Numeric scale: ten counts cost two even rows of five rather than a 9 and 1
    wrap, whatever the panel width. */
 .gen-chips.is-compact {
