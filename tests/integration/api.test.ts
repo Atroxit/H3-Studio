@@ -445,6 +445,16 @@ describe('health and the provider surface', () => {
     expect(unknown.status).toBe(404);
     expect(errorOf(unknown.body).code).toBe('unknown_provider');
   });
+
+  it('reports the status pill state for a provider', async () => {
+    const ready = await api<{ state: string; detail?: string }>('GET', '/api/providers/mock/status');
+    expect(ready.status).toBe(200);
+    expect(bodyOf(ready).state).toBe('ready');
+
+    const unknown = await api('GET', '/api/providers/nope/status');
+    expect(unknown.status).toBe(404);
+    expect(errorOf(unknown.body).code).toBe('unknown_provider');
+  });
 });
 
 describe('references and generation', () => {
@@ -835,6 +845,47 @@ describe('the library surface', () => {
     const missing = await api('POST', '/api/batches/batch_missing/retry', { indices: [0] });
     expect(missing.status).toBe(404);
     expect(errorOf(missing.body).code).toBe('unknown_batch');
+  });
+
+  it('persists the model settings and the alteration source across a retry', async () => {
+    const sourceBatchId = await startGeneration({
+      providerId: 'mock',
+      prompt: 'a source image for comparison',
+      width: 128,
+      height: 128,
+      count: 1,
+      seed: 31,
+    });
+    const sourceBatch = await waitForSettled(sourceBatchId);
+    const sourceImage = sourceBatch.images[0];
+    if (sourceImage === undefined) throw new Error('expected the source batch to store an image');
+
+    const alteredId = await startGeneration({
+      providerId: 'mock',
+      prompt: 'make it dusk',
+      width: 128,
+      height: 128,
+      count: 1,
+      seed: 32,
+      referenceIds: [sourceImage.id],
+      modelVariant: 'int8_convrot',
+      enhancePrompt: true,
+      promptEnhancer: 'qwen3.8_27b',
+    });
+    const altered = await waitForSettled(alteredId);
+    expect(altered.sourceImageId).toBe(sourceImage.id);
+    expect(altered.modelVariant).toBe('int8_convrot');
+    expect(altered.enhancePrompt).toBe(true);
+    expect(altered.promptEnhancer).toBe('qwen3.8_27b');
+
+    const retried = await api<{ batchId: string }>('POST', `/api/batches/${alteredId}/retry`, { indices: [0] });
+    expect(retried.status).toBe(202);
+    const retryBatch = await waitForSettled(bodyOf(retried).batchId);
+    expect(retryBatch.status).toBe('complete');
+    expect(retryBatch.sourceImageId).toBe(sourceImage.id);
+    expect(retryBatch.modelVariant).toBe('int8_convrot');
+    expect(retryBatch.enhancePrompt).toBe(true);
+    expect(retryBatch.promptEnhancer).toBe('qwen3.8_27b');
   });
 
   it('lists and deletes batches', async () => {

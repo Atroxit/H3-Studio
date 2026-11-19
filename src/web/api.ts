@@ -5,6 +5,7 @@ import type {
   BatchRecord,
   GenerationEvent,
   H3ModelVariant,
+  H3PromptEnhancer,
   Preset,
   ProviderCapabilities,
   ProviderConfig,
@@ -28,6 +29,14 @@ export interface ProviderHealth {
   detail?: string;
 }
 
+export type ProviderStatusState = 'ready' | 'starting' | 'offline' | 'error';
+
+/** What the top bar pill shows: the health of the provider plus the launcher's state. */
+export interface ProviderStatus {
+  state: ProviderStatusState;
+  detail?: string;
+}
+
 export interface OkResponse {
   ok: boolean;
 }
@@ -48,6 +57,7 @@ export interface GenerationBody {
   guidance?: number;
   referenceIds?: string[];
   enhancePrompt?: boolean;
+  promptEnhancer?: H3PromptEnhancer;
   modelVariant?: H3ModelVariant;
 }
 
@@ -151,6 +161,10 @@ export async function deleteProvider(id: string): Promise<OkResponse> {
 
 export async function checkProviderHealth(id: string): Promise<ProviderHealth> {
   return (await send('GET', `/api/providers/${encodeURIComponent(id)}/health`)) as ProviderHealth;
+}
+
+export async function getProviderStatus(id: string): Promise<ProviderStatus> {
+  return (await send('GET', `/api/providers/${encodeURIComponent(id)}/status`)) as ProviderStatus;
 }
 
 export async function getProviderCapabilities(id: string): Promise<ProviderCapabilities> {

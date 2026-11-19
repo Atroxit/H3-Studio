@@ -70,6 +70,68 @@
   font-size: var(--text-sm);
 }
 
+/* Live backend state: one dot and one word, sitting next to the provider choice.
+   It is a button because clicking it opens the setup screen that can fix the state. */
+.studio .topbar .topbar-backend-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  font-family: var(--font-ui);
+  font-size: var(--text-micro);
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.studio .topbar .topbar-backend-status:hover {
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+
+.studio .topbar .topbar-backend-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--text-faint);
+}
+
+.studio .topbar .topbar-backend-status.is-ready {
+  border-color: var(--ok-line);
+  color: var(--ok);
+}
+
+.studio .topbar .topbar-backend-status.is-ready .topbar-backend-dot {
+  background: var(--ok);
+}
+
+.studio .topbar .topbar-backend-status.is-starting {
+  border-color: var(--warn-line);
+  color: var(--warn);
+}
+
+.studio .topbar .topbar-backend-status.is-starting .topbar-backend-dot {
+  background: var(--warn);
+}
+
+.studio .topbar .topbar-backend-status.is-error {
+  border-color: var(--danger-line);
+  color: var(--danger);
+}
+
+.studio .topbar .topbar-backend-status.is-error .topbar-backend-dot {
+  background: var(--danger);
+}
+
+.studio .topbar .topbar-backend-status.is-offline .topbar-backend-dot {
+  background: var(--text-faint);
+}
+
 /* Desktop shell: the bar stands in for the title bar.
    The Windows overlay draws minimise, maximise and close over the page in a strip
    about 138 px wide, so the bar keeps that space clear. The browser view keeps

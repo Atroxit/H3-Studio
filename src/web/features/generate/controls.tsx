@@ -25,6 +25,17 @@ interface ChipOption {
   detail?: string;
 }
 
+/** The prompt enhancer choices, cheapest first, with the bypass rule stated once below. */
+const PROMPT_ENHANCER_OPTIONS: readonly ChipOption[] = [
+  { value: 'off', label: 'Off', detail: 'Use your exact prompt as written' },
+  { value: 'qwen3.5_9b', label: 'Fast (Qwen3.5 9B)', detail: 'Quick art-direction expansion (+15-20s)' },
+  {
+    value: 'qwen3.8_27b',
+    label: 'Best (Qwen3.8 27B H3 PE)',
+    detail: 'Dedicated 27B H3 enhancer for richest detail (+30-45s)',
+  },
+];
+
 /** The two official H3 diffusion models, fast weights first. */
 const MODEL_PRECISION_OPTIONS: readonly ChipOption[] = [
   {
@@ -161,7 +172,7 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const batchHeadingId = useId();
   const advancedHeadingId = useId();
   const advancedPanelId = useId();
-  const enhanceId = useId();
+  const enhancerName = useId();
   const precisionName = useId();
   const referencesHeadingId = useId();
   const notesHeadingId = useId();
@@ -469,22 +480,21 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
               />
             </div>
           ) : null}
-          <label className="gen-check" htmlFor={enhanceId}>
-            <input
-              id={enhanceId}
-              type="checkbox"
-              checked={form.enhancePrompt}
-              disabled={controller.running}
-              onChange={(event) => controller.updateForm({ enhancePrompt: event.target.checked })}
-            />
-            <span className="gen-check-copy">
-              <span className="gen-check-title">Prompt enhancer (Qwen3.5 9B)</span>
-              <span className="field-hint">
-                Rewrites short prompts into richer scene descriptions for higher quality (adds
-                ~15-20s). Bypassed during alterations.
-              </span>
-            </span>
-          </label>
+          <ChipGroup
+            legend="Prompt enhancer"
+            name={enhancerName}
+            value={form.promptEnhancer}
+            options={PROMPT_ENHANCER_OPTIONS}
+            disabled={controller.running}
+            stacked
+            onChange={(value) =>
+              controller.updateForm({
+                promptEnhancer:
+                  value === 'qwen3.5_9b' || value === 'qwen3.8_27b' ? value : 'off',
+              })
+            }
+          />
+          <QuietLine text="Bypassed automatically during alterations." />
         </div>
 
         {advancedNotes.map((note) => (

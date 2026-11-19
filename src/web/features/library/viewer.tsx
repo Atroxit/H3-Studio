@@ -164,6 +164,8 @@ export function ImageViewer({
     height: 720,
   });
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  /** True while the source image is shown in place of the alteration. */
+  const [showOriginal, setShowOriginal] = useState(false);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -199,6 +201,12 @@ export function ImageViewer({
 
   const safePosition = images.length === 0 ? 0 : Math.min(position, images.length - 1);
   const image = images[safePosition];
+  const sourceImageId = batch.sourceImageId ?? null;
+
+  // A different image always opens showing the alteration, never the hold to compare view.
+  useEffect(() => {
+    setShowOriginal(false);
+  }, [image?.id, batch.id]);
 
   // Anchor the next zoom step on whatever part of the image sits at the viewport
   // centre, so the header buttons and the keyboard shortcuts keep the panned spot.
@@ -306,13 +314,34 @@ export function ImageViewer({
       if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
         event.preventDefault();
         setPosition((current) => Math.min(images.length - 1, current + 1));
+        return;
+      }
+      // Holding Space shows the alteration's source image in the same frame and zoom.
+      if (event.code === 'Space' && sourceImageId !== null) {
+        const target = event.target;
+        const onControl =
+          target instanceof HTMLElement && target.closest('button, a, input, textarea, select') !== null;
+        if (onControl) return;
+        event.preventDefault();
+        setShowOriginal(true);
       }
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [images.length, onClose, resetZoom, zoomIn, zoomOut]);
+  }, [images.length, onClose, resetZoom, zoomIn, zoomOut, sourceImageId]);
+
+  // Releasing Space returns to the alteration, which is what makes it a hold, not a toggle.
+  useEffect(() => {
+    const handleKeyUp = (event: KeyboardEvent): void => {
+      if (event.code === 'Space') setShowOriginal(false);
+    };
+    document.addEventListener('keyup', handleKeyUp);
+    return () => {
+      document.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
 
   // Drop any window pan listeners if the viewer unmounts mid drag.
   useEffect(
@@ -544,6 +573,19 @@ export function ImageViewer({
             {images.length === 0 ? 'No images' : `${safePosition + 1} / ${images.length}`}
           </span>
           <div className="lb-viewer-head-actions">
+            {sourceImageId === null || image === undefined ? null : (
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-pressed={showOriginal}
+                onClick={() => {
+                  setShowOriginal((value) => !value);
+                }}
+                title="Toggle original source image (or hold Space)"
+              >
+                {showOriginal ? 'Show altered' : 'Compare original'}
+              </Button>
+            )}
             <Button variant="ghost" size="sm" onClick={() => void copyPrompt()}>
               {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy prompt'}
             </Button>
@@ -621,6 +663,11 @@ export function ImageViewer({
           <p className="lb-viewer-note">This batch has no stored images to show.</p>
         ) : (
           <div className="lb-viewer-stage">
+            {sourceImageId === null ? null : (
+              <span className="lb-viewer-compare-badge" aria-hidden="true">
+                {showOriginal ? 'Original' : 'Altered'}
+              </span>
+            )}
             <button
               type="button"
               className="lb-viewer-nav is-previous"
@@ -654,7 +701,7 @@ export function ImageViewer({
                 <img
                   className="lb-viewer-image"
                   ref={imageRef}
-                  src={imageUrl(image.id)}
+                  src={showOriginal && sourceImageId !== null ? imageUrl(sourceImageId) : imageUrl(image.id)}
                   alt={`Image ${safePosition + 1} of ${images.length} in the batch for ${batch.prompt}`}
                   width={image.width}
                   height={image.height}
@@ -721,7 +768,9 @@ export function ImageViewer({
         </dl>
 
         <p className="lb-viewer-hint">
-          Arrow keys move between images. Escape closes the viewer. Click or scroll to zoom up to 8x, and drag to pan.
+          {sourceImageId === null
+            ? 'Arrow keys move between images. Escape closes the viewer. Click or scroll to zoom up to 8x, and drag to pan.'
+            : 'Arrow keys move between images. Escape closes the viewer. Click or scroll to zoom up to 8x, drag to pan, and hold Space to compare the original.'}
         </p>
       </div>
     </div>

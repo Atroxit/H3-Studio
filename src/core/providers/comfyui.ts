@@ -6,6 +6,7 @@ import type {
   GenerationOutcome,
   GenerationRequest,
   H3ModelVariant,
+  H3PromptEnhancer,
   ProviderAdapter,
   ProviderCapabilities,
   ProviderConfig,
@@ -58,6 +59,12 @@ const H3_UNET_BY_VARIANT: Readonly<Record<H3ModelVariant, string>> = {
   int8_convrot: 'minimax_h3_image_pruned_int8_convrot.safetensors',
 };
 const H3_UNET_NAMES: ReadonlySet<string> = new Set(Object.values(H3_UNET_BY_VARIANT));
+/** The two official H3 prompt enhancer CLIP files, by the mode a request names. */
+const H3_ENHANCER_BY_MODE: Readonly<Record<Exclude<H3PromptEnhancer, 'off'>, string>> = {
+  'qwen3.5_9b': 'qwen3.5_9b_w4a8_gptq.safetensors',
+  'qwen3.8_27b': 'qwen3.8_27b_minimax_h3_image_pe_w4a8_gptq.safetensors',
+};
+const H3_ENHANCER_NAMES: ReadonlySet<string> = new Set(Object.values(H3_ENHANCER_BY_MODE));
 
 /** A standard text to image pipeline. Placeholders are replaced per request. */
 export const defaultWorkflowTemplate: WorkflowGraph = {
@@ -499,19 +506,25 @@ export function attachReferenceImages(
 }
 
 /**
- * Turns the graph's prompt enhancer on or off. The H3 template routes the prompt through
- * a ComfySwitchNode whose switch picks the raw prompt or the Qwen3.5 9B expansion, so
- * toggling that node is the whole feature. An alteration must keep the user's own words,
- * so a reference image always forces the enhancer off. The graph is cloned: a template
- * from options is shared across requests and runs.
+ * Turns the graph's prompt enhancer on or off, and picks which enhancer CLIP it loads.
+ * The H3 template routes the prompt through a ComfySwitchNode whose switch picks the raw
+ * prompt or the expansion, and two CLIPLoader files back the fast and the dedicated 27B
+ * enhancer. An alteration must keep the user's own words, so a reference image always
+ * forces the enhancer off. The graph is cloned: a template from options is shared across
+ * requests and runs.
  */
 export function applyPromptEnhancer(
   graph: Record<string, unknown>,
   enhancePrompt: boolean | undefined,
   hasReferences: boolean,
+  promptEnhancer?: H3PromptEnhancer,
 ): Record<string, unknown> {
-  if (enhancePrompt === undefined) return graph;
-  const wanted = hasReferences ? false : enhancePrompt;
+  if (promptEnhancer === undefined && enhancePrompt === undefined) return graph;
+  const effective: H3PromptEnhancer = hasReferences
+    ? 'off'
+    : (promptEnhancer ?? (enhancePrompt ? 'qwen3.5_9b' : 'off'));
+  const wanted = effective !== 'off';
+  const enhancerClip = effective === 'off' ? null : H3_ENHANCER_BY_MODE[effective];
   const cloned: Record<string, unknown> = {};
   let changed = false;
   for (const [nodeId, node] of Object.entries(graph)) {
@@ -521,8 +534,19 @@ export function applyPromptEnhancer(
     }
     const inputs = node['inputs'];
     if (nodeClassType(node) === 'ComfySwitchNode' && isRecord(inputs) && typeof inputs['switch'] === 'boolean') {
+      if (inputs['switch'] !== wanted) changed = true;
       cloned[nodeId] = { ...node, inputs: { ...inputs, switch: wanted } };
-      changed = true;
+      continue;
+    }
+    if (
+      enhancerClip !== null &&
+      nodeClassType(node) === 'CLIPLoader' &&
+      isRecord(inputs) &&
+      typeof inputs['clip_name'] === 'string' &&
+      H3_ENHANCER_NAMES.has(inputs['clip_name'])
+    ) {
+      if (inputs['clip_name'] !== enhancerClip) changed = true;
+      cloned[nodeId] = { ...node, inputs: { ...inputs, clip_name: enhancerClip } };
       continue;
     }
     cloned[nodeId] = node;
@@ -559,6 +583,111 @@ export function applyModelVariant(
     cloned[nodeId] = node;
   }
   return changed ? cloned : graph;
+}
+
+/** The node ids whose class_type matches, in graph order. */
+function nodeIdsOfClassType(graph: Record<string, unknown>, classType: string): string[] {
+  return Object.entries(graph)
+    .filter(([, node]) => nodeClassType(node) === classType)
+    .map(([nodeId]) => nodeId);
+}
+
+/** The node id a graph link points at, or null when the value is not a link. */
+function linkSource(value: unknown): string | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const source = value[0];
+  if (typeof source === 'string') return source;
+  return typeof source === 'number' && Number.isFinite(source) ? String(source) : null;
+}
+
+/**
+ * Fans one sampler out into `count` samplers, each with its own seed, sharing everything
+ * upstream of the sampler: the conditioning, the text encode, the model and the latent.
+ * A multi image batch therefore costs one text encode instead of one per image.
+ *
+ * Only a graph shaped like a single linear pipeline is expanded: one KSampler feeding one
+ * VAEDecode feeding one SaveImage. Anything else returns null, so a template this helper
+ * does not understand keeps the sequential path it had before.
+ */
+export interface MultiSeedExpansion {
+  graph: Record<string, unknown>;
+  /** Maps each KSampler node id to the 0-based batch slot index. */
+  samplerSlots: Map<string, number>;
+  /** SaveImage node ids in slot order 0..count-1. */
+  saveNodeIds: string[];
+}
+
+export function expandMultiSeedGraph(
+  graph: Record<string, unknown>,
+  count: number,
+  baseSeed: number,
+): MultiSeedExpansion | null {
+  if (count <= 1) return null;
+
+  const samplerIds = nodeIdsOfClassType(graph, 'KSampler');
+  const decodeIds = nodeIdsOfClassType(graph, 'VAEDecode');
+  const saveIds = nodeIdsOfClassType(graph, 'SaveImage');
+  if (samplerIds.length !== 1 || decodeIds.length !== 1 || saveIds.length !== 1) return null;
+  const samplerId = samplerIds[0];
+  const decodeId = decodeIds[0];
+  const saveId = saveIds[0];
+  if (samplerId === undefined || decodeId === undefined || saveId === undefined) return null;
+
+  const decodeNode = graph[decodeId];
+  const saveNode = graph[saveId];
+  const decodeInputs = isRecord(decodeNode) ? decodeNode['inputs'] : undefined;
+  const saveInputs = isRecord(saveNode) ? saveNode['inputs'] : undefined;
+  if (!isRecord(decodeInputs) || !isRecord(saveInputs)) return null;
+  if (linkSource(decodeInputs['samples']) !== samplerId) return null;
+  if (linkSource(saveInputs['images']) !== decodeId) return null;
+
+  const cloned: Record<string, unknown> = {};
+  for (const [nodeId, node] of Object.entries(graph)) {
+    const inputs = isRecord(node) ? node['inputs'] : undefined;
+    cloned[nodeId] = isRecord(node) && isRecord(inputs) ? { ...node, inputs: { ...inputs } } : node;
+  }
+
+  const samplerNode = cloned[samplerId];
+  if (!isRecord(samplerNode) || !isRecord(samplerNode['inputs'])) return null;
+  const samplerInputs = samplerNode['inputs'];
+
+  const taken = new Set(Object.keys(cloned));
+  const uniqueNodeId = (base: string): string => {
+    let counter = 1;
+    let candidate = base;
+    while (taken.has(candidate)) {
+      counter += 1;
+      candidate = `${base}_${counter}`;
+    }
+    taken.add(candidate);
+    return candidate;
+  };
+
+  const samplerSlots = new Map<string, number>();
+  samplerSlots.set(samplerId, 0);
+  const saveNodeIds: string[] = [saveId];
+
+  for (let slot = 1; slot < count; slot += 1) {
+    const samplerNodeId = uniqueNodeId(`batch_sampler_${slot}`);
+    cloned[samplerNodeId] = {
+      class_type: 'KSampler',
+      inputs: { ...samplerInputs, seed: baseSeed + slot },
+    };
+    const decodeNodeId = uniqueNodeId(`batch_decode_${slot}`);
+    cloned[decodeNodeId] = {
+      class_type: 'VAEDecode',
+      inputs: { ...decodeInputs, samples: [samplerNodeId, 0] },
+    };
+    const saveNodeId = uniqueNodeId(`batch_save_${slot}`);
+    cloned[saveNodeId] = {
+      class_type: 'SaveImage',
+      inputs: { ...saveInputs, images: [decodeNodeId, 0] },
+    };
+    samplerSlots.set(samplerNodeId, slot);
+    saveNodeIds.push(saveNodeId);
+  }
+
+  return { graph: cloned, samplerSlots, saveNodeIds };
 }
 
 /**
@@ -601,6 +730,29 @@ function buildReplacements(
     ckpt: checkpoint,
     batch: clampBatch(request.count),
   };
+}
+
+/** The graph one request runs: template, references, enhancer and model variant applied. */
+function graphForRequest(
+  template: WorkflowGraph,
+  request: GenerationRequest,
+  options: Record<string, unknown>,
+  config: ProviderConfig,
+  seed: number,
+  uploadedRefs: readonly string[],
+): Record<string, unknown> {
+  return applyModelVariant(
+    applyPromptEnhancer(
+      attachReferenceImages(
+        substituteWorkflow(template, buildReplacements(request, options, config, seed)),
+        uploadedRefs,
+      ),
+      request.enhancePrompt,
+      uploadedRefs.length > 0,
+      request.promptEnhancer,
+    ),
+    request.modelVariant,
+  );
 }
 
 function parseJson(text: string): unknown {
@@ -679,7 +831,12 @@ interface ComfyImageRef {
 type HistoryState =
   | { state: 'pending' }
   | { state: 'error'; message: string }
-  | { state: 'done'; images: ComfyImageRef[] };
+  | {
+      state: 'done';
+      images: ComfyImageRef[];
+      /** The same images, keyed by the SaveImage node that produced them. */
+      imagesByNode: Record<string, ComfyImageRef[]>;
+    };
 
 interface ExecutionErrorDetails {
   nodeType?: string;
@@ -687,19 +844,36 @@ interface ExecutionErrorDetails {
   exceptionMessage?: string;
 }
 
+/** The images one node's output entry carries, in order. */
+function imagesFromOutput(output: unknown): ComfyImageRef[] {
+  if (!isRecord(output) || !Array.isArray(output['images'])) return [];
+  const images: ComfyImageRef[] = [];
+  for (const image of output['images']) {
+    if (!isRecord(image) || typeof image['filename'] !== 'string') continue;
+    const subfolder = typeof image['subfolder'] === 'string' ? image['subfolder'] : '';
+    images.push({ filename: image['filename'], subfolder });
+  }
+  return images;
+}
+
 function imagesFromEntry(entry: unknown): ComfyImageRef[] {
   const outputs = isRecord(entry) ? entry['outputs'] : undefined;
   if (!isRecord(outputs)) return [];
   const images: ComfyImageRef[] = [];
-  for (const output of Object.values(outputs)) {
-    if (!isRecord(output) || !Array.isArray(output['images'])) continue;
-    for (const image of output['images']) {
-      if (!isRecord(image) || typeof image['filename'] !== 'string') continue;
-      const subfolder = typeof image['subfolder'] === 'string' ? image['subfolder'] : '';
-      images.push({ filename: image['filename'], subfolder });
-    }
-  }
+  for (const output of Object.values(outputs)) images.push(...imagesFromOutput(output));
   return images;
+}
+
+/** Every image of the history entry, keyed by the node that saved it. */
+function imagesByNodeFromEntry(entry: unknown): Record<string, ComfyImageRef[]> {
+  const outputs = isRecord(entry) ? entry['outputs'] : undefined;
+  if (!isRecord(outputs)) return {};
+  const byNode: Record<string, ComfyImageRef[]> = {};
+  for (const [nodeId, output] of Object.entries(outputs)) {
+    const images = imagesFromOutput(output);
+    if (images.length > 0) byNode[nodeId] = images;
+  }
+  return byNode;
 }
 
 /**
@@ -752,7 +926,7 @@ function historyState(history: unknown, promptId: string): HistoryState {
   if (isRecord(status) && status['status_str'] === 'error') {
     return { state: 'error', message: executionErrorMessage(promptId, executionErrorDetails(status)) };
   }
-  return { state: 'done', images: imagesFromEntry(entry) };
+  return { state: 'done', images: imagesFromEntry(entry), imagesByNode: imagesByNodeFromEntry(entry) };
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -837,6 +1011,7 @@ function createProgressWatch(
   graph: Record<string, unknown>,
   ctx: GenerationContext,
   index: number,
+  samplerSlots?: ReadonlyMap<string, number>,
 ): ProgressWatch {
   const nodeStages = new Map<string, string>();
   for (const [nodeId, node] of Object.entries(graph)) {
@@ -845,6 +1020,9 @@ function createProgressWatch(
 
   let promptId: string | null = null;
   let sawProgress = false;
+  // A shared prompt runs its samplers one after another, so the executing node decides
+  // which tile the step progress belongs to.
+  let activeIndex = index;
   let socket: WebSocket | null = null;
   try {
     const SocketConstructor = globalThis.WebSocket;
@@ -888,7 +1066,9 @@ function createProgressWatch(
             : null;
       // A null node means the prompt finished. History polling reports the completion.
       if (nodeId === null || nodeId.length === 0) return;
-      ctx.onEvent({ type: 'progress', index, stage: nodeStages.get(nodeId) ?? 'sampling' });
+      const slot = samplerSlots?.get(nodeId);
+      if (slot !== undefined) activeIndex = slot;
+      ctx.onEvent({ type: 'progress', index: activeIndex, stage: nodeStages.get(nodeId) ?? 'sampling' });
       return;
     }
 
@@ -900,7 +1080,7 @@ function createProgressWatch(
       sawProgress = true;
       ctx.onEvent({
         type: 'progress',
-        index,
+        index: activeIndex,
         stage: 'sampling',
         step: value,
         totalSteps: max,
@@ -994,8 +1174,9 @@ async function runPrompt(
   pollOptions: PollOptions,
   ctx: GenerationContext,
   index: number,
+  samplerSlots?: ReadonlyMap<string, number>,
 ): Promise<PromptRun> {
-  const watch = createProgressWatch(wsUrl, graph, ctx, index);
+  const watch = createProgressWatch(wsUrl, graph, ctx, index, samplerSlots);
   let promptId: string | null = null;
   try {
     promptId = await queuePrompt(baseUrl, clientId, graph, ctx.signal);
@@ -1087,19 +1268,13 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
     const slotStartedMs = Date.now();
     let run: PromptRun;
     try {
-      const graph = applyModelVariant(
-        applyPromptEnhancer(
-          attachReferenceImages(
-            substituteWorkflow(
-              template,
-              buildReplacements({ ...request, count: 1 }, options, config, slotSeed),
-            ),
-            uploadedRefs,
-          ),
-          request.enhancePrompt,
-          uploadedRefs.length > 0,
-        ),
-        request.modelVariant,
+      const graph = graphForRequest(
+        template,
+        { ...request, count: 1 },
+        options,
+        config,
+        slotSeed,
+        uploadedRefs,
       );
       run = await runPrompt(baseUrl, progressUrl, clientId, graph, pollOptions, ctx, slot);
     } catch (error) {
@@ -1160,6 +1335,59 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
         : request;
 
     if (request.count > 1 && !templateHasBatchPlaceholder(template)) {
+      // One prompt can carry the whole batch: every extra slot is a cloned sampler that
+      // reuses the same text encode, which is the expensive part of a 2 to 4 image run.
+      const baseGraph = graphForRequest(
+        template,
+        { ...effectiveRequest, count: 1 },
+        options,
+        config,
+        seed,
+        uploadedRefs,
+      );
+      const expanded = expandMultiSeedGraph(baseGraph, request.count, seed);
+      if (expanded !== null) {
+        const run = await runPrompt(
+          baseUrl,
+          progressUrl,
+          clientId,
+          expanded.graph,
+          pollOptions,
+          ctx,
+          0,
+          expanded.samplerSlots,
+        );
+        if (run.history.state === 'error') {
+          for (let slot = 0; slot < request.count; slot += 1) {
+            const item = failedItem(slot, run.history.message, 'execution_error', true);
+            items.push(item);
+            ctx.onEvent({ type: 'item', index: slot, item });
+          }
+          return outcome();
+        }
+        if (run.history.state === 'done') {
+          const imagesByNode = run.history.imagesByNode;
+          for (let slot = 0; slot < request.count; slot += 1) {
+            throwIfAborted(ctx.signal);
+            const slotSeed = seed + slot;
+            const saveNodeId = expanded.saveNodeIds[slot];
+            const image = saveNodeId === undefined ? undefined : imagesByNode[saveNodeId]?.[0];
+            const item =
+              image === undefined
+                ? failedItem(
+                    slot,
+                    `ComfyUI finished prompt ${run.promptId} without returning an image for slot ${slot}`,
+                    'no_images',
+                    true,
+                  )
+                : await itemFromImage(slot, image, slotSeed, startedMs, ctx);
+            items.push(item);
+            ctx.onEvent({ type: 'item', index: slot, item });
+          }
+        }
+        return outcome();
+      }
+      // A graph this helper does not understand keeps the sequential path.
       for (let slot = 0; slot < request.count; slot += 1) {
         throwIfAborted(ctx.signal);
         const slotSeed = seed + slot;
@@ -1170,17 +1398,7 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
       return outcome();
     }
 
-    const graph = applyModelVariant(
-      applyPromptEnhancer(
-        attachReferenceImages(
-          substituteWorkflow(template, buildReplacements(effectiveRequest, options, config, seed)),
-          uploadedRefs,
-        ),
-        effectiveRequest.enhancePrompt,
-        uploadedRefs.length > 0,
-      ),
-      effectiveRequest.modelVariant,
-    );
+    const graph = graphForRequest(template, effectiveRequest, options, config, seed, uploadedRefs);
     const run = await runPrompt(baseUrl, progressUrl, clientId, graph, pollOptions, ctx, 0);
     if (run.history.state === 'error') {
       const item = failedItem(0, run.history.message, 'execution_error', true);

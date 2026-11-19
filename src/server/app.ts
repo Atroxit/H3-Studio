@@ -64,6 +64,7 @@ const generationSchema = z.object({
   guidance: z.number().min(0).max(50).optional(),
   referenceIds: z.array(z.string().min(1).max(128)).max(8).optional(),
   enhancePrompt: z.boolean().optional(),
+  promptEnhancer: z.enum(['off', 'qwen3.5_9b', 'qwen3.8_27b']).optional(),
   modelVariant: z.enum(['w4a8', 'int8_convrot']).optional(),
 });
 
@@ -366,6 +367,37 @@ export function createApp(options: { dataDir: string }): StudioApplication {
     }
   });
 
+  app.get('/api/providers/:id/status', async (req: Request, res: Response) => {
+    const id = routeParam(req, 'id');
+    const config = settings.get(id);
+    if (config === null) {
+      fail(res, 404, 'unknown_provider', `No provider with id "${id}".`);
+      return;
+    }
+    // A managed backend can be starting while its health check still refuses, so the
+    // answer combines what the adapter says with what the launcher is doing.
+    let adapterHealth: { ok: boolean; detail?: string };
+    try {
+      adapterHealth = await createAdapter(config).health();
+    } catch (error) {
+      adapterHealth = { ok: false, detail: messageOf(error) };
+    }
+    if (adapterHealth.ok) {
+      res.json({ state: 'ready' });
+      return;
+    }
+    const launcherStatus = launcher.statusOf(id);
+    if (launcherStatus === 'starting') {
+      res.json({ state: 'starting', detail: 'Starting local backend...' });
+      return;
+    }
+    if (launcherStatus === 'error') {
+      res.json({ state: 'error', detail: launcher.lastErrorOf(id) ?? adapterHealth.detail });
+      return;
+    }
+    res.json({ state: 'offline', detail: adapterHealth.detail });
+  });
+
   app.get('/api/providers/:id/capabilities', async (req: Request, res: Response) => {
     const id = routeParam(req, 'id');
     const config = settings.get(id);
@@ -433,6 +465,8 @@ export function createApp(options: { dataDir: string }): StudioApplication {
     // An upload wins, then a stored library image: the Generate canvas passes the image
     // it is altering as a plain imageId, so nothing has to be re-uploaded for an edit.
     const referencePaths: string[] = [];
+    // The first id that resolved to a stored library image is the image this batch alters.
+    let sourceImageId: string | undefined;
     for (const referenceId of input.referenceIds ?? []) {
       const reference = await findReference(referenceId);
       if (reference !== null) {
@@ -442,6 +476,7 @@ export function createApp(options: { dataDir: string }): StudioApplication {
       const stored = await store.findImage(referenceId);
       if (stored !== null && existsSync(stored.path)) {
         referencePaths.push(stored.path);
+        if (sourceImageId === undefined) sourceImageId = referenceId;
         continue;
       }
       fail(res, 400, 'unknown_reference', `No uploaded or stored image with id "${referenceId}".`);
@@ -458,6 +493,7 @@ export function createApp(options: { dataDir: string }): StudioApplication {
       guidance: input.guidance,
       referenceIds: referencePaths,
       enhancePrompt: input.enhancePrompt,
+      promptEnhancer: input.promptEnhancer,
       modelVariant: input.modelVariant,
     };
     // A managed backend may still be loading: waiting here is what makes generating
@@ -469,7 +505,7 @@ export function createApp(options: { dataDir: string }): StudioApplication {
         console.warn(`h3-studio: provider ${config.id} did not start: ${messageOf(error)}`);
       }
     }
-    const batch = await hub.start(config, request);
+    const batch = await hub.start(config, request, sourceImageId);
     res.status(202).json({ batchId: batch.id });
   });
 
@@ -594,15 +630,30 @@ export function createApp(options: { dataDir: string }): StudioApplication {
       fail(res, 404, 'unknown_provider', `The provider "${batch.providerId}" this batch used is gone.`);
       return;
     }
-    // A retry is a new batch: same prompt, size, provider and seed, one image per index.
-    const retried = await hub.start(config, {
-      prompt: batch.prompt,
-      negativePrompt: batch.negativePrompt,
-      width: batch.width,
-      height: batch.height,
-      count: input.indices.length,
-      seed: batch.seed,
-    });
+    // An alteration keeps coming from the same source image, as long as it is still in the
+    // library: the retry must reproduce the batch, not a plain text-to-image run.
+    const source =
+      batch.sourceImageId === undefined ? null : await store.findImage(batch.sourceImageId);
+    const usableSource = source !== null && existsSync(source.path) ? source : null;
+    const sourceImageId = usableSource === null ? undefined : batch.sourceImageId;
+    // A retry is a new batch: same prompt, size, provider, seed and model settings, one
+    // image per index.
+    const retried = await hub.start(
+      config,
+      {
+        prompt: batch.prompt,
+        negativePrompt: batch.negativePrompt,
+        width: batch.width,
+        height: batch.height,
+        count: input.indices.length,
+        seed: batch.seed,
+        modelVariant: batch.modelVariant,
+        enhancePrompt: batch.enhancePrompt,
+        promptEnhancer: batch.promptEnhancer,
+        referenceIds: usableSource === null ? undefined : [usableSource.path],
+      },
+      sourceImageId,
+    );
     res.status(202).json({ batchId: retried.id });
   });
 

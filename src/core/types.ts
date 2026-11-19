@@ -6,6 +6,9 @@ export type ProviderKind = 'mock' | 'comfyui' | 'openai-images' | 'a1111';
 /** The diffusion model a request runs: the fast 11.7 GB weights or the 19.5 GB INT8 build. */
 export type H3ModelVariant = 'w4a8' | 'int8_convrot';
 
+/** Which prompt enhancer the graph runs, when its template offers one. */
+export type H3PromptEnhancer = 'off' | 'qwen3.5_9b' | 'qwen3.8_27b';
+
 export interface SizePreset {
   id: string;
   label: string;
@@ -50,6 +53,8 @@ export interface GenerationRequest {
   referenceIds?: string[];
   /** Runs the graph's prompt enhancer, when the graph has one and no reference image is in play. */
   enhancePrompt?: boolean;
+  /** Which enhancer CLIP the graph loads: the fast 9B build or the dedicated 27B H3 PE. */
+  promptEnhancer?: H3PromptEnhancer;
   /** Picks the H3 diffusion model when the graph loads one of the official variants. */
   modelVariant?: H3ModelVariant;
   extra?: Record<string, unknown>;
@@ -161,6 +166,14 @@ export interface BatchRecord {
   durationMs?: number;
   seed?: number;
   revisedPrompt?: string;
+  /** The H3 diffusion model this batch ran, when the provider picks one. */
+  modelVariant?: H3ModelVariant;
+  /** Whether the graph's prompt enhancer ran for this batch. */
+  enhancePrompt?: boolean;
+  /** Which enhancer CLIP the graph loaded for this batch. */
+  promptEnhancer?: H3PromptEnhancer;
+  /** The library image this batch altered, when it is an alteration. */
+  sourceImageId?: string;
   images: StoredImage[];
   failures: BatchFailure[];
 }

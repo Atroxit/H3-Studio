@@ -18,11 +18,14 @@ import type { Preset, ProviderCapabilities, ProviderConfig, ProviderKind } from 
 import {
   checkProviderHealth,
   createProvider,
+  getProviderStatus,
   getStats,
   listPresets,
   listProviders,
   updateProvider,
   type ProviderHealth,
+  type ProviderStatus,
+  type ProviderStatusState,
   type StudioStats,
 } from './api';
 import { Button, EmptyState, Field, SegmentedControl, Select, Spinner, Toast } from './components';
@@ -345,6 +348,17 @@ function writeViewToLocation(next: StudioView): void {
 
 const SELECTED_PROVIDER_KEY = 'h3-studio:selected-provider';
 
+/** How often the top bar asks about the backend: fast while it settles, slow once ready. */
+const STATUS_POLL_ACTIVE_MS = 2500;
+const STATUS_POLL_READY_MS = 15_000;
+
+const BACKEND_STATUS_LABELS: Readonly<Record<ProviderStatusState, string>> = {
+  ready: 'Ready',
+  starting: 'Starting...',
+  offline: 'Offline',
+  error: 'Error',
+};
+
 const RAIL_WIDTH_DEFAULT = 260;
 const RAIL_WIDTH_MIN = 200;
 const RAIL_WIDTH_MAX = 520;
@@ -556,6 +570,41 @@ export function App({ slots = {} }: AppProps): ReactNode {
     return mock ?? enabledProviders[0] ?? null;
   }, [enabledProviders, selectedId]);
 
+  const [backendStatus, setBackendStatus] = useState<ProviderStatus | null>(null);
+
+  // The selected provider's backend is polled on a timer, faster while it is starting so
+  // the pill settles quickly, slower once it is ready so an idle studio stays quiet.
+  useEffect(() => {
+    if (provider === null) {
+      setBackendStatus(null);
+      return;
+    }
+    const providerId = provider.id;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = (delayMs: number): void => {
+      timer = setTimeout(() => {
+        void poll();
+      }, delayMs);
+    };
+    const poll = async (): Promise<void> => {
+      let next: ProviderStatus;
+      try {
+        next = await getProviderStatus(providerId);
+      } catch {
+        next = { state: 'offline', detail: 'The provider status could not be read.' };
+      }
+      if (cancelled) return;
+      setBackendStatus(next);
+      schedule(next.state === 'ready' ? STATUS_POLL_READY_MS : STATUS_POLL_ACTIVE_MS);
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [provider]);
+
   useEffect(() => {
     persistSelectedProvider(provider === null ? null : provider.id);
   }, [provider]);
@@ -722,6 +771,19 @@ export function App({ slots = {} }: AppProps): ReactNode {
                     options={enabledProviders.map((candidate) => ({ value: candidate.id, label: candidate.label }))}
                     onChange={setSelectedId}
                   />
+                  {backendStatus === null ? null : (
+                    <button
+                      type="button"
+                      className={`topbar-backend-status is-${backendStatus.state}`}
+                      title={backendStatus.detail ?? backendStatus.state}
+                      onClick={() => {
+                        setSetupOpen(true);
+                      }}
+                    >
+                      <span className="topbar-backend-dot" aria-hidden="true" />
+                      {BACKEND_STATUS_LABELS[backendStatus.state]}
+                    </button>
+                  )}
                 </div>
               )}
               <span className="stat">

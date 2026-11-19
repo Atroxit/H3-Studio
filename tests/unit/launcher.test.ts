@@ -152,6 +152,51 @@ describe('provider launcher', () => {
     await expect(launcher.stopAll()).resolves.toBeUndefined();
   });
 
+  it('reports idle, starting, running and idle again around one start', async () => {
+    const rootDir = await tempDir();
+    const child = await writeIdleChild(rootDir);
+    const config = launchConfig(child);
+    const launcher = createProviderLauncher(
+      async () => [config],
+      async () => false,
+    );
+
+    expect(launcher.statusOf(config.id)).toBe('idle');
+    expect(launcher.lastErrorOf(config.id)).toBeUndefined();
+
+    const pending = launcher.ensureStarted(config);
+    expect(launcher.statusOf(config.id)).toBe('starting');
+    await pending;
+    expect(launcher.statusOf(config.id)).toBe('running');
+
+    await launcher.stopAll();
+    expect(launcher.statusOf(config.id)).toBe('idle');
+  });
+
+  it('reports an error and its message when the command cannot start', async () => {
+    const rootDir = await tempDir();
+    const config: ProviderConfig = {
+      id: 'comfy-broken',
+      kind: 'comfyui',
+      label: 'Broken backend',
+      baseUrl: 'http://127.0.0.1:1',
+      launch: {
+        enabled: true,
+        command: path.join(rootDir, 'a-command-that-does-not-exist'),
+        waitForHealthMs: 60,
+      },
+    };
+    const launcher = createProviderLauncher(
+      async () => [config],
+      async () => false,
+    );
+
+    await expect(launcher.ensureStarted(config)).resolves.toEqual({ started: true, alreadyRunning: false });
+    expect(launcher.statusOf(config.id)).toBe('error');
+    expect(launcher.lastErrorOf(config.id)).toBeTypeOf('string');
+    await launcher.stopAll();
+  });
+
   it('starts only the enabled launch configs, and never throws', async () => {
     const rootDir = await tempDir();
     const child = await writeIdleChild(rootDir);

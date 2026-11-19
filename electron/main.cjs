@@ -148,6 +148,7 @@ function reportError(title, message) {
 }
 
 function createWindow(port) {
+  const iconPath = path.join(__dirname, 'h3-studio.ico');
   const window = new BrowserWindow({
     width: 1440,
     height: 940,
@@ -155,6 +156,7 @@ function createWindow(port) {
     minHeight: 700,
     backgroundColor: '#0a0a0c',
     title: 'H3 Studio',
+    icon: require('node:fs').existsSync(iconPath) ? iconPath : undefined,
     show: false,
     autoHideMenuBar: true,
     // The page draws its own top bar. Windows still draws minimise, maximise and close in a

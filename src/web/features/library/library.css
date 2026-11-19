@@ -507,6 +507,7 @@
 }
 
 .lb-viewer-stage {
+  position: relative;
   display: grid;
   flex: 1 1 0;
   grid-template-columns: 36px minmax(0, 1fr) 36px;
@@ -514,6 +515,25 @@
   align-items: center;
   gap: var(--space-2);
   min-height: 180px;
+}
+
+/* The compare badge floats over the stage, so it never shifts the image by a pixel. */
+.lb-viewer-compare-badge {
+  position: absolute;
+  top: var(--space-2);
+  left: 50%;
+  z-index: 1;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--scrim-soft);
+  font-family: var(--font-ui);
+  font-size: var(--text-micro);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text);
+  pointer-events: none;
+  transform: translateX(-50%);
 }
 
 .lb-viewer-image-wrap {

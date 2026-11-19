@@ -92,8 +92,15 @@ export class GenerationHub {
     this.retentionMs = options.retentionMs ?? EVENT_RETENTION_MS;
   }
 
-  /** Creates the batch record and starts the job. The job runs on its own afterwards. */
-  async start(config: ProviderConfig, request: GenerationRequest): Promise<BatchRecord> {
+  /**
+   * Creates the batch record and starts the job. The job runs on its own afterwards.
+   * sourceImageId names the library image an alteration started from, when there is one.
+   */
+  async start(
+    config: ProviderConfig,
+    request: GenerationRequest,
+    sourceImageId?: string,
+  ): Promise<BatchRecord> {
     const startedAt = Date.now();
     const batch = await this.store.createBatch({
       id: createId('batch'),
@@ -105,6 +112,10 @@ export class GenerationHub {
       requested: request.count,
       status: 'running',
       seed: request.seed,
+      modelVariant: request.modelVariant,
+      enhancePrompt: request.enhancePrompt,
+      promptEnhancer: request.promptEnhancer,
+      sourceImageId,
     });
     const state: JobState = {
       batchId: batch.id,

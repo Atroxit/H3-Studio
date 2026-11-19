@@ -18,6 +18,9 @@ export interface ProviderStartResult {
   alreadyRunning: boolean;
 }
 
+/** What the launcher knows about one provider's managed process right now. */
+export type ProviderLauncherStatus = 'idle' | 'starting' | 'running' | 'error';
+
 export interface ProviderLauncher {
   /** Starts the provider's process when its launch config asks for it and it is not up. */
   ensureStarted(config: ProviderConfig): Promise<ProviderStartResult>;
@@ -27,6 +30,10 @@ export interface ProviderLauncher {
   stopAll(): Promise<void>;
   /** The provider ids with a spawned process, so a caller can observe the tracked set. */
   spawnedProviderIds(): string[];
+  /** What the launcher is doing for this provider: idle, starting, running or error. */
+  statusOf(providerId: string): ProviderLauncherStatus;
+  /** The message of the last failed spawn or start, when there is one. */
+  lastErrorOf(providerId: string): string | undefined;
 }
 
 function messageOf(error: unknown): string {
@@ -87,6 +94,8 @@ export function createProviderLauncher(
 ): ProviderLauncher {
   const children = new Map<string, ChildProcess>();
   const inFlight = new Map<string, Promise<ProviderStartResult>>();
+  /** The last spawn or start failure per provider, cleared when a new start begins. */
+  const errors = new Map<string, string>();
 
   async function isHealthy(config: ProviderConfig): Promise<boolean> {
     try {
@@ -132,15 +141,25 @@ export function createProviderLauncher(
     if (await isHealthy(config)) return { started: false, alreadyRunning: true };
 
     const cwd = launch.cwd !== undefined && launch.cwd.trim().length > 0 ? launch.cwd : undefined;
-    const child = spawn(launch.command, launch.args ?? [], {
-      cwd,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    errors.delete(config.id);
+    let child: ChildProcess;
+    try {
+      child = spawn(launch.command, launch.args ?? [], {
+        cwd,
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      errors.set(config.id, messageOf(error));
+      throw error;
+    }
     // Both pipes are drained: a chatty backend must not block on a full pipe.
     child.stdout?.resume();
     child.stderr?.resume();
     child.on('error', (error: Error) => {
+      errors.set(config.id, error.message);
+      // A spawn that failed never gets an exit event, so it is untracked here.
+      if (children.get(config.id) === child) children.delete(config.id);
       console.warn(`h3-studio: provider ${config.id} could not be started: ${error.message}`);
     });
     child.on('exit', () => {
@@ -209,6 +228,17 @@ export function createProviderLauncher(
 
     spawnedProviderIds(): string[] {
       return [...children.keys()];
+    },
+
+    statusOf(providerId: string): ProviderLauncherStatus {
+      if (inFlight.has(providerId)) return 'starting';
+      if (children.has(providerId)) return 'running';
+      if (errors.has(providerId)) return 'error';
+      return 'idle';
+    },
+
+    lastErrorOf(providerId: string): string | undefined {
+      return errors.get(providerId);
     },
   };
 }

@@ -12,6 +12,7 @@ import {
   attachReferenceImages,
   createComfyUIAdapter,
   defaultWorkflowTemplate,
+  expandMultiSeedGraph,
   formatReferencePrompt,
 } from '../../src/core/providers/comfyui';
 import { LibraryStore } from '../../src/core/store';
@@ -77,6 +78,12 @@ function nodesOfType(graph: Record<string, unknown>, classType: string): Record<
   return Object.values(graph).filter(
     (node): node is Record<string, unknown> => isRecord(node) && node['class_type'] === classType,
   );
+}
+
+function nodeOf(graph: Record<string, unknown>, nodeId: string): Record<string, unknown> {
+  const node = graph[nodeId];
+  if (!isRecord(node)) throw new Error(`missing node ${nodeId}`);
+  return node;
 }
 
 function readRequestBody(request: IncomingMessage): Promise<unknown> {
@@ -1004,6 +1011,19 @@ function switchOf(graph: Record<string, unknown>): unknown {
   return inputsOf(node)['switch'];
 }
 
+/** The enhancer leg plus the fast 9B CLIP file the graph loads. */
+const ENHANCER_CLIP_TEMPLATE: Record<string, unknown> = {
+  ...ENHANCER_TEMPLATE,
+  '16': {
+    class_type: 'CLIPLoader',
+    inputs: { clip_name: 'qwen3.5_9b_w4a8_gptq.safetensors', type: 'minimax', device: 'default' },
+  },
+};
+
+function clipNameOf(graph: Record<string, unknown>): unknown {
+  return inputsOf(nodeOf(graph, '16'))['clip_name'];
+}
+
 describe('ComfyUI prompt enhancer', () => {
   it('returns the graph untouched when the request says nothing', () => {
     expect(applyPromptEnhancer(ENHANCER_TEMPLATE, undefined, false)).toBe(ENHANCER_TEMPLATE);
@@ -1027,6 +1047,37 @@ describe('ComfyUI prompt enhancer', () => {
   it('forces the enhancer off during an alteration', () => {
     expect(switchOf(applyPromptEnhancer(ENHANCER_TEMPLATE, true, true))).toBe(false);
     expect(switchOf(applyPromptEnhancer(ENHANCER_TEMPLATE, false, true))).toBe(false);
+  });
+
+  it('retargets the enhancer CLIP for each named mode', () => {
+    const fast = applyPromptEnhancer(ENHANCER_CLIP_TEMPLATE, undefined, false, 'qwen3.5_9b');
+    expect(clipNameOf(fast)).toBe('qwen3.5_9b_w4a8_gptq.safetensors');
+    expect(switchOf(fast)).toBe(true);
+
+    const best = applyPromptEnhancer(ENHANCER_CLIP_TEMPLATE, undefined, false, 'qwen3.8_27b');
+    expect(clipNameOf(best)).toBe('qwen3.8_27b_minimax_h3_image_pe_w4a8_gptq.safetensors');
+    expect(switchOf(best)).toBe(true);
+
+    // The template itself is never mutated.
+    expect(clipNameOf(ENHANCER_CLIP_TEMPLATE)).toBe('qwen3.5_9b_w4a8_gptq.safetensors');
+    expect(switchOf(ENHANCER_CLIP_TEMPLATE)).toBe(false);
+  });
+
+  it('forces the 27B enhancer off during an alteration', () => {
+    const on = applyPromptEnhancer(ENHANCER_CLIP_TEMPLATE, undefined, false, 'qwen3.8_27b');
+    expect(switchOf(on)).toBe(true);
+    const off = applyPromptEnhancer(on, undefined, true, 'qwen3.8_27b');
+    expect(switchOf(off)).toBe(false);
+  });
+
+  it('leaves a CLIPLoader that is not an H3 enhancer alone', () => {
+    const graph: Record<string, unknown> = {
+      '16': { class_type: 'CLIPLoader', inputs: { clip_name: 'sd15-clip.safetensors' } },
+      '22': { class_type: 'ComfySwitchNode', inputs: { switch: false } },
+    };
+    expect(clipNameOf(applyPromptEnhancer(graph, true, false, 'qwen3.8_27b'))).toBe('sd15-clip.safetensors');
+    // No switch beside it either, so nothing in this graph is the H3 enhancer.
+    expect(inputsOf(nodeOf(applyPromptEnhancer(graph, true, false, 'qwen3.8_27b'), '22'))['switch']).toBe(true);
   });
 
   it('returns a graph without a switch node unchanged', () => {
@@ -1060,6 +1111,34 @@ describe('ComfyUI prompt enhancer', () => {
     );
 
     expect(switchOf(postedGraph(stub))).toBe(true);
+  });
+
+  it('posts the 27B enhancer clip when the request names it', async () => {
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-enhance-27b' } },
+      historyResponse: () => ({
+        status: 200,
+        body: { 'prompt-enhance-27b': { outputs: { '9': { images: [{ filename: 'best.png', subfolder: '' }] } } } },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(
+      comfyConfig(stub.baseUrl, {
+        pollIntervalMs: 10,
+        timeoutMs: 2000,
+        workflowTemplate: JSON.stringify(ENHANCER_CLIP_TEMPLATE),
+      }),
+    );
+    const run = context();
+
+    await adapter.generate(
+      { ...BASE_REQUEST, promptEnhancer: 'qwen3.8_27b' },
+      { signal: run.signal, onEvent: () => {} },
+    );
+
+    const graph = postedGraph(stub);
+    expect(switchOf(graph)).toBe(true);
+    expect(clipNameOf(graph)).toBe('qwen3.8_27b_minimax_h3_image_pe_w4a8_gptq.safetensors');
   });
 });
 
@@ -1140,5 +1219,136 @@ describe('ComfyUI model variant', () => {
 
     expect(unetNameOf(postedGraph(stub), '1')).toBe('minimax_h3_image_pruned_w4a8.safetensors');
     expect(unetNameOf(postedGraph(stub), '2')).toBe('v1-5-pruned-emaonly.safetensors');
+  });
+});
+
+/** A linear pipeline with no {{batch}} placeholder, so the adapter can fan it out. */
+const MULTI_SEED_TEMPLATE: Record<string, unknown> = {
+  '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: '{{ckpt}}' } },
+  '4': { class_type: 'CLIPTextEncode', inputs: { text: '{{prompt}}', clip: ['1', 1] } },
+  '6': { class_type: 'EmptyLatentImage', inputs: { width: '{{width}}', height: '{{height}}' } },
+  '7': {
+    class_type: 'KSampler',
+    inputs: {
+      seed: '{{seed}}',
+      steps: '{{steps}}',
+      cfg: '{{cfg}}',
+      model: ['1', 0],
+      positive: ['4', 0],
+      latent_image: ['6', 0],
+    },
+  },
+  '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['1', 2] } },
+  '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'h3-studio', images: ['8', 0] } },
+};
+
+describe('ComfyUI multi seed expansion', () => {
+  it('returns null for a single image request', () => {
+    expect(expandMultiSeedGraph(defaultWorkflowTemplate, 1, 10)).toBeNull();
+  });
+
+  it('clones the sampler, decode and save nodes and shares the text encode', () => {
+    const expanded = expandMultiSeedGraph(defaultWorkflowTemplate, 3, 700);
+    if (expanded === null) throw new Error('expected the default graph to expand');
+
+    expect(nodesOfType(expanded.graph, 'KSampler')).toHaveLength(3);
+    expect(nodesOfType(expanded.graph, 'VAEDecode')).toHaveLength(3);
+    expect(nodesOfType(expanded.graph, 'SaveImage')).toHaveLength(3);
+    // One text encode pair and one latent serve all three samplers.
+    expect(nodesOfType(expanded.graph, 'CLIPTextEncode')).toHaveLength(2);
+    expect(nodesOfType(expanded.graph, 'EmptyLatentImage')).toHaveLength(1);
+
+    expect([...expanded.samplerSlots.entries()]).toEqual([
+      ['7', 0],
+      ['batch_sampler_1', 1],
+      ['batch_sampler_2', 2],
+    ]);
+    expect(expanded.saveNodeIds).toEqual(['9', 'batch_save_1', 'batch_save_2']);
+
+    expect(inputsOf(nodeOf(expanded.graph, '7'))['seed']).toBe('{{seed}}');
+    expect(inputsOf(nodeOf(expanded.graph, 'batch_sampler_1'))['seed']).toBe(701);
+    expect(inputsOf(nodeOf(expanded.graph, 'batch_sampler_2'))['seed']).toBe(702);
+    for (const sampler of nodesOfType(expanded.graph, 'KSampler')) {
+      expect(inputsOf(sampler)['positive']).toEqual(['4', 0]);
+    }
+    expect(inputsOf(nodeOf(expanded.graph, 'batch_decode_1'))['samples']).toEqual(['batch_sampler_1', 0]);
+    expect(inputsOf(nodeOf(expanded.graph, 'batch_save_1'))['images']).toEqual(['batch_decode_1', 0]);
+
+    // The template itself is never mutated.
+    expect(Object.keys(defaultWorkflowTemplate)).toHaveLength(7);
+  });
+
+  it('returns null when the graph is not one linear sampler pipeline', () => {
+    const noDecode: Record<string, unknown> = {
+      '1': { class_type: 'KSampler', inputs: { seed: '{{seed}}' } },
+      '2': { class_type: 'SaveImage', inputs: { images: ['1', 0] } },
+    };
+    expect(expandMultiSeedGraph(noDecode, 2, 5)).toBeNull();
+
+    const twoSamplers: Record<string, unknown> = {
+      ...defaultWorkflowTemplate,
+      extra: { class_type: 'KSampler', inputs: { seed: 3 } },
+    };
+    expect(expandMultiSeedGraph(twoSamplers, 2, 5)).toBeNull();
+  });
+
+  it('queues one prompt for a three image batch and returns every slot', async () => {
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-multi' } },
+      historyResponse: () => ({
+        status: 200,
+        body: {
+          'prompt-multi': {
+            outputs: {
+              '9': { images: [{ filename: 'slot_0.png', subfolder: '' }] },
+              batch_save_1: { images: [{ filename: 'slot_1.png', subfolder: '' }] },
+              batch_save_2: { images: [{ filename: 'slot_2.png', subfolder: '' }] },
+            },
+          },
+        },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(
+      comfyConfig(stub.baseUrl, {
+        pollIntervalMs: 10,
+        timeoutMs: 2000,
+        workflowTemplate: JSON.stringify(MULTI_SEED_TEMPLATE),
+      }),
+    );
+    const run = context();
+
+    const outcome = await adapter.generate(
+      { ...BASE_REQUEST, count: 3, seed: 500 },
+      { signal: run.signal, onEvent: (event) => run.events.push(event) },
+    );
+
+    const posts = stub.requests.filter((entry) => entry.method === 'POST' && entry.path === '/prompt');
+    expect(posts).toHaveLength(1);
+    const posted = posts[0];
+    if (posted === undefined) throw new Error('no POST /prompt request recorded');
+    const graph = record(record(posted.body)['prompt']);
+    expect(nodesOfType(graph, 'KSampler')).toHaveLength(3);
+    expect(nodesOfType(graph, 'CLIPTextEncode')).toHaveLength(1);
+    for (const sampler of nodesOfType(graph, 'KSampler')) {
+      expect(inputsOf(sampler)['positive']).toEqual(['4', 0]);
+    }
+
+    expect(outcome.items).toHaveLength(3);
+    expect(outcome.items.map((item) => item.index)).toEqual([0, 1, 2]);
+    expect(outcome.items.map((item) => item.seed)).toEqual([500, 501, 502]);
+    expect(outcome.items.every((item) => item.ok)).toBe(true);
+
+    const views = stub.requests.filter((entry) => entry.path.startsWith('/view'));
+    expect(views.map((entry) => new URLSearchParams(entry.path.split('?')[1] ?? '').get('filename'))).toEqual([
+      'slot_0.png',
+      'slot_1.png',
+      'slot_2.png',
+    ]);
+
+    const itemEvents = run.events.filter(
+      (event): event is Extract<GenerationEvent, { type: 'item' }> => event.type === 'item',
+    );
+    expect(itemEvents.map((event) => event.index)).toEqual([0, 1, 2]);
   });
 });

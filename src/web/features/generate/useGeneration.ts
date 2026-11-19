@@ -12,6 +12,7 @@ import type {
   BatchStatus,
   GenerationEvent,
   H3ModelVariant,
+  H3PromptEnhancer,
   ItemFailure,
   Preset,
   ProviderCapabilities,
@@ -91,8 +92,8 @@ export interface GenerationForm {
   seed: string;
   steps: number;
   guidance: number;
-  /** Runs the provider's prompt enhancer, when its graph has one. */
-  enhancePrompt: boolean;
+  /** Which prompt enhancer the provider's graph runs, when it has one. Off by default. */
+  promptEnhancer: H3PromptEnhancer;
   /** Which H3 diffusion model the graph loads. The fast weights are the default. */
   modelVariant: H3ModelVariant;
   references: ReferenceImage[];
@@ -457,7 +458,8 @@ export function toGenerationBody(
     width,
     height,
     count: clampCount(form.count, capabilities.maxBatch),
-    enhancePrompt: form.enhancePrompt,
+    promptEnhancer: form.promptEnhancer,
+    enhancePrompt: form.promptEnhancer !== 'off',
     modelVariant: form.modelVariant,
   };
 
@@ -501,7 +503,7 @@ const EMPTY_FORM: GenerationForm = {
   seed: '',
   steps: DEFAULT_STEPS,
   guidance: DEFAULT_GUIDANCE,
-  enhancePrompt: false,
+  promptEnhancer: 'off',
   modelVariant: 'w4a8',
   references: [],
 };
