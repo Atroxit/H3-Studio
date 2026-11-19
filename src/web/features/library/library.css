@@ -434,12 +434,16 @@
   position: fixed;
   inset: 0;
   z-index: 70;
-  display: grid;
-  place-items: center;
-  align-content: safe center;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
   padding: var(--space-4);
   overflow-y: auto;
   background: var(--scrim-opaque);
+}
+
+.is-desktop .lb-viewer {
+  padding-top: var(--topbar-height);
 }
 
 .lb-viewer-inner {
@@ -447,11 +451,13 @@
   flex-direction: column;
   gap: var(--space-3);
   width: min(1100px, 100%);
-  max-height: 100%;
+  height: 100%;
+  min-height: 0;
 }
 
 .lb-viewer-head {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
@@ -500,19 +506,22 @@
 
 .lb-viewer-stage {
   display: grid;
+  flex: 1 1 0;
   grid-template-columns: 36px minmax(0, 1fr) 36px;
+  grid-template-rows: minmax(0, 1fr);
   align-items: center;
   gap: var(--space-2);
-  min-height: 0;
+  min-height: 180px;
 }
 
 .lb-viewer-image-wrap {
   display: flex;
   align-items: center;
   justify-content: center;
+  width: 100%;
+  height: 100%;
   min-width: 0;
   min-height: 0;
-  max-height: calc(100vh - 220px);
   overflow: hidden;
 }
 
@@ -522,8 +531,13 @@
 }
 
 .lb-viewer-image-button {
-  display: block;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   padding: 0;
   border: 0;
   background: transparent;
@@ -536,7 +550,9 @@
 }
 
 .lb-viewer-image-wrap.is-actual .lb-viewer-image-button {
+  display: block;
   width: max-content;
+  height: auto;
   margin: 0 auto;
   cursor: grab;
   user-select: none;
@@ -551,7 +567,7 @@
   width: auto;
   height: auto;
   max-width: 100%;
-  max-height: calc(100vh - 220px);
+  max-height: 100%;
   margin: 0 auto;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -588,6 +604,7 @@
 
 .lb-viewer-meta {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   gap: var(--space-1);
   padding: var(--space-3);
@@ -640,6 +657,7 @@
 }
 
 .lb-viewer-hint {
+  flex: 0 0 auto;
   font-size: var(--text-sm);
   color: var(--text-faint);
 }
