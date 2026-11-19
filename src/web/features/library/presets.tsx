@@ -1,6 +1,6 @@
 // Presets: a small form that saves the values a composer would send, a list of
-// saved presets, and a delete per row. The generate screen owns its own composer,
-// so the values edited here are local to this panel.
+// saved presets, and an apply and delete per row. Applying a preset fills the
+// Generate composer and switches to that view.
 
 import { useCallback, useId, useState, type ReactNode } from 'react';
 import type { Preset } from '../../../core/types';
@@ -11,7 +11,7 @@ import { formatCount, promptExcerpt } from './useLibrary';
 
 /** Matches the server schema in src/server/app.ts. */
 const MIN_SIZE = 64;
-const MAX_SIZE = 4096;
+const MAX_SIZE = 8192;
 const MAX_COUNT = 10;
 const MAX_NAME = 120;
 const MAX_PROMPT = 4000;
@@ -85,7 +85,7 @@ interface PresetStatus {
 }
 
 export function PresetsPanel(): ReactNode {
-  const { presets, refresh } = useStudio();
+  const { presets, refresh, applyPreset } = useStudio();
   const [formOpen, setFormOpen] = useState(false);
   const [form, setForm] = useState<PresetForm>(EMPTY_FORM);
   const [errors, setErrors] = useState<PresetFormErrors>({});
@@ -93,6 +93,8 @@ export function PresetsPanel(): ReactNode {
   const [saving, setSaving] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const headingId = useId();
+  const promptId = useId();
+  const promptErrorId = `${promptId}-error`;
 
   const setField = useCallback((key: keyof PresetForm, value: string): void => {
     setForm((current) => ({ ...current, [key]: value }));
@@ -175,17 +177,30 @@ export function PresetsPanel(): ReactNode {
               setField('name', event.target.value);
             }}
           />
-          <Field
-            label="Prompt"
-            value={form.prompt}
-            placeholder="The prompt to save with this preset"
-            autoComplete="off"
-            hint="Optional. The generate screen keeps its own prompt; this is the one the preset stores."
-            error={errors.prompt}
-            onChange={(event) => {
-              setField('prompt', event.target.value);
-            }}
-          />
+          <div className="field">
+            <label className="field-label" htmlFor={promptId}>
+              Prompt
+            </label>
+            <textarea
+              id={promptId}
+              className="field-textarea lb-preset-prompt-input"
+              rows={3}
+              value={form.prompt}
+              placeholder="The prompt to save with this preset"
+              autoComplete="off"
+              aria-invalid={errors.prompt === undefined ? undefined : true}
+              aria-describedby={errors.prompt === undefined ? undefined : promptErrorId}
+              onChange={(event) => {
+                setField('prompt', event.target.value);
+              }}
+            />
+            <span className="field-hint">Optional. Applying the preset fills this prompt into the composer.</span>
+            {errors.prompt === undefined ? null : (
+              <span className="field-error" id={promptErrorId}>
+                {errors.prompt}
+              </span>
+            )}
+          </div>
           <div className="lb-preset-grid">
             <Field
               label="Width"
@@ -262,17 +277,28 @@ export function PresetsPanel(): ReactNode {
                   {preset.prompt.trim().length === 0 ? 'No prompt saved' : promptExcerpt(preset.prompt, 12)}
                 </span>
               </div>
-              <Button
-                variant="ghost"
-                size="sm"
-                busy={deletingId === preset.id}
-                disabled={deletingId !== null && deletingId !== preset.id}
-                onClick={() => {
-                  void remove(preset);
-                }}
-              >
-                Delete
-              </Button>
+              <div className="lb-preset-row-actions">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => {
+                    applyPreset(preset);
+                  }}
+                >
+                  Apply
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  busy={deletingId === preset.id}
+                  disabled={deletingId !== null && deletingId !== preset.id}
+                  onClick={() => {
+                    void remove(preset);
+                  }}
+                >
+                  Delete
+                </Button>
+              </div>
             </li>
           ))}
         </ul>

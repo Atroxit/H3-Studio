@@ -25,7 +25,7 @@ npm run verify
 npm run desktop
 ```
 
-That builds the web app, bundles the server into `dist/server/main.cjs` with esbuild, and opens H3 Studio in its own Electron window with no browser chrome. The window loads the same app from a loopback port the shell picks at startup, and the server runs as a child process that stops when the window closes. The desktop build keeps its library in `%APPDATA%\h3-studio\library`, which is separate from the `~/.h3-studio` default that `npm run dev` uses, so the two do not share images.
+That builds the web app, bundles the server into `dist/server/main.cjs` with esbuild, and opens H3 Studio in its own Electron window with no browser chrome. The window loads the same app from a loopback port the shell picks at startup, and the server runs as a child process that stops when the window closes. The desktop build keeps its library in the same `~/.h3-studio` home directory that `npm run dev` uses. Set `H3_DATA_DIR` to point either one at another folder.
 
 Use `npm run desktop` rather than calling Electron directly. It clears `ELECTRON_RUN_AS_NODE` before launching, and with that variable set, which happens when you start from inside another Electron based tool, Electron runs as plain Node and no window appears.
 
@@ -99,7 +99,7 @@ All four accept arbitrary width and height in multiples of 8, and all four retur
 Verified on this machine when this was written:
 
 - `npx tsc --noEmit` is clean, and `npm run build` produces `dist/web`.
-- The vitest suite passes: 68 tests in 6 files, covering PNG encoding, the ZIP writer, the library store and the mock provider as unit tests, plus ComfyUI and the two HTTP adapters as integration tests.
+- The vitest suite passes, covering PNG encoding, the ZIP writer, the library store, the mock provider and the pure UI helpers as unit tests, plus ComfyUI and the two HTTP adapters as integration tests. The separate e2e configuration runs the mock server round trip against the real API.
 - The ComfyUI and HTTP adapter integration tests run against stub HTTP servers started inside the tests. They assert the request shapes the adapters send and how they handle success and error responses. They do not contact a real ComfyUI, Automatic1111, SGLang or vLLM server.
 - The only images this repository has ever generated came from the mock provider. The integration tests serve canned PNG bytes from stub servers, so an adapter returning bytes there is not model output.
 

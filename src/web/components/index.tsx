@@ -18,6 +18,9 @@ function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter((part): part is string => typeof part === 'string' && part.length > 0).join(' ');
 }
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export function Spinner({ size = 16, label = 'Loading' }: { size?: number; label?: string }): ReactNode {
   const showsLabel = label.length > 0;
   return (
@@ -552,13 +555,40 @@ export function Dialog({ open, title, onClose, children, actions }: DialogProps)
   useEffect(() => {
     if (!open) return undefined;
     const previouslyFocused = document.activeElement;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
     panelRef.current?.focus();
     const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') {
+        onClose();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const panel = panelRef.current;
+      if (panel === null) return;
+      const focusable = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+        (element) => element.offsetParent !== null,
+      );
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (first === undefined || last === undefined) return;
+      if (document.activeElement === panel) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
+      if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      }
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => {
       document.removeEventListener('keydown', handleKeyDown);
+      document.body.style.overflow = previousOverflow;
       if (previouslyFocused instanceof HTMLElement) previouslyFocused.focus();
     };
   }, [open, onClose]);

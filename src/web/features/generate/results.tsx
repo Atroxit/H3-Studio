@@ -9,6 +9,7 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import { imageUrl } from '../../api';
 import { Button, Spinner } from '../../components';
+import { useStudio } from '../../studio';
 import type { GenerationBatch, GenerationTile, TileSummary } from './useGeneration';
 
 export interface ResultsGridProps {
@@ -21,6 +22,8 @@ export interface ResultsGridProps {
   onRetry: (indices: number[]) => void;
   onRetryFailed: () => void;
   onReload: () => void;
+  onClear: () => void;
+  onOpenImage: (imageId: string, trigger: HTMLElement | null) => void;
   /** Adds a starter to the prompt, so a first run is one click away. */
   onUseStarter: (prompt: string) => void;
 }
@@ -61,11 +64,22 @@ function stateLabel(tile: GenerationTile): string {
   if (tile.phase === 'waiting') return 'Waiting';
   if (tile.phase === 'running') return 'Sampling';
   if (tile.phase === 'done') return 'Ready';
+  if (tile.phase === 'cancelled') return 'Cancelled';
   return 'Failed';
 }
 
 function stateClass(tile: GenerationTile): string {
-  return tile.phase === 'running' ? 'is-running' : tile.phase === 'done' ? 'is-done' : tile.phase === 'failed' ? 'is-failed' : 'is-waiting';
+  return tile.phase === 'running' ? 'is-running' : tile.phase === 'done' ? 'is-done' : tile.phase === 'failed' ? 'is-failed' : tile.phase === 'cancelled' ? 'is-cancelled' : 'is-waiting';
+}
+
+function batchStatusLabel(batch: GenerationBatch, running: boolean): string {
+  if (running) return 'Running';
+  if (batch.status === 'queued') return 'Queued';
+  if (batch.status === 'running') return 'Running';
+  if (batch.status === 'complete') return 'Complete';
+  if (batch.status === 'partial') return 'Partial';
+  if (batch.status === 'failed') return 'Failed';
+  return 'Stopped';
 }
 
 function isGoing(tile: GenerationTile): boolean {
@@ -156,9 +170,10 @@ interface ResultTileProps {
   settled: boolean;
   canRetry: boolean;
   onRetry: (index: number) => void;
+  onOpen: (imageId: string, trigger: HTMLElement | null) => void;
 }
 
-function ResultTile({ tile, total, width, height, elapsed, settled, canRetry, onRetry }: ResultTileProps): ReactNode {
+function ResultTile({ tile, total, width, height, elapsed, settled, canRetry, onRetry, onOpen }: ResultTileProps): ReactNode {
   const label = `Image ${tile.index + 1} of ${total}`;
 
   return (
@@ -175,7 +190,14 @@ function ResultTile({ tile, total, width, height, elapsed, settled, canRetry, on
       </span>
 
       {tile.phase === 'done' && tile.imageId !== null ? (
-        <img className="gen-tile-image" src={imageUrl(tile.imageId)} alt={`Generated result ${tile.index + 1} of ${total}`} />
+        <button
+          type="button"
+          className="gen-tile-open"
+          aria-label={`Open generated result ${tile.index + 1} of ${total}`}
+          onClick={(event) => onOpen(tile.imageId ?? '', event.currentTarget)}
+        >
+          <img className="gen-tile-image" src={imageUrl(tile.imageId)} alt={`Generated result ${tile.index + 1} of ${total}`} />
+        </button>
       ) : null}
 
       {tile.phase === 'done' && tile.imageId === null ? (
@@ -188,6 +210,12 @@ function ResultTile({ tile, total, width, height, elapsed, settled, canRetry, on
       {tile.phase === 'waiting' ? (
         <div className="gen-tile-body">
           <p className="gen-tile-note">Queued</p>
+        </div>
+      ) : null}
+
+      {tile.phase === 'cancelled' ? (
+        <div className="gen-tile-body">
+          <p className="gen-tile-note">Cancelled</p>
         </div>
       ) : null}
 
@@ -222,7 +250,15 @@ function ResultTile({ tile, total, width, height, elapsed, settled, canRetry, on
 
       <span className="gen-tile-meta">
         <span>{tile.width === null || tile.height === null ? `${width} x ${height}` : `${tile.width} x ${tile.height}`}</span>
-        <span>{tile.phase === 'done' ? 'stored' : tile.phase === 'failed' ? 'not stored' : 'pending'}</span>
+        <span>
+          {tile.phase === 'done'
+            ? tile.imageId === null
+              ? 'not stored'
+              : 'stored'
+            : tile.phase === 'failed' || tile.phase === 'cancelled'
+              ? 'not stored'
+              : 'pending'}
+        </span>
       </span>
     </article>
   );
@@ -272,11 +308,15 @@ export function ResultsGrid({
   onRetry,
   onRetryFailed,
   onReload,
+  onClear,
+  onOpenImage,
   onUseStarter,
 }: ResultsGridProps): ReactNode {
+  const studio = useStudio();
   const tickClocks = reconcileClocks(batch, running);
   const going = batch !== null && batch.tiles.some(isGoing);
   const [now, setNow] = useState(() => Date.now());
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
 
   // One interval for the whole surface, and only while a tile is still going: a timer per
   // tile would fire for the same second and update state per tile. Nothing outside this
@@ -326,16 +366,24 @@ export function ResultsGrid({
   }
 
   const columns = columnsForCount(batch.tiles.length);
-  const settled = summary === null ? 0 : summary.done + summary.failed;
+  const settled = summary === null ? 0 : summary.done + summary.failed + summary.cancelled;
   const showPartial = summary !== null && summary.failed > 0;
   const canRetry = !running && batch.batchId !== null;
-  const statusLabel = running
-    ? 'Running'
-    : batch.status === 'cancelled'
-      ? 'Stopped'
-      : batch.status === 'failed'
-        ? 'Failed'
-        : 'Settled';
+  const statusLabel = batchStatusLabel(batch, running);
+  const providerLabel =
+    studio.providers.find((provider) => provider.id === batch.providerId)?.label ?? batch.providerId;
+
+  const copyPrompt = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(batch.prompt);
+      setCopyState('copied');
+      studio.notify('Prompt copied.');
+    } catch {
+      setCopyState('failed');
+      studio.notify('The prompt could not be copied.', 'error');
+    }
+    window.setTimeout(() => setCopyState('idle'), 2400);
+  };
 
   return (
     <section className="gen-results" aria-label="Batch results">
@@ -343,10 +391,35 @@ export function ResultsGrid({
         <div className="gen-results-copy">
           <h3 className="gen-results-title">{batch.prompt}</h3>
           <p className="gen-results-detail">
-            {batch.width} x {batch.height} / {batch.requested === 1 ? '1 image' : `${batch.requested} images`}
+            {providerLabel} / {batch.width} x {batch.height} /{' '}
+            {batch.requested === 1 ? '1 image' : `${batch.requested} images`}
+            {batch.seed === null ? null : ` / seed ${batch.seed}`}
           </p>
         </div>
-        <span className={running ? 'gen-status is-running' : 'gen-status'}>{statusLabel}</span>
+        <div className="gen-results-actions">
+          <span className={running ? 'gen-status is-running' : 'gen-status'}>{statusLabel}</span>
+          <Button variant="ghost" size="sm" onClick={() => void copyPrompt()}>
+            {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy prompt'}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              studio.useSettings({
+                prompt: batch.prompt,
+                width: batch.width,
+                height: batch.height,
+                count: batch.requested,
+                providerId: batch.providerId,
+              });
+            }}
+          >
+            Use prompt
+          </Button>
+          <Button variant="ghost" size="sm" disabled={running} onClick={onClear}>
+            Clear canvas
+          </Button>
+        </div>
       </header>
 
       {/* Progress is a live signal: once the batch settles the status pill and the
@@ -379,9 +452,11 @@ export function ResultsGrid({
       {batch.streamError === null ? null : (
         <div className="gen-stream-error" role="alert">
           <span className="gen-partial-text">{batch.streamError}</span>
-          <Button variant="secondary" size="sm" onClick={onReload}>
-            Reload batch
-          </Button>
+          {batch.batchId === null ? null : (
+            <Button variant="secondary" size="sm" onClick={onReload}>
+              Reload batch
+            </Button>
+          )}
         </div>
       )}
 
@@ -397,6 +472,7 @@ export function ResultsGrid({
             settled={!running}
             canRetry={canRetry}
             onRetry={(index) => onRetry([index])}
+            onOpen={onOpenImage}
           />
         ))}
       </div>

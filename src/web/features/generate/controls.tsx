@@ -6,6 +6,7 @@ import { useId, useState, type ChangeEvent, type ReactNode } from 'react';
 import { uploadReference } from '../../api';
 import { Button, Field, Slider, Spinner } from '../../components';
 import type { ProviderCapabilities, SizePreset } from '../../../core/types';
+import { ratioOf, seedProblem, sizeProblem, uniqueNotes } from './helpers';
 import { MAX_STEPS, MIN_STEPS, type GenerationController } from './useGeneration';
 
 export interface GenerationControlsProps {
@@ -22,17 +23,6 @@ interface ChipOption {
   value: string;
   label: string;
   detail?: string;
-}
-
-function greatestCommonDivisor(left: number, right: number): number {
-  if (right === 0) return Math.max(1, Math.abs(left));
-  return greatestCommonDivisor(right, left % right);
-}
-
-function ratioOf(width: number, height: number): string {
-  if (width <= 0 || height <= 0) return '1:1';
-  const divisor = greatestCommonDivisor(width, height);
-  return `${Math.round(width / divisor)}:${Math.round(height / divisor)}`;
 }
 
 function groupPresetsByRatio(presets: readonly SizePreset[]): AspectGroup[] {
@@ -187,7 +177,9 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const activeGroup = groups.find((group) => group.ratio === activeRatio) ?? null;
   const visiblePresets = activeGroup === null ? capabilities.presets : activeGroup.presets;
   const activePreset = visiblePresets.find((preset) => preset.id === form.presetId) ?? null;
-  const sizeInvalid = form.width < 1 || form.height < 1;
+  const sizeIssue = sizeProblem(form.width, form.height);
+  const sizeInvalid = sizeIssue !== null;
+  const seedIssue = seedProblem(form.seed);
 
   const aspectOptions: ChipOption[] = groups.map((group) => ({ value: group.ratio, label: group.ratio }));
   const sizeOptions: ChipOption[] = visiblePresets.map((preset) => ({
@@ -200,24 +192,41 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
     (_unused, index) => ({ value: String(index + 1), label: String(index + 1) }),
   );
 
-  // An unsupported sampling capability is one visible line, never a hidden control:
-  // these notes sit outside the advanced disclosure, whatever its state.
-  const advancedNotes: string[] = [];
-  if (!capabilities.adjustableSteps) {
-    advancedNotes.push(
-      capabilities.fixedSteps !== null
-        ? `Steps are fixed at ${capabilities.fixedSteps} by this provider.`
-        : noteFor(capabilities, ['step']) ?? 'Steps are chosen by this provider.',
-    );
-  }
-  if (!capabilities.guidance) {
-    advancedNotes.push(noteFor(capabilities, ['guidance', 'cfg']) ?? 'This provider has no guidance scale.');
-  }
-  if (!capabilities.negativePrompt) {
-    advancedNotes.push(noteFor(capabilities, ['negative']) ?? 'This provider has no negative prompt.');
-  }
+  // An unsupported sampling capability is one visible line, never a hidden control.
+  // These are capability-specific and never echo a full provider note.
+  const advancedNotes = uniqueNotes([
+    ...(capabilities.adjustableSteps
+      ? []
+      : [
+          capabilities.fixedSteps !== null
+            ? `Steps are fixed at ${capabilities.fixedSteps}.`
+            : 'Steps are chosen by this provider.',
+        ]),
+    ...(capabilities.guidance ? [] : ['Guidance is disabled.']),
+    ...(capabilities.negativePrompt ? [] : ['Negative prompt is not supported.']),
+  ]);
   const advancedCount =
     (capabilities.adjustableSteps ? 1 : 0) + (capabilities.guidance ? 1 : 0) + (capabilities.negativePrompt ? 1 : 0);
+
+  const sizeEmptyNote =
+    capabilities.presets.length === 0
+      ? noteFor(capabilities, ['size', 'resolution', 'dimension'])
+      : null;
+  const sizeFixedNote =
+    capabilities.presets.length > 0 && !capabilities.arbitrarySize
+      ? noteFor(capabilities, ['size', 'resolution', 'dimension'])
+      : null;
+  const seedNote = capabilities.seed ? null : noteFor(capabilities, ['seed']);
+  const referenceNote =
+    capabilities.maxReferenceImages > 0 ? null : noteFor(capabilities, ['reference', 'image input', 'edit']);
+  const progressNote = capabilities.streamingProgress ? null : 'This provider reports progress only when each image finishes.';
+  const shownElsewhere = new Set(
+    [...advancedNotes, sizeEmptyNote, sizeFixedNote, seedNote, referenceNote, progressNote]
+      .filter((note): note is string => note !== null)
+      .map((note) => note.trim()),
+  );
+  const providerNotes = uniqueNotes(capabilities.notes).filter((note) => !shownElsewhere.has(note));
+  const showNotesSection = providerNotes.length > 0 || progressNote !== null;
 
   const handleAspect = (ratio: string): void => {
     const group = groups.find((candidate) => candidate.ratio === ratio);
@@ -273,7 +282,7 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
           Size
         </h3>
         {capabilities.presets.length === 0 ? (
-          <QuietLine text={noteFor(capabilities, ['size', 'resolution', 'dimension']) ?? 'This provider lists no size presets.'} />
+          <QuietLine text={sizeEmptyNote ?? 'This provider lists no size presets.'} />
         ) : (
           <>
             <ChipGroup
@@ -303,32 +312,33 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
                 label="Width"
                 type="number"
                 inputMode="numeric"
-                min={multiple}
+                min={64}
+                max={8192}
                 step={multiple}
                 value={String(form.width)}
                 disabled={controller.running}
                 invalid={sizeInvalid}
-                hint={`Multiples of ${multiple} px`}
+                hint={`Multiples of ${multiple} px, 64 to 8192.`}
                 onChange={handleWidth}
               />
               <Field
                 label="Height"
                 type="number"
                 inputMode="numeric"
-                min={multiple}
+                min={64}
+                max={8192}
                 step={multiple}
                 value={String(form.height)}
                 disabled={controller.running}
                 invalid={sizeInvalid}
+                hint={`Multiples of ${multiple} px, 64 to 8192.`}
                 onChange={handleHeight}
               />
             </div>
-            {sizeInvalid ? <p className="gen-quiet is-error">Width and height must be at least 1 px.</p> : null}
+            {sizeIssue === null ? null : <p className="gen-quiet is-error">{sizeIssue}</p>}
           </>
         ) : (
-          <QuietLine
-            text={noteFor(capabilities, ['size', 'resolution', 'dimension']) ?? 'This provider takes sizes from its presets only.'}
-          />
+          <QuietLine text={sizeFixedNote ?? 'This provider takes sizes from its presets only.'} />
         )}
       </section>
 
@@ -354,11 +364,12 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
             step={1}
             value={form.seed}
             disabled={controller.running}
-            hint="Leave empty for a fresh seed per image."
+            invalid={seedIssue !== null}
+            hint={seedIssue ?? 'Leave empty for a fresh seed per image.'}
             onChange={(event) => controller.updateForm({ seed: event.target.value })}
           />
         ) : (
-          <QuietLine text={noteFor(capabilities, ['seed']) ?? 'This provider chooses the seed itself.'} />
+          <QuietLine text={seedNote ?? 'This provider chooses the seed itself.'} />
         )}
       </section>
 
@@ -495,31 +506,27 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
             {referenceError === null ? null : <p className="gen-quiet is-error">{referenceError}</p>}
           </>
         ) : (
-          <QuietLine
-            text={noteFor(capabilities, ['reference', 'image input', 'edit']) ?? 'This provider does not accept reference images.'}
-          />
+          <QuietLine text={referenceNote ?? 'This provider does not accept reference images.'} />
         )}
       </section>
 
-      {capabilities.streamingProgress && capabilities.notes.length === 0 ? null : (
+      {showNotesSection ? (
         <section className="gen-section" aria-labelledby={notesHeadingId}>
           <h3 className="gen-section-title" id={notesHeadingId}>
             Provider notes
           </h3>
-          {capabilities.streamingProgress ? null : (
-            <QuietLine text="This provider reports progress only when each image finishes." />
-          )}
-          {capabilities.notes.length === 0 ? null : (
+          {progressNote === null ? null : <QuietLine text={progressNote} />}
+          {providerNotes.length === 0 ? null : (
             <ul className="gen-notes">
-              {capabilities.notes.map((note, index) => (
-                <li key={`${index}-${note}`} className="gen-quiet">
+              {providerNotes.map((note) => (
+                <li key={note} className="gen-quiet">
                   {note}
                 </li>
               ))}
             </ul>
           )}
         </section>
-      )}
+      ) : null}
     </div>
   );
 }

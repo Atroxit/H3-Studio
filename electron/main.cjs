@@ -8,6 +8,7 @@ const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
 const { spawn } = require('node:child_process');
 const http = require('node:http');
 const net = require('node:net');
+const os = require('node:os');
 const path = require('node:path');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -130,7 +131,7 @@ function createWindow(port) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      spellcheck: false,
+      spellcheck: true,
     },
   });
 
@@ -177,9 +178,10 @@ async function boot() {
   if (!require('node:fs').existsSync(SERVER_ENTRY)) {
     throw new Error(`The server bundle is missing at ${SERVER_ENTRY}. Run: npm run desktop:build`);
   }
-  // H3_DATA_DIR wins over the per-user application data folder, so the library can be
-  // pointed at an existing folder, or kept somewhere the sandbox will allow.
-  const dataDir = (process.env.H3_DATA_DIR ?? '').trim() || path.join(app.getPath('userData'), 'library');
+  // H3_DATA_DIR wins, so the library can point at an existing folder. Otherwise the
+  // desktop uses the same documented home directory as a direct server run, which keeps
+  // images out of Electron's cache folder and out of the roaming profile.
+  const dataDir = (process.env.H3_DATA_DIR ?? '').trim() || path.join(os.homedir(), '.h3-studio');
   const port = await pickPort();
   serverProcess = startServer(port, dataDir);
   const healthy = await waitForHealth(port);

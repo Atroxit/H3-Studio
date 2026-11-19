@@ -2,11 +2,11 @@
 // LibraryRail is the compact recent list for the left rail. Both read the same
 // controller, so a batch selected in the rail is highlighted in the canvas.
 
-import { useCallback, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { BatchRecord, BatchStatus } from '../../../core/types';
 import { imageUrl } from '../../api';
 import { useStudio } from '../../App';
-import { Button, Dialog, EmptyState, Spinner, Toast } from '../../components';
+import { Button, Dialog, EmptyState, SegmentedControl, Spinner } from '../../components';
 import { PresetsPanel } from './presets';
 import {
   formatCount,
@@ -24,12 +24,6 @@ import './library.css';
 interface ViewerState {
   batch: BatchRecord;
   imageId: string;
-}
-
-interface ToastState {
-  id: number;
-  message: string;
-  tone: 'info' | 'success' | 'error';
 }
 
 function ImageIcon(): ReactNode {
@@ -64,11 +58,15 @@ interface BatchSectionProps {
   providerLabel: string;
   active: boolean;
   deleting: boolean;
+  retrying: boolean;
   isSelected: (imageId: string) => boolean;
   onToggleImage: (batch: BatchRecord, index: number, extend: boolean) => void;
   onSelectBatch: (batch: BatchRecord, selected: boolean) => void;
   onOpen: (batch: BatchRecord, imageId: string, trigger: HTMLElement | null) => void;
   onRequestDelete: (batch: BatchRecord) => void;
+  onRetryFailed: (batch: BatchRecord) => void;
+  onUsePrompt: (batch: BatchRecord) => void;
+  onCopyPrompt: (batch: BatchRecord) => void;
 }
 
 function BatchSection({
@@ -76,11 +74,15 @@ function BatchSection({
   providerLabel,
   active,
   deleting,
+  retrying,
   isSelected,
   onToggleImage,
   onSelectBatch,
   onOpen,
   onRequestDelete,
+  onRetryFailed,
+  onUsePrompt,
+  onCopyPrompt,
 }: BatchSectionProps): ReactNode {
   const images = orderedImages(batch);
   const selectedCount = images.filter((image) => isSelected(image.id)).length;
@@ -90,7 +92,7 @@ function BatchSection({
   const firstFailure = batch.failures[0];
 
   return (
-    <article className={active ? 'lb-batch is-active' : 'lb-batch'} aria-labelledby={headingId}>
+    <article className={active ? 'lb-batch is-active' : 'lb-batch'} aria-labelledby={headingId} data-batch-id={batch.id}>
       <header className="lb-batch-head">
         <div className="lb-batch-copy">
           <h3 className="lb-batch-prompt" id={headingId}>
@@ -109,6 +111,23 @@ function BatchSection({
         </div>
         <div className="lb-batch-actions">
           <span className={`lb-status is-${batch.status}`}>{statusLabel(batch.status)}</span>
+          <Button variant="ghost" size="sm" onClick={() => onUsePrompt(batch)}>
+            Use prompt
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => onCopyPrompt(batch)}>
+            Copy prompt
+          </Button>
+          {batch.failures.length === 0 ? null : (
+            <Button
+              variant="secondary"
+              size="sm"
+              busy={retrying}
+              disabled={retrying}
+              onClick={() => onRetryFailed(batch)}
+            >
+              Retry failed
+            </Button>
+          )}
           {images.length === 0 ? null : (
             <Button variant="ghost" size="sm" onClick={() => onSelectBatch(batch, !allSelected)}>
               {allSelected ? 'Unselect all' : 'Select all'}
@@ -187,8 +206,11 @@ export function LibraryCanvas(): ReactNode {
   const library = useLibrary();
   const [viewer, setViewer] = useState<ViewerState | null>(null);
   const [pendingDelete, setPendingDelete] = useState<BatchRecord | null>(null);
-  const [toast, setToast] = useState<ToastState | null>(null);
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'complete' | 'failed'>('all');
+  const searchId = useId();
   const viewerTrigger = useRef<HTMLElement | null>(null);
+  const lastScrolledId = useRef<string | null>(null);
 
   const providerLabels = useMemo(() => {
     const labels = new Map<string, string>();
@@ -196,9 +218,49 @@ export function LibraryCanvas(): ReactNode {
     return labels;
   }, [studio.providers]);
 
-  const notify = useCallback((notice: LibraryNotice): void => {
-    setToast({ id: Date.now(), message: notice.message, tone: notice.tone });
-  }, []);
+  const visibleBatches = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return library.batches.filter((batch) => {
+      const matchesStatus =
+        statusFilter === 'all' ||
+        (statusFilter === 'complete'
+          ? batch.status === 'complete'
+          : batch.status === 'failed' || batch.status === 'partial');
+      if (!matchesStatus) return false;
+      if (needle.length === 0) return true;
+      const providerLabel = providerLabels.get(batch.providerId) ?? batch.providerId;
+      return (
+        batch.prompt.toLowerCase().includes(needle) || providerLabel.toLowerCase().includes(needle)
+      );
+    });
+  }, [library.batches, providerLabels, query, statusFilter]);
+
+  const notify = useCallback(
+    (notice: LibraryNotice): void => {
+      studio.notify(notice.message, notice.tone);
+    },
+    [studio],
+  );
+
+  // A rail click selects a batch. If the current filters hide it, clear them first, then
+  // scroll once the card exists. The saved id stops later renders from re-scrolling.
+  useEffect(() => {
+    const activeId = library.activeBatchId;
+    if (activeId === null) {
+      lastScrolledId.current = null;
+      return;
+    }
+    if (!visibleBatches.some((batch) => batch.id === activeId)) {
+      setQuery('');
+      setStatusFilter('all');
+      return;
+    }
+    if (lastScrolledId.current === activeId) return;
+    lastScrolledId.current = activeId;
+    document
+      .querySelector<HTMLElement>(`[data-batch-id="${activeId}"]`)
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [library.activeBatchId, visibleBatches]);
 
   // Stable closers keep the Dialog and viewer focus effects from re-running on
   // every render of this screen.
@@ -208,10 +270,6 @@ export function LibraryCanvas(): ReactNode {
 
   const closeDeleteDialog = useCallback((): void => {
     setPendingDelete(null);
-  }, []);
-
-  const dismissToast = useCallback((): void => {
-    setToast(null);
   }, []);
 
   const openViewer = useCallback((batch: BatchRecord, imageId: string, trigger: HTMLElement | null): void => {
@@ -234,6 +292,39 @@ export function LibraryCanvas(): ReactNode {
   const exportSelection = useCallback(async (): Promise<void> => {
     notify(await library.exportSelection());
   }, [library.exportSelection, notify]);
+
+  const retryFailed = useCallback(
+    async (batch: BatchRecord): Promise<void> => {
+      notify(await library.retryFailed(batch));
+    },
+    [library.retryFailed, notify],
+  );
+
+  const usePrompt = useCallback(
+    (batch: BatchRecord): void => {
+      studio.useSettings({
+        prompt: batch.prompt,
+        width: batch.width,
+        height: batch.height,
+        count: batch.requested,
+        negativePrompt: batch.negativePrompt,
+        providerId: batch.providerId,
+      });
+    },
+    [studio],
+  );
+
+  const copyPrompt = useCallback(
+    async (batch: BatchRecord): Promise<void> => {
+      try {
+        await navigator.clipboard.writeText(batch.prompt);
+        notify({ tone: 'success', message: 'Prompt copied.' });
+      } catch {
+        notify({ tone: 'error', message: 'The prompt could not be copied.' });
+      }
+    },
+    [notify],
+  );
 
   const confirmDelete = useCallback(async (): Promise<void> => {
     const target = pendingDelete;
@@ -280,6 +371,33 @@ export function LibraryCanvas(): ReactNode {
         </div>
       </header>
 
+      <div className="lb-filters">
+        <div className="field lb-search-field">
+          <label className="field-label" htmlFor={searchId}>
+            Search
+          </label>
+          <input
+            id={searchId}
+            className="field-input"
+            type="search"
+            value={query}
+            placeholder="Prompt or provider"
+            autoComplete="off"
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </div>
+        <SegmentedControl<'all' | 'complete' | 'failed'>
+          label="Batch status filter"
+          value={statusFilter}
+          onChange={setStatusFilter}
+          options={[
+            { value: 'all', label: 'All' },
+            { value: 'complete', label: 'Complete' },
+            { value: 'failed', label: 'Failed' },
+          ]}
+        />
+      </div>
+
       <div className="lb-scroll">
         {library.phase === 'loading' && library.batches.length === 0 ? (
           <div className="lb-loading">
@@ -315,18 +433,32 @@ export function LibraryCanvas(): ReactNode {
           </div>
         ) : null}
 
-        {library.batches.map((batch) => (
+        {library.batches.length > 0 && visibleBatches.length === 0 ? (
+          <div className="lb-empty">
+            <EmptyState title="No batches match" description="Clear the search or set the status filter back to All." />
+          </div>
+        ) : null}
+
+        {visibleBatches.map((batch) => (
           <BatchSection
             key={batch.id}
             batch={batch}
             providerLabel={providerLabels.get(batch.providerId) ?? batch.providerId}
             active={library.activeBatchId === batch.id}
             deleting={library.deletingBatchId === batch.id}
+            retrying={library.retryingBatchId === batch.id}
             isSelected={library.isSelected}
             onToggleImage={library.toggleImage}
             onSelectBatch={library.selectBatchImages}
             onOpen={openViewer}
             onRequestDelete={setPendingDelete}
+            onRetryFailed={(target) => {
+              void retryFailed(target);
+            }}
+            onUsePrompt={usePrompt}
+            onCopyPrompt={(target) => {
+              void copyPrompt(target);
+            }}
           />
         ))}
 
@@ -394,14 +526,12 @@ export function LibraryCanvas(): ReactNode {
         />
       )}
 
-      {toast === null ? null : (
-        <Toast key={toast.id} message={toast.message} tone={toast.tone} onClose={dismissToast} />
-      )}
     </section>
   );
 }
 
 export function LibraryRail(): ReactNode {
+  const studio = useStudio();
   const library = useLibrary();
   const recent = library.batches.slice(0, RAIL_LIMIT);
 
@@ -427,7 +557,10 @@ export function LibraryRail(): ReactNode {
               className={active ? 'lb-rail-row is-active' : 'lb-rail-row'}
               title={batch.prompt}
               aria-current={active ? 'true' : undefined}
-              onClick={() => library.selectBatch(active ? null : batch.id)}
+              onClick={() => {
+                library.selectBatch(active ? null : batch.id);
+                if (studio.view === 'generate') studio.openBatch(batch.id);
+              }}
             >
               <span className="lb-rail-thumb">
                 {cover === undefined ? (

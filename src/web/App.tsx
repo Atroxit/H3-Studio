@@ -2,17 +2,7 @@
 // Feature screens mount into the slots below. Nothing here renders a features
 // screen, and nothing styles their internal markup.
 
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { Preset, ProviderCapabilities, ProviderConfig, ProviderKind } from '../core/types';
 import {
   checkProviderHealth,
@@ -26,44 +16,30 @@ import {
 } from './api';
 import { Button, EmptyState, Field, SegmentedControl, Select, Spinner, Toast } from './components';
 import { H3_IMAGE_TEMPLATE_JSON } from './data/h3ImageTemplate';
+import { readH3ExpanderState, setH3ExpanderState } from './features/generate/helpers';
+import {
+  adoptPromptSettings,
+  applyPresetToForm,
+  loadBatchById,
+} from './features/generate/useGeneration';
+import {
+  StudioProvider,
+  isProviderEnabled,
+  useStudio,
+  type PromptSettings,
+  type StudioContextValue,
+  type StudioView,
+} from './studio';
 import './styles/topbar.css';
+
+export { StudioProvider, useStudio, isProviderEnabled };
+export type { StudioContextValue, StudioView };
 
 // Checked once at startup: only the desktop shell reports Electron in its user agent.
 // The class lets CSS reserve the window control strip and make the top bar a drag
 // region. In the browser neither applies, so no mysterious gap appears there.
 if (typeof navigator !== 'undefined' && typeof document !== 'undefined' && navigator.userAgent.includes('Electron')) {
   document.documentElement.classList.add('is-desktop');
-}
-
-export type StudioView = 'generate' | 'library';
-
-export interface StudioContextValue {
-  /** Every provider config the server knows about, enabled or not. */
-  providers: ProviderConfig[];
-  /** The provider the generate screen should target. Null when nothing is enabled. */
-  provider: ProviderConfig | null;
-  selectProvider: (providerId: string) => void;
-  /** Library totals from /api/stats. Null until the first load succeeds. */
-  stats: StudioStats | null;
-  presets: Preset[];
-  /** Reloads providers, stats and presets without showing the loading screen. */
-  refresh: () => Promise<void>;
-}
-
-/** Read this instead of prop drilling into feature screens. */
-export const StudioProvider = createContext<StudioContextValue | null>(null);
-
-export function useStudio(): StudioContextValue {
-  const value = useContext(StudioProvider);
-  if (value === null) throw new Error('useStudio must be called inside the App tree.');
-  return value;
-}
-
-/**
- * A config counts as enabled unless the server marks it disabled.
- */
-export function isProviderEnabled(config: ProviderConfig): boolean {
-  return config.enabled !== false;
 }
 
 export interface StudioSlots {
@@ -207,6 +183,16 @@ function savedCapabilityOverride(existing: ProviderConfig | null): Record<string
   return isRecord(raw) ? raw : null;
 }
 
+/** The saved ComfyUI timeout in seconds, with the adapter default of 900 s. */
+function savedTimeoutSeconds(existing: ProviderConfig | null): string {
+  const raw = existing?.options?.['timeoutMs'];
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? String(raw / 1000) : '900';
+}
+
+function sameJson(left: Record<string, unknown> | null, right: Record<string, unknown> | null): boolean {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
 /**
  * Checks the text against the ComfyUI API format the adapter reads: an object of
  * node id to node, and every node carries a string class_type and an object inputs.
@@ -308,13 +294,34 @@ function writeViewToLocation(next: StudioView): void {
   window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
 }
 
+const SELECTED_PROVIDER_KEY = 'h3-studio:selected-provider';
+
+function readSelectedProvider(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(SELECTED_PROVIDER_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function persistSelectedProvider(providerId: string | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (providerId === null) window.localStorage.removeItem(SELECTED_PROVIDER_KEY);
+    else window.localStorage.setItem(SELECTED_PROVIDER_KEY, providerId);
+  } catch {
+    // Private mode or a blocked storage area leaves the choice in memory only.
+  }
+}
+
 export function App({ slots = {} }: AppProps): ReactNode {
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [stats, setStats] = useState<StudioStats | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [phase, setPhase] = useState<Phase>('loading');
   const [loadError, setLoadError] = useState('');
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(readSelectedProvider);
   const [view, setView] = useState<StudioView>(readViewFromLocation);
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [setupOpen, setSetupOpen] = useState(false);
@@ -346,6 +353,14 @@ export function App({ slots = {} }: AppProps): ReactNode {
     void load('initial');
   }, [load]);
 
+  // The browser chrome colour comes from the same token as the canvas, so the HTML
+  // stays free of literal colours and the two can never drift apart.
+  useEffect(() => {
+    const meta = document.querySelector('meta[name="theme-color"]');
+    const canvasTop = getComputedStyle(document.documentElement).getPropertyValue('--canvas-top').trim();
+    if (meta !== null && canvasTop.length > 0) meta.setAttribute('content', canvasTop);
+  }, []);
+
   const refresh = useCallback((): Promise<void> => load('refresh'), [load]);
 
   const dismissToast = useCallback(() => {
@@ -371,12 +386,65 @@ export function App({ slots = {} }: AppProps): ReactNode {
 
   const provider = useMemo<ProviderConfig | null>(() => {
     const selected = enabledProviders.find((candidate) => candidate.id === selectedId);
-    return selected ?? enabledProviders[0] ?? null;
+    if (selected !== undefined) return selected;
+    const nonMock = enabledProviders.find((candidate) => candidate.kind !== 'mock');
+    if (nonMock !== undefined) return nonMock;
+    const mock = enabledProviders.find((candidate) => candidate.kind === 'mock');
+    return mock ?? enabledProviders[0] ?? null;
   }, [enabledProviders, selectedId]);
 
+  useEffect(() => {
+    persistSelectedProvider(provider === null ? null : provider.id);
+  }, [provider]);
+
+  const notify = useCallback((message: string, tone: 'success' | 'error' = 'success'): void => {
+    setToast({ id: Date.now(), message, tone });
+  }, []);
+
+  const openBatch = useCallback((batchId: string): void => {
+    void loadBatchById(batchId);
+  }, []);
+
+  const applyPreset = useCallback(
+    (preset: Preset): void => {
+      applyPresetToForm(preset, provider === null ? null : provider.id);
+      selectView('generate');
+    },
+    [provider, selectView],
+  );
+
+  const useSettings = useCallback(
+    (settings: PromptSettings): void => {
+      const requested = settings.providerId;
+      const target =
+        requested !== undefined && enabledProviders.some((candidate) => candidate.id === requested)
+          ? requested
+          : provider === null
+            ? null
+            : provider.id;
+      if (target !== null && target !== (provider === null ? null : provider.id)) setSelectedId(target);
+      adoptPromptSettings(settings, target);
+      selectView('generate');
+    },
+    [enabledProviders, provider, selectView],
+  );
+
   const contextValue = useMemo<StudioContextValue>(
-    () => ({ providers, provider, selectProvider: setSelectedId, stats, presets, refresh }),
-    [providers, provider, stats, presets, refresh],
+    () => ({
+      providers,
+      provider,
+      selectProvider: setSelectedId,
+      stats,
+      presets,
+      view,
+      selectView,
+      openBatch,
+      applyPreset,
+      useSettings,
+      notify,
+      refresh,
+    }),
+    [providers, provider, stats, presets, view, selectView, openBatch, applyPreset, useSettings, notify, refresh],
   );
 
   const imageCount = stats === null ? 0 : stats.imageCount;
@@ -485,7 +553,11 @@ export function App({ slots = {} }: AppProps): ReactNode {
             </div>
           </header>
 
-          <div className={inspectorOpen ? 'studio-body' : 'studio-body is-collapsed'}>
+          <div
+            className={
+              view === 'library' ? 'studio-body is-library' : inspectorOpen ? 'studio-body' : 'studio-body is-collapsed'
+            }
+          >
             <aside className="rail" aria-label="Library summary and presets">
               <section className="rail-section">
                 <div className="rail-head">
@@ -508,7 +580,6 @@ export function App({ slots = {} }: AppProps): ReactNode {
                 {slots.rail === undefined ? null : <div className="rail-slot">{slots.rail}</div>}
               </section>
 
-              {/* Display only: the library feature owns applying and editing presets. */}
               <section className="rail-section">
                 <div className="rail-head">
                   <h2 className="section-label">Presets</h2>
@@ -519,11 +590,20 @@ export function App({ slots = {} }: AppProps): ReactNode {
                 ) : (
                   <ul className="preset-strip">
                     {presets.map((preset) => (
-                      <li key={preset.id} className="preset-chip">
-                        <span className="preset-chip-name">{preset.name}</span>
-                        <span className="preset-chip-meta">
-                          {preset.width} x {preset.height} / {preset.count}
-                        </span>
+                      <li key={preset.id}>
+                        <button
+                          type="button"
+                          className="preset-chip"
+                          title={`Apply ${preset.name}`}
+                          onClick={() => {
+                            applyPreset(preset);
+                          }}
+                        >
+                          <span className="preset-chip-name">{preset.name}</span>
+                          <span className="preset-chip-meta">
+                            {preset.width} x {preset.height} / {preset.count}
+                          </span>
+                        </button>
                       </li>
                     ))}
                   </ul>
@@ -550,32 +630,37 @@ export function App({ slots = {} }: AppProps): ReactNode {
               )}
             </main>
 
-            <aside className={inspectorOpen ? 'inspector' : 'inspector is-collapsed'} aria-label="Generation controls">
-              <div className="inspector-head">
-                {inspectorOpen ? <h2 className="section-label">Controls</h2> : null}
-                <button
-                  type="button"
-                  className="icon-button"
-                  aria-expanded={inspectorOpen}
-                  aria-label={inspectorOpen ? 'Collapse generation controls' : 'Expand generation controls'}
-                  title={inspectorOpen ? 'Collapse controls' : 'Expand controls'}
-                  onClick={() => {
-                    setInspectorOpen(!inspectorOpen);
-                  }}
-                >
-                  <ChevronIcon pointsLeft={!inspectorOpen} />
-                </button>
-              </div>
-              {inspectorOpen ? (
-                <div className="inspector-body">
-                  {slots.controls === undefined ? (
-                    <EmptyState title="Controls" description="Prompt, size and sampling controls appear here." />
-                  ) : (
-                    slots.controls
-                  )}
+            {view === 'generate' ? (
+              <aside
+                className={inspectorOpen ? 'inspector' : 'inspector is-collapsed'}
+                aria-label="Generation controls"
+              >
+                <div className="inspector-head">
+                  {inspectorOpen ? <h2 className="section-label">Controls</h2> : null}
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-expanded={inspectorOpen}
+                    aria-label={inspectorOpen ? 'Collapse generation controls' : 'Expand generation controls'}
+                    title={inspectorOpen ? 'Collapse controls' : 'Expand controls'}
+                    onClick={() => {
+                      setInspectorOpen(!inspectorOpen);
+                    }}
+                  >
+                    <ChevronIcon pointsLeft={!inspectorOpen} />
+                  </button>
                 </div>
-              ) : null}
-            </aside>
+                {inspectorOpen ? (
+                  <div className="inspector-body">
+                    {slots.controls === undefined ? (
+                      <EmptyState title="Controls" description="Prompt, size and sampling controls appear here." />
+                    ) : (
+                      slots.controls
+                    )}
+                  </div>
+                ) : null}
+              </aside>
+            ) : null}
           </div>
         </div>
       )}
@@ -650,26 +735,43 @@ interface SetupCardProps {
 }
 
 function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
+  const { refresh } = useStudio();
   const graphId = useId();
   const workflowId = `${graphId}-workflow`;
   const workflowHintId = `${graphId}-workflow-hint`;
+  const expanderId = `${graphId}-expander`;
   // Only ComfyUI reads a graph, so only its card grows the advanced section.
   const isComfy = meta.kind === 'comfyui';
+  const displayLabel = existing === null ? meta.label : existing.label;
+  const enabled = existing !== null && existing.enabled !== false;
 
   const [baseUrl, setBaseUrl] = useState(existing === null ? meta.defaultBaseUrl : existing.baseUrl);
   const [configId, setConfigId] = useState<string | null>(existing === null ? null : existing.id);
-  const [busy, setBusy] = useState<'none' | 'testing' | 'enabling' | 'saving'>('none');
+  const [busy, setBusy] = useState<'none' | 'testing' | 'enabling' | 'saving' | 'disabling'>('none');
   const [status, setStatus] = useState<{ tone: 'ok' | 'error'; message: string } | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
   const [workflow, setWorkflow] = useState<string>(() => savedWorkflowTemplate(existing));
   const [capabilities, setCapabilities] = useState<Record<string, unknown> | null>(() =>
     savedCapabilityOverride(existing),
   );
+  const [timeoutSeconds, setTimeoutSeconds] = useState<string>(() => savedTimeoutSeconds(existing));
 
   const workflowProblem = workflowTemplateProblem(workflow);
   const trimmedUrl = baseUrl.trim();
   const idle = busy === 'none';
-  const canSave = idle && trimmedUrl.length > 0 && workflowProblem === null;
+  const timeoutValue = Number(timeoutSeconds);
+  const timeoutValid =
+    isComfy && timeoutSeconds.trim().length > 0 && Number.isInteger(timeoutValue) && timeoutValue > 0;
+  const timeoutProblem = isComfy && !timeoutValid ? 'Timeout must be a whole number of seconds above zero.' : null;
+  const canSave =
+    idle && trimmedUrl.length > 0 && workflowProblem === null && (!isComfy || timeoutValid);
+  const expanderState = isComfy ? readH3ExpanderState(workflow) : null;
+  const dirty =
+    existing === null ||
+    trimmedUrl !== existing.baseUrl ||
+    workflow !== savedWorkflowTemplate(existing) ||
+    !sameJson(capabilities, savedCapabilityOverride(existing)) ||
+    (isComfy && timeoutSeconds !== savedTimeoutSeconds(existing));
 
   /**
    * The options the server stores. Other keys a saved config carries are kept, and
@@ -683,14 +785,19 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
     const template = workflow.trim();
     if (template.length > 0) next['workflowTemplate'] = template;
     if (capabilities !== null) next['capabilities'] = capabilities;
+    if (timeoutValid) next['timeoutMs'] = Math.round(timeoutValue * 1000);
     return next;
-  }, [capabilities, existing, isComfy, workflow]);
+  }, [capabilities, existing, isComfy, timeoutValid, timeoutValue, workflow]);
 
   const draft = useCallback((): Omit<ProviderConfig, 'id'> => {
-    const base: Omit<ProviderConfig, 'id'> = { kind: meta.kind, label: meta.label, baseUrl: trimmedUrl };
+    const base: Omit<ProviderConfig, 'id'> = {
+      kind: meta.kind,
+      label: existing === null ? meta.label : existing.label,
+      baseUrl: trimmedUrl,
+    };
     const options = optionsDraft();
     return options === undefined ? base : { ...base, options };
-  }, [meta.kind, meta.label, optionsDraft, trimmedUrl]);
+  }, [existing, meta.kind, meta.label, optionsDraft, trimmedUrl]);
 
   const persist = useCallback(async (): Promise<ProviderConfig> => {
     if (configId === null) {
@@ -705,32 +812,38 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
     setBusy('testing');
     setStatus(null);
     try {
-      const saved = await persist();
+      // A clean saved config is tested in place. Unsaved edits are written first, and the
+      // message says so, because testing must use the values in the fields.
+      const saved =
+        existing !== null && !dirty && configId !== null ? existing : await persist();
       const health: ProviderHealth = await checkProviderHealth(saved.id);
+      const prefix = saved === existing ? '' : 'Saved the changes, then tested. ';
       setStatus(
         health.ok
-          ? { tone: 'ok', message: health.detail ?? 'The provider answered.' }
-          : { tone: 'error', message: health.detail ?? 'The provider did not answer.' },
+          ? { tone: 'ok', message: `${prefix}${health.detail ?? 'The provider answered.'}` }
+          : { tone: 'error', message: `${prefix}${health.detail ?? 'The provider did not answer.'}` },
       );
+      if (saved !== existing) void refresh();
     } catch (error) {
       setStatus({ tone: 'error', message: describeError(error) });
     } finally {
       setBusy('none');
     }
-  }, [persist]);
+  }, [configId, dirty, existing, persist, refresh]);
 
   const saveGraph = useCallback(async (): Promise<void> => {
     setBusy('saving');
     setStatus(null);
     try {
       await persist();
-      setStatus({ tone: 'ok', message: 'The graph is saved. This provider uses it on the next run.' });
+      setStatus({ tone: 'ok', message: 'The settings are saved. This provider uses them on the next run.' });
+      void refresh();
     } catch (error) {
       setStatus({ tone: 'error', message: describeError(error) });
     } finally {
       setBusy('none');
     }
-  }, [persist]);
+  }, [persist, refresh]);
 
   const enable = useCallback(async (): Promise<void> => {
     setBusy('enabling');
@@ -749,17 +862,35 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
     }
   }, [configId, draft, onEnabled]);
 
+  const disable = useCallback(async (): Promise<void> => {
+    if (existing === null) return;
+    setBusy('disabling');
+    setStatus(null);
+    try {
+      await updateProvider(existing.id, { enabled: false });
+      await refresh();
+      setStatus({ tone: 'ok', message: `${existing.label} is disabled.` });
+    } catch (error) {
+      setStatus({ tone: 'error', message: describeError(error) });
+    } finally {
+      setBusy('none');
+    }
+  }, [existing, refresh]);
+
   return (
     <section className="setup-card" aria-labelledby={`setup-${meta.kind}`}>
       <div className="setup-card-head">
         <h3 className="setup-card-title" id={`setup-${meta.kind}`}>
-          {meta.label}
+          {displayLabel}
         </h3>
-        <span className="data">{meta.kind}</span>
+        <span className="setup-card-meta">
+          <span className={enabled ? 'setup-state is-enabled' : 'setup-state'}>{enabled ? 'Enabled' : 'Disabled'}</span>
+          <span className="data">{meta.kind}</span>
+        </span>
       </div>
       <p className="setup-card-summary">{meta.summary}</p>
       <Field
-        label={`${meta.label} base URL`}
+        label={`${displayLabel} base URL`}
         value={baseUrl}
         spellCheck={false}
         autoComplete="off"
@@ -769,13 +900,35 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
           setBaseUrl(event.target.value);
         }}
       />
+      {isComfy ? (
+        <Field
+          label="Timeout (s)"
+          type="number"
+          inputMode="numeric"
+          min={1}
+          step={1}
+          value={timeoutSeconds}
+          disabled={!idle}
+          invalid={!timeoutValid}
+          hint={timeoutProblem ?? 'The H3 default is 900 s (15 minutes).'}
+          onChange={(event) => {
+            setTimeoutSeconds(event.target.value);
+          }}
+        />
+      ) : null}
       <div className="setup-card-actions">
         <Button variant="secondary" busy={busy === 'testing'} disabled={!canSave} onClick={() => void testConnection()}>
-          Test connection
+          {dirty ? 'Save and test' : 'Test connection'}
         </Button>
         <Button variant="primary" busy={busy === 'enabling'} disabled={!canSave} onClick={() => void enable()}>
           Enable
         </Button>
+        {enabled ? (
+          <Button variant="ghost" busy={busy === 'disabling'} disabled={!idle} onClick={() => void disable()}>
+            Disable
+          </Button>
+        ) : null}
+        {dirty ? <span className="setup-dirty">Unsaved changes</span> : null}
       </div>
       {status === null ? null : (
         <p className={status.tone === 'ok' ? 'setup-status is-ok' : 'setup-status is-error'} role="status">
@@ -803,6 +956,24 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
               {workflow.trim().length === 0 ? 'Default graph' : 'Custom graph'}
             </span>
           </button>
+          {expanderState === null ? null : (
+            <label className="setup-check" htmlFor={expanderId}>
+              <input
+                id={expanderId}
+                type="checkbox"
+                checked={expanderState}
+                disabled={!idle}
+                onChange={(event) => {
+                  const next = setH3ExpanderState(workflow, event.target.checked);
+                  if (next !== null) setWorkflow(next);
+                }}
+              />
+              <span className="setup-check-copy">
+                <span className="setup-check-title">H3 Prompt Expander (Qwen3.5 9B)</span>
+                <span className="field-hint">Enabling runs the 9B caption expander before the image model.</span>
+              </span>
+            </label>
+          )}
           <div className="setup-advanced-panel" id={`${graphId}-panel`} hidden={!graphOpen}>
             <div className="field">
               <label className="field-label" htmlFor={workflowId}>
@@ -848,7 +1019,7 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
                 disabled={!canSave}
                 onClick={() => void saveGraph()}
               >
-                Save graph
+                Save settings
               </Button>
               <Button
                 variant="ghost"
@@ -866,6 +1037,7 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
                 disabled={!idle}
                 onClick={() => {
                   setCapabilities({ ...H3_IMAGE_CAPABILITIES });
+                  if (!timeoutValid) setTimeoutSeconds('900');
                 }}
               >
                 H3 Image capabilities

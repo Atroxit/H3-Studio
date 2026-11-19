@@ -118,6 +118,14 @@
   gap: var(--space-3);
 }
 
+.gen-results-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
 .gen-results-copy {
   min-width: 0;
 }
@@ -250,6 +258,28 @@
   border-color: var(--danger-line);
 }
 
+.gen-tile.is-cancelled {
+  border-color: var(--line);
+}
+
+.gen-tile-open {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.gen-tile-open:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
 .gen-tile-image {
   display: block;
   width: 100%;
@@ -278,6 +308,7 @@
   left: var(--space-2);
   z-index: 2;
   color: var(--text);
+  pointer-events: none;
 }
 
 .gen-tile-tags {
@@ -319,6 +350,10 @@
 .gen-tile-state.is-failed {
   border-color: var(--danger-line);
   color: var(--danger);
+}
+
+.gen-tile-state.is-cancelled {
+  color: var(--text-muted);
 }
 
 .gen-tile-body {
@@ -503,6 +538,10 @@
   white-space: nowrap;
 }
 
+.gen-composer-count.is-error {
+  color: var(--danger);
+}
+
 .gen-composer .gen-prompt {
   min-height: 76px;
   max-height: 180px;
@@ -513,6 +552,14 @@
   line-height: 1.5;
   color: var(--text-faint);
   overflow-wrap: anywhere;
+}
+
+.gen-hint.is-error {
+  color: var(--danger);
+}
+
+.gen-snapped {
+  color: var(--text-faint);
 }
 
 .gen-quiet.is-error {
@@ -677,7 +724,7 @@
 
 .gen-chips {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 6px;
 }
 

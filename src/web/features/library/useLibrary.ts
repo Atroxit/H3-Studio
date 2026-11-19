@@ -8,7 +8,13 @@
 
 import { useCallback, useEffect, useMemo, useSyncExternalStore } from 'react';
 import type { BatchRecord, StoredImage } from '../../../core/types';
-import { ApiError, deleteBatch as deleteBatchRequest, exportImages, listBatches } from '../../api';
+import {
+  ApiError,
+  deleteBatch as deleteBatchRequest,
+  exportImages,
+  listBatches,
+  retryBatch as retryBatchRequest,
+} from '../../api';
 import { useStudio } from '../../App';
 
 /** Batches fetched per page. /api/batches takes a limit, so a page is the newest N. */
@@ -57,6 +63,8 @@ export interface LibraryController {
   exportSelection: () => Promise<LibraryNotice>;
   deletingBatchId: string | null;
   deleteBatch: (batchId: string) => Promise<LibraryNotice>;
+  retryingBatchId: string | null;
+  retryFailed: (batch: BatchRecord) => Promise<LibraryNotice>;
 }
 
 interface LibraryState {
@@ -71,6 +79,7 @@ interface LibraryState {
   activeBatchId: string | null;
   exporting: boolean;
   deletingBatchId: string | null;
+  retryingBatchId: string | null;
 }
 
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
@@ -259,6 +268,7 @@ let state: LibraryState = {
   activeBatchId: null,
   exporting: false,
   deletingBatchId: null,
+  retryingBatchId: null,
 };
 
 function subscribe(listener: Listener): () => void {
@@ -419,6 +429,26 @@ async function deleteBatchState(batchId: string): Promise<LibraryNotice> {
   return { tone: 'success', message: 'The batch and its images were deleted.' };
 }
 
+async function retryFailedState(batch: BatchRecord): Promise<LibraryNotice> {
+  if (state.retryingBatchId !== null) return { tone: 'error', message: 'A retry is already running.' };
+  const indices = [...new Set(batch.failures.map((failure) => failure.index))].sort((left, right) => left - right);
+  if (indices.length === 0) return { tone: 'error', message: 'This batch has no failed images to retry.' };
+
+  update((current) => ({ ...current, retryingBatchId: batch.id }));
+  try {
+    await retryBatchRequest(batch.id, indices);
+    update((current) => ({ ...current, retryingBatchId: null }));
+    await reloadState();
+    return {
+      tone: 'success',
+      message: `Retrying ${formatCount(indices.length, 'image', 'images')} from this batch.`,
+    };
+  } catch (error) {
+    update((current) => ({ ...current, retryingBatchId: null }));
+    return { tone: 'error', message: describeError(error) };
+  }
+}
+
 /**
  * The controller the rail and the library canvas both read.
  */
@@ -477,6 +507,12 @@ export function useLibrary(): LibraryController {
     [refresh],
   );
 
+  const retryFailed = useCallback(async (batch: BatchRecord): Promise<LibraryNotice> => {
+    const notice = await retryFailedState(batch);
+    if (notice.tone === 'success') void refresh();
+    return notice;
+  }, [refresh]);
+
   const firstSelected = useMemo<SelectedImage | null>(() => {
     const firstId = snapshot.selectedImageIds[0];
     if (firstId === undefined) return null;
@@ -507,5 +543,7 @@ export function useLibrary(): LibraryController {
     exportSelection,
     deletingBatchId: snapshot.deletingBatchId,
     deleteBatch,
+    retryingBatchId: snapshot.retryingBatchId,
+    retryFailed,
   };
 }

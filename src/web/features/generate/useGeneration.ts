@@ -12,6 +12,7 @@ import type {
   BatchStatus,
   GenerationEvent,
   ItemFailure,
+  Preset,
   ProviderCapabilities,
   ReferenceImage,
   SizePreset,
@@ -20,12 +21,16 @@ import type {
 import {
   getBatch,
   getProviderCapabilities,
+  listBatches,
   openGenerationEvents,
   retryBatch,
   startGeneration,
   type GenerationBody,
 } from '../../api';
-import { useStudio } from '../../App';
+import { useStudio, type PromptSettings } from '../../studio';
+import { promptProblem, retryEventIndex, seedProblem, sizeProblem } from './helpers';
+
+export { retryEventIndex } from './helpers';
 
 export const MIN_STEPS = 1;
 export const MAX_STEPS = 100;
@@ -34,7 +39,7 @@ export const DEFAULT_GUIDANCE = 7;
 /** Fallback side, in size units, when a provider offers no presets at all. */
 const FALLBACK_SIDE_UNITS = 128;
 
-export type TilePhase = 'waiting' | 'running' | 'done' | 'failed';
+export type TilePhase = 'waiting' | 'running' | 'done' | 'failed' | 'cancelled';
 
 export interface GenerationTile {
   index: number;
@@ -68,6 +73,8 @@ export interface GenerationBatch {
   streamError: string | null;
   startedAt: number;
   finishedAt: number | null;
+  /** The seed the batch used, when the provider reports one. */
+  seed: number | null;
 }
 
 export interface GenerationForm {
@@ -99,7 +106,8 @@ export interface TileSummary {
   running: number;
   done: number;
   failed: number;
-  /** Mean completion across the batch, with failures counted as settled. */
+  cancelled: number;
+  /** Mean completion across the batch, with failures and cancellations counted as settled. */
   percent: number;
 }
 
@@ -125,6 +133,7 @@ export interface GenerationController {
   retryFailed: () => void;
   reloadCapabilities: () => void;
   reloadBatch: () => void;
+  clearBatch: () => void;
 }
 
 type ProgressEvent = Extract<GenerationEvent, { type: 'progress' }>;
@@ -159,7 +168,7 @@ function percentFrom(step: number | undefined, totalSteps: number | undefined): 
 export function applyProgressEvent(tiles: readonly GenerationTile[], event: ProgressEvent): GenerationTile[] {
   return tiles.map((tile) => {
     if (tile.index !== event.index) return tile;
-    if (tile.phase === 'done' || tile.phase === 'failed') return tile;
+    if (tile.phase === 'done' || tile.phase === 'failed' || tile.phase === 'cancelled') return tile;
     return {
       ...tile,
       phase: 'running',
@@ -174,6 +183,7 @@ export function applyProgressEvent(tiles: readonly GenerationTile[], event: Prog
 export function applyItemEvent(tiles: readonly GenerationTile[], event: ItemEvent): GenerationTile[] {
   return tiles.map((tile) => {
     if (tile.index !== event.index) return tile;
+    if (tile.phase === 'cancelled') return tile;
     const { item } = event;
     if (item.ok) {
       return {
@@ -248,6 +258,7 @@ export function summarizeTiles(tiles: readonly GenerationTile[]): TileSummary {
   let running = 0;
   let done = 0;
   let failed = 0;
+  let cancelled = 0;
   let settledPercent = 0;
   for (const tile of tiles) {
     if (tile.phase === 'done') {
@@ -255,6 +266,9 @@ export function summarizeTiles(tiles: readonly GenerationTile[]): TileSummary {
       settledPercent += 100;
     } else if (tile.phase === 'failed') {
       failed += 1;
+      settledPercent += 100;
+    } else if (tile.phase === 'cancelled') {
+      cancelled += 1;
       settledPercent += 100;
     } else if (tile.phase === 'running') {
       running += 1;
@@ -270,22 +284,13 @@ export function summarizeTiles(tiles: readonly GenerationTile[]): TileSummary {
     running,
     done,
     failed,
+    cancelled,
     percent: total === 0 ? 0 : Math.round(settledPercent / total),
   };
 }
 
 export function failedIndices(tiles: readonly GenerationTile[]): number[] {
   return tiles.filter((tile) => tile.phase === 'failed').map((tile) => tile.index);
-}
-
-/**
- * A retry endpoint may keep the original item indices or renumber from zero.
- * An index that appears in the retried set is read as original, anything else as
- * a position in the retried list. The final record settles the question.
- */
-export function retryEventIndex(retried: readonly number[], incoming: number): number | null {
-  if (retried.includes(incoming)) return incoming;
-  return retried[incoming] ?? null;
 }
 
 export function isPreservedRetry(record: BatchRecord, retried: readonly number[]): boolean {
@@ -381,7 +386,12 @@ export function toGenerationBody(
   providerId: string,
 ): PreparedBody {
   const prompt = form.prompt.trim();
-  if (prompt.length === 0) return { body: null, problem: 'Write a prompt first.' };
+  const promptIssue = promptProblem(prompt);
+  if (promptIssue !== null) return { body: null, problem: promptIssue };
+  const sizeIssue = sizeProblem(form.width, form.height);
+  if (sizeIssue !== null) return { body: null, problem: sizeIssue };
+  const seedIssue = seedProblem(form.seed);
+  if (seedIssue !== null) return { body: null, problem: seedIssue };
 
   const multiple = Math.max(1, Math.trunc(Number.isFinite(capabilities.sizeMultiple) ? capabilities.sizeMultiple : 1));
   const width = snapToMultiple(form.width, multiple);
@@ -451,6 +461,10 @@ type Listener = () => void;
 const listeners = new Set<Listener>();
 let state: GenerationState = { form: EMPTY_FORM, capability: EMPTY_CAPABILITY, batch: null, running: false };
 let activeRun: (() => void) | null = null;
+/** Incremented whenever a new run starts or an existing one is cancelled. */
+let runToken = 0;
+/** Ordinal for batch selection, so a slower fetch cannot replace a newer choice. */
+let selectionToken = 0;
 
 function subscribe(listener: Listener): () => void {
   listeners.add(listener);
@@ -478,6 +492,115 @@ function closeRun(): void {
   const close = activeRun;
   activeRun = null;
   close();
+}
+
+function cancelledTile(index: number): GenerationTile {
+  return { ...createTile(index), phase: 'cancelled' };
+}
+
+/** Builds the display batch for a stored record, including cancelled slots. */
+function batchFromRecord(record: BatchRecord): GenerationBatch {
+  const merged = mergeBatchRecord(createTiles(record.requested), record);
+  const tiles: GenerationTile[] =
+    record.status === 'cancelled'
+      ? merged.map((tile) =>
+          tile.phase === 'waiting' || tile.phase === 'running' ? cancelledTile(tile.index) : tile,
+        )
+      : merged;
+  const createdAt = Date.parse(record.createdAt);
+  const finishedAt = record.finishedAt === undefined ? null : Date.parse(record.finishedAt);
+  return {
+    batchId: record.id,
+    streamBatchId: null,
+    providerId: record.providerId,
+    prompt: record.prompt,
+    width: record.width,
+    height: record.height,
+    requested: record.requested,
+    status: record.status,
+    revisedPrompt: record.revisedPrompt ?? null,
+    tiles,
+    streamError: null,
+    startedAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
+    finishedAt: finishedAt !== null && Number.isFinite(finishedAt) ? finishedAt : null,
+    seed: record.seed ?? null,
+  };
+}
+
+function isRecent(iso: string): boolean {
+  const time = Date.parse(iso);
+  if (!Number.isFinite(time)) return false;
+  return Date.now() - time < 24 * 60 * 60 * 1000;
+}
+
+let hydrationAttempted = false;
+
+/** The first load shows the newest stored batch instead of an empty canvas. */
+async function hydrateLatestBatch(): Promise<void> {
+  if (hydrationAttempted || state.batch !== null || state.running) return;
+  hydrationAttempted = true;
+  try {
+    const records = await listBatches(1);
+    const record = records[0];
+    if (record === undefined || state.batch !== null || state.running) return;
+    if (record.images.length === 0 && !isRecent(record.createdAt)) return;
+    update((current) =>
+      current.batch !== null || current.running ? current : { ...current, batch: batchFromRecord(record), running: false },
+    );
+  } catch {
+    // The canvas stays empty when the library cannot be read. The library screen reports it.
+  }
+}
+
+/** Loads one stored batch for inspection, retry or reuse. A live run is never replaced. */
+export async function loadBatchById(batchId: string): Promise<void> {
+  if (state.running) return;
+  hydrationAttempted = true;
+  const token = ++selectionToken;
+  const runId = runToken;
+  try {
+    const record = await getBatch(batchId);
+    if (token !== selectionToken || runId !== runToken) return;
+    update((current) =>
+      current.running ? current : { ...current, batch: batchFromRecord(record), running: false },
+    );
+  } catch {
+    // A missing batch leaves the current canvas alone.
+  }
+}
+
+/** Fills the composer from a preset or batch, clamped to the active provider. */
+export function adoptPromptSettings(settings: PromptSettings, providerId: string | null): void {
+  update((current) => {
+    const activeCapabilities =
+      providerId !== null && current.capability.providerId === providerId ? current.capability.capabilities : null;
+    const multiple = activeCapabilities === null ? 1 : Math.max(1, Math.trunc(activeCapabilities.sizeMultiple));
+    const maxBatch = activeCapabilities === null ? 10 : Math.max(1, Math.trunc(activeCapabilities.maxBatch));
+    const width = settings.width === undefined ? current.form.width : snapToMultiple(settings.width, multiple);
+    const height = settings.height === undefined ? current.form.height : snapToMultiple(settings.height, multiple);
+    const count = settings.count === undefined ? current.form.count : clampCount(settings.count, maxBatch);
+    return {
+      ...current,
+      form: {
+        ...current.form,
+        providerId: providerId ?? current.form.providerId,
+        prompt: settings.prompt,
+        negativePrompt:
+          settings.negativePrompt === undefined ? current.form.negativePrompt : settings.negativePrompt,
+        width,
+        height,
+        count,
+        presetId: null,
+      },
+    };
+  });
+}
+
+export function applyPresetToForm(preset: Preset, providerId: string | null): void {
+  adoptPromptSettings(
+    { prompt: preset.prompt, width: preset.width, height: preset.height, count: preset.count },
+    providerId,
+  );
 }
 
 function updateFormState(patch: Partial<Omit<GenerationForm, 'references' | 'providerId'>>): void {
@@ -551,6 +674,7 @@ function applyRecord(record: BatchRecord, retried: readonly number[] | null): vo
         batchId: current.batch.batchId ?? record.id,
         status: record.status,
         revisedPrompt: record.revisedPrompt ?? current.batch.revisedPrompt,
+        seed: record.seed ?? current.batch.seed,
         tiles: mergeBatchRecord(current.batch.tiles, record, mapper),
       },
     };
@@ -574,10 +698,12 @@ async function syncBatch(batchId: string, retried: readonly number[] | null, onS
 
 function openRun(batchId: string, retried: readonly number[] | null, onSettled: () => void): void {
   closeRun();
+  const runId = runToken;
   const map = (incoming: number): number | null => (retried === null ? incoming : retryEventIndex(retried, incoming));
 
   const close = openGenerationEvents(batchId, {
     onProgress: (event) => {
+      if (runId !== runToken) return;
       const index = map(event.index);
       if (index === null) return;
       update((current) =>
@@ -587,6 +713,7 @@ function openRun(batchId: string, retried: readonly number[] | null, onSettled: 
       );
     },
     onItem: (event) => {
+      if (runId !== runToken) return;
       const index = map(event.index);
       if (index === null) return;
       update((current) =>
@@ -597,6 +724,7 @@ function openRun(batchId: string, retried: readonly number[] | null, onSettled: 
       void syncBatch(batchId, retried, onSettled);
     },
     onBatch: (record) => {
+      if (runId !== runToken) return;
       // A sync may have settled the stream first, in which case this event is stale.
       if (state.batch !== null && state.batch.streamBatchId !== batchId) return;
       applyRecord(record, retried);
@@ -629,6 +757,7 @@ function openRun(batchId: string, retried: readonly number[] | null, onSettled: 
 
 async function beginGeneration(onSettled: () => void): Promise<void> {
   if (state.running) return;
+  hydrationAttempted = true;
   const capabilities = state.capability.capabilities;
   const providerId = state.capability.providerId;
   if (capabilities === null || providerId === null) return;
@@ -637,6 +766,7 @@ async function beginGeneration(onSettled: () => void): Promise<void> {
   if (prepared.body === null) return;
   const body = prepared.body;
 
+  const token = ++runToken;
   closeRun();
   const batch: GenerationBatch = {
     batchId: null,
@@ -652,6 +782,7 @@ async function beginGeneration(onSettled: () => void): Promise<void> {
     streamError: null,
     startedAt: Date.now(),
     finishedAt: null,
+    seed: body.seed ?? null,
   };
   update((current) => ({ ...current, running: true, batch }));
 
@@ -659,6 +790,10 @@ async function beginGeneration(onSettled: () => void): Promise<void> {
   try {
     created = await startGeneration(body);
   } catch (error) {
+    if (token !== runToken) {
+      onSettled();
+      return;
+    }
     update((current) =>
       current.batch === null
         ? { ...current, running: false }
@@ -672,8 +807,8 @@ async function beginGeneration(onSettled: () => void): Promise<void> {
     return;
   }
 
-  // Cancelled while the request was in flight: the stream is never attached.
-  if (!state.running) {
+  // Cancelled or replaced while the request was in flight: the stream is never attached.
+  if (token !== runToken || !state.running) {
     onSettled();
     return;
   }
@@ -686,6 +821,8 @@ async function beginGeneration(onSettled: () => void): Promise<void> {
           batch: { ...current.batch, batchId: created.batchId, streamBatchId: created.batchId, status: 'running' },
         },
   );
+  // The batch exists now, so the library should list it before it settles.
+  onSettled();
   openRun(created.batchId, null, onSettled);
 }
 
@@ -698,6 +835,9 @@ async function retryRun(indices: readonly number[], onSettled: () => void): Prom
     .sort((left, right) => left - right);
   if (retried.length === 0) return;
 
+  const previousTiles = batch.tiles;
+  const fallbackStatus: BatchStatus = batch.status === 'partial' ? 'partial' : 'failed';
+  const token = ++runToken;
   closeRun();
   update((current) => {
     if (current.batch === null) return current;
@@ -705,24 +845,48 @@ async function retryRun(indices: readonly number[], onSettled: () => void): Prom
     return {
       ...current,
       running: true,
-      batch: { ...current.batch, tiles, status: 'running', streamError: null, streamBatchId: null, finishedAt: null },
+      batch: {
+        ...current.batch,
+        tiles,
+        status: 'running',
+        streamError: null,
+        streamBatchId: null,
+        startedAt: Date.now(),
+        finishedAt: null,
+      },
     };
   });
 
   const batchId = batch.batchId;
   try {
     const created = await retryBatch(batchId, retried);
-    if (!state.running) {
+    if (token !== runToken || !state.running) {
       onSettled();
       return;
     }
     update((current) => (current.batch === null ? current : { ...current, batch: { ...current.batch, streamBatchId: created.batchId } }));
+    // The retry batch exists now, so refresh the library totals immediately.
+    onSettled();
     openRun(created.batchId, retried, onSettled);
   } catch (error) {
+    if (token !== runToken) {
+      onSettled();
+      return;
+    }
     update((current) =>
-      current.batch === null
-        ? { ...current, running: false }
-        : { ...current, running: false, batch: { ...current.batch, streamError: describeError(error) } },
+      current.batch === null || !current.running
+        ? current
+        : {
+            ...current,
+            running: false,
+            batch: {
+              ...current.batch,
+              status: fallbackStatus,
+              tiles: previousTiles,
+              streamError: describeError(error),
+              finishedAt: Date.now(),
+            },
+          },
     );
     onSettled();
   }
@@ -738,11 +902,12 @@ function cancelRun(onSettled: () => void): void {
   if (!state.running) return;
   // There is no cancel endpoint in the contract: dropping the event stream is the
   // signal the server gets, and the local status says what the screen is showing.
+  runToken += 1;
   closeRun();
   update((current) => {
     if (current.batch === null) return { ...current, running: false };
     const tiles = current.batch.tiles.map((tile) =>
-      tile.phase === 'running' || tile.phase === 'waiting' ? createTile(tile.index) : tile,
+      tile.phase === 'running' || tile.phase === 'waiting' ? cancelledTile(tile.index) : tile,
     );
     return {
       ...current,
@@ -753,17 +918,38 @@ function cancelRun(onSettled: () => void): void {
   onSettled();
 }
 
-async function reloadBatchRun(): Promise<void> {
+async function reloadBatchRun(onSettled: () => void): Promise<void> {
   const batchId = state.batch === null ? null : state.batch.batchId;
   if (batchId === null) return;
+  const token = runToken;
   try {
     const record = await getBatch(batchId);
+    if (token !== runToken || state.batch === null || state.batch.batchId !== batchId) return;
     applyRecord(record, null);
+    update((current) =>
+      current.batch === null
+        ? current
+        : {
+            ...current,
+            running: false,
+            batch: { ...current.batch, streamError: null, finishedAt: Date.now() },
+          },
+    );
+    onSettled();
   } catch (error) {
+    if (token !== runToken || state.batch === null || state.batch.batchId !== batchId) return;
     update((current) =>
       current.batch === null ? current : { ...current, batch: { ...current.batch, streamError: describeError(error) } },
     );
   }
+}
+
+/** Returns the canvas to the empty prompt-starter screen. A live run is never cleared. */
+function clearBatchState(): void {
+  if (state.running) return;
+  selectionToken += 1;
+  closeRun();
+  update((current) => (current.batch === null ? current : { ...current, batch: null, running: false }));
 }
 
 /**
@@ -780,6 +966,11 @@ export function useGeneration(): GenerationController {
   useEffect(() => {
     if (providerId !== null) ensureCapabilities(providerId);
   }, [providerId]);
+
+  // Show the newest stored batch on a cold start. This runs once per page load.
+  useEffect(() => {
+    if (state.batch === null) void hydrateLatestBatch();
+  }, []);
 
   const settle = useCallback((): void => {
     void refresh();
@@ -829,9 +1020,16 @@ export function useGeneration(): GenerationController {
   }, []);
 
   const reloadBatch = useCallback((): void => {
-    void reloadBatchRun();
+    void reloadBatchRun(settle);
+  }, [settle]);
+
+  const clearBatch = useCallback((): void => {
+    clearBatchState();
   }, []);
 
+  const promptIssue = promptProblem(snapshot.form.prompt);
+  const sizeIssue = sizeProblem(snapshot.form.width, snapshot.form.height);
+  const seedIssue = seedProblem(snapshot.form.seed);
   let blockedReason: string | null = null;
   if (provider === null) blockedReason = 'No provider is enabled yet.';
   else if (snapshot.capability.providerId !== providerId) blockedReason = 'Loading provider capabilities.';
@@ -839,8 +1037,9 @@ export function useGeneration(): GenerationController {
     blockedReason = 'Loading provider capabilities.';
   } else if (snapshot.capability.phase === 'error') blockedReason = 'Provider capabilities could not be loaded.';
   else if (snapshot.running) blockedReason = 'A batch is already running.';
-  else if (snapshot.form.prompt.trim().length === 0) blockedReason = 'Write a prompt first.';
-  else if (snapshot.form.width < 1 || snapshot.form.height < 1) blockedReason = 'Set a width and height of at least 1 px.';
+  else if (promptIssue !== null) blockedReason = promptIssue;
+  else if (sizeIssue !== null) blockedReason = sizeIssue;
+  else if (seedIssue !== null) blockedReason = seedIssue;
 
   return {
     providerId,
@@ -863,5 +1062,6 @@ export function useGeneration(): GenerationController {
     retryFailed,
     reloadCapabilities,
     reloadBatch,
+    clearBatch,
   };
 }

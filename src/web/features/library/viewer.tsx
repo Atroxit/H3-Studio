@@ -5,7 +5,12 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { BatchRecord } from '../../../core/types';
 import { imageUrl } from '../../api';
+import { Button } from '../../components';
+import { useStudio } from '../../studio';
 import { formatBytes, formatCount, formatTimestamp, orderedImages } from './useLibrary';
+
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 export interface ImageViewerProps {
   batch: BatchRecord;
@@ -32,11 +37,15 @@ export function ImageViewer({
   onClose,
   returnFocusTo,
 }: ImageViewerProps): ReactNode {
+  const studio = useStudio();
   const images = useMemo(() => orderedImages(batch), [batch]);
   const [position, setPosition] = useState(() => {
     const found = images.findIndex((image) => image.id === imageId);
     return found === -1 ? 0 : found;
   });
+  const [zoom, setZoom] = useState<'fit' | 'actual'>('fit');
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const overlayRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
   // The overlay takes focus, and hands it back to the opener when it closes.
@@ -49,11 +58,38 @@ export function ImageViewer({
     };
   }, [returnFocusTo]);
 
+  // The page behind the overlay must not scroll while the viewer is open.
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, []);
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         event.preventDefault();
         onClose();
+        return;
+      }
+      if (event.key === 'Tab') {
+        const root = overlayRef.current;
+        if (root === null) return;
+        const focusable = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+          (element) => element.offsetParent !== null,
+        );
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (first === undefined || last === undefined) return;
+        if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        } else if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        }
         return;
       }
       if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
@@ -74,10 +110,35 @@ export function ImageViewer({
 
   const safePosition = images.length === 0 ? 0 : Math.min(position, images.length - 1);
   const image = images[safePosition];
+  const toggleZoom = (): void => setZoom((current) => (current === 'fit' ? 'actual' : 'fit'));
+
+  const copyPrompt = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(batch.prompt);
+      setCopyState('copied');
+      studio.notify('Prompt copied.');
+    } catch {
+      setCopyState('failed');
+      studio.notify('The prompt could not be copied.', 'error');
+    }
+    window.setTimeout(() => setCopyState('idle'), 2400);
+  };
+
+  const usePrompt = (): void => {
+    studio.useSettings({
+      prompt: batch.prompt,
+      width: batch.width,
+      height: batch.height,
+      count: batch.requested,
+      negativePrompt: batch.negativePrompt,
+      providerId: batch.providerId,
+    });
+  };
 
   return (
     <div
-      className="lb-viewer"
+      className={zoom === 'actual' ? 'lb-viewer is-actual' : 'lb-viewer'}
+      ref={overlayRef}
       role="dialog"
       aria-modal="true"
       aria-label="Image viewer"
@@ -91,6 +152,15 @@ export function ImageViewer({
             {images.length === 0 ? 'No images' : `${safePosition + 1} / ${images.length}`}
           </span>
           <div className="lb-viewer-head-actions">
+            <Button variant="ghost" size="sm" onClick={() => void copyPrompt()}>
+              {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy prompt'}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={usePrompt}>
+              Use prompt
+            </Button>
+            <Button variant="ghost" size="sm" onClick={toggleZoom} aria-pressed={zoom === 'actual'}>
+              {zoom === 'actual' ? 'Fit' : '1:1'}
+            </Button>
             {image === undefined ? null : (
               <a
                 className="lb-viewer-download"
@@ -132,13 +202,23 @@ export function ImageViewer({
             >
               <ChevronIcon pointsLeft />
             </button>
-            <img
-              className="lb-viewer-image"
-              src={imageUrl(image.id)}
-              alt={`Image ${safePosition + 1} of ${images.length} in the batch for ${batch.prompt}`}
-              width={image.width}
-              height={image.height}
-            />
+            <div className={zoom === 'actual' ? 'lb-viewer-image-wrap is-actual' : 'lb-viewer-image-wrap'}>
+              <button
+                type="button"
+                className="lb-viewer-image-button"
+                onClick={toggleZoom}
+                aria-label={zoom === 'actual' ? 'Fit the image to the window' : 'Show the image at actual pixels'}
+                aria-pressed={zoom === 'actual'}
+              >
+                <img
+                  className="lb-viewer-image"
+                  src={imageUrl(image.id)}
+                  alt={`Image ${safePosition + 1} of ${images.length} in the batch for ${batch.prompt}`}
+                  width={image.width}
+                  height={image.height}
+                />
+              </button>
+            </div>
             <button
               type="button"
               className="lb-viewer-nav is-next"
@@ -197,7 +277,10 @@ export function ImageViewer({
           </div>
         </dl>
 
-        <p className="lb-viewer-hint">Arrow keys move between images. Escape closes the viewer.</p>
+        <p className="lb-viewer-hint">
+          Arrow keys move between images. Escape closes the viewer. Click the image or 1:1 to switch between fit and
+          actual pixels.
+        </p>
       </div>
     </div>
   );
