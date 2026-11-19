@@ -53,6 +53,22 @@ function ratioStyle(width: number, height: number): CSSProperties {
 }
 
 /**
+ * Feeds the grid container query the tile aspect ratio and row/column counts so tiles
+ * scale with the window in both directions without overflowing the stage.
+ */
+function gridScaleStyle(width: number, height: number, count: number, columns: 1 | 2 | 3 | 4): CSSProperties {
+  const safeWidth = width > 0 ? width : 1;
+  const safeHeight = height > 0 ? height : 1;
+  const rows = Math.max(1, Math.ceil(Math.max(1, count) / columns));
+  const vars: Record<string, string> = {
+    '--tile-ratio': String(safeWidth / safeHeight),
+    '--grid-cols': String(columns),
+    '--grid-rows': String(rows),
+  };
+  return vars as CSSProperties;
+}
+
+/**
  * Keeps the empty placeholder inside a sane box whatever the aspect is. The frame
  * is deliberately small: it is a size hint above the prompt, not the subject.
  */
@@ -504,7 +520,10 @@ export function ResultsGrid({
         </div>
       )}
 
-      <div className={`gen-grid is-cols-${columns}`}>
+      <div
+        className={`gen-grid is-cols-${columns}`}
+        style={gridScaleStyle(batch.width, batch.height, batch.tiles.length, columns)}
+      >
         {batch.tiles.map((tile) => (
           <ResultTile
             key={tile.index}
