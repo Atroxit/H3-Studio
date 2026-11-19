@@ -220,7 +220,9 @@ export class GenerationHub {
   }
 
   private async handleEvent(state: JobState, event: GenerationEvent): Promise<void> {
-    if (event.type === 'progress') {
+    // Progress and previews are live signals only: a preview is a base64 frame that must
+    // never reach the stored batch record, so it is published and dropped.
+    if (event.type === 'progress' || event.type === 'preview') {
       this.publish(state, event);
       return;
     }

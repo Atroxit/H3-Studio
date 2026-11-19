@@ -51,6 +51,20 @@ export interface GenerationTile {
   step: number | null;
   totalSteps: number | null;
   percent: number | null;
+  /** The node level line the loading view reads, such as "Loading VAE decoder". */
+  detail?: string;
+  /** ComfyUI reported cached nodes: the models are already warm. */
+  cached?: boolean;
+  /** The newest live denoise frame, as a data URL. Cleared once the tile settles. */
+  previewUrl?: string;
+  /** When sampling began, used for the elapsed sampling clock. */
+  stepStartedAt?: number;
+  /** When the last distinct step arrived, for the rolling step time. */
+  lastStepAt?: number;
+  /** Rolling average milliseconds per step, from real step transitions only. */
+  avgStepMs?: number;
+  /** Pipeline stages that have finished on this tile, in arrival order. */
+  completedStages?: string[];
   /** Set once the stored image is known. The grid shows the image from here. */
   imageId: string | null;
   width: number | null;
@@ -165,6 +179,7 @@ export interface GenerationController {
 }
 
 type ProgressEvent = Extract<GenerationEvent, { type: 'progress' }>;
+type PreviewEvent = Extract<GenerationEvent, { type: 'preview' }>;
 type ItemEvent = Extract<GenerationEvent, { type: 'item' }>;
 
 function createTile(index: number): GenerationTile {
@@ -193,18 +208,72 @@ function percentFrom(step: number | undefined, totalSteps: number | undefined): 
   return Math.round(ratio * 100);
 }
 
-export function applyProgressEvent(tiles: readonly GenerationTile[], event: ProgressEvent): GenerationTile[] {
+/** Sampling has only really finished when decoding or saving begins. */
+function stageCompleted(previous: string, next: string): boolean {
+  if (previous === next) return false;
+  if (previous === 'sampling') return next === 'decoding' || next === 'saving';
+  return true;
+}
+
+/**
+ * Folds one progress event into its tile: the stage, the node detail, the step clock and
+ * the set of phases already finished. The clock only advances on real step transitions,
+ * so a provider that repeats a step cannot make the speed estimate meaningless.
+ */
+export function applyProgressEvent(
+  tiles: readonly GenerationTile[],
+  event: ProgressEvent,
+  at: number = Date.now(),
+): GenerationTile[] {
   return tiles.map((tile) => {
     if (tile.index !== event.index) return tile;
     if (tile.phase === 'done' || tile.phase === 'failed' || tile.phase === 'cancelled') return tile;
+
+    let completedStages = tile.completedStages;
+    if (tile.stage !== null && stageCompleted(tile.stage, event.stage)) {
+      if (!(completedStages ?? []).includes(tile.stage)) {
+        completedStages = [...(completedStages ?? []), tile.stage];
+      }
+    }
+
+    const stepAdvanced = event.step !== undefined && event.step !== tile.step;
+    let avgStepMs = tile.avgStepMs;
+    let lastStepAt = tile.lastStepAt;
+    if (stepAdvanced) {
+      if (lastStepAt !== undefined) {
+        const delta = at - lastStepAt;
+        if (delta > 0 && delta < 120_000) {
+          avgStepMs = avgStepMs === undefined ? delta : Math.round(avgStepMs * 0.7 + delta * 0.3);
+        }
+      }
+      lastStepAt = at;
+    }
+
+    const stepStartedAt = tile.stepStartedAt ?? (event.stage === 'sampling' ? at : undefined);
+
     return {
       ...tile,
       phase: 'running',
       stage: event.stage,
+      ...(event.detail === undefined ? {} : { detail: event.detail }),
+      ...(event.cached === undefined ? {} : { cached: event.cached }),
       step: event.step ?? tile.step,
       totalSteps: event.totalSteps ?? tile.totalSteps,
       percent: event.percent ?? percentFrom(event.step, event.totalSteps) ?? tile.percent,
+      ...(stepStartedAt === undefined ? {} : { stepStartedAt }),
+      ...(lastStepAt === undefined ? {} : { lastStepAt }),
+      ...(avgStepMs === undefined ? {} : { avgStepMs }),
+      ...(completedStages === undefined ? {} : { completedStages }),
     };
+  });
+}
+
+/** A live preview frame moves a waiting tile into the running phase. */
+export function applyPreviewEvent(tiles: readonly GenerationTile[], event: PreviewEvent): GenerationTile[] {
+  return tiles.map((tile) => {
+    if (tile.index !== event.index) return tile;
+    if (tile.phase === 'done' || tile.phase === 'failed' || tile.phase === 'cancelled') return tile;
+    return { ...tile, phase: 'running', previewUrl: event.dataUrl };
   });
 }
 
@@ -222,6 +291,9 @@ export function applyItemEvent(tiles: readonly GenerationTile[], event: ItemEven
         failure: null,
         width: item.width ?? tile.width,
         height: item.height ?? tile.height,
+        previewUrl: undefined,
+        detail: undefined,
+        cached: undefined,
       };
     }
     return {
@@ -230,6 +302,9 @@ export function applyItemEvent(tiles: readonly GenerationTile[], event: ItemEven
       stage: null,
       percent: null,
       failure: item.failure ?? { message: 'The provider returned no image for this item.', retryable: true },
+      previewUrl: undefined,
+      detail: undefined,
+      cached: undefined,
     };
   });
 }
@@ -271,11 +346,14 @@ export function mergeBatchRecord(
         imageId: image.id,
         width: image.width,
         height: image.height,
+        previewUrl: undefined,
+        detail: undefined,
+        cached: undefined,
       };
     }
     const failure = failures.get(base.index);
     if (failure !== undefined) {
-      return { ...base, phase: 'failed', stage: null, percent: null, failure };
+      return { ...base, phase: 'failed', stage: null, percent: null, failure, previewUrl: undefined, detail: undefined, cached: undefined };
     }
     return base;
   });
@@ -837,6 +915,16 @@ function openRun(batchId: string, retried: readonly number[] | null, onSettled: 
         current.batch === null
           ? current
           : { ...current, batch: { ...current.batch, tiles: applyProgressEvent(current.batch.tiles, { ...event, index }) } },
+      );
+    },
+    onPreview: (event) => {
+      if (runId !== runToken) return;
+      const index = map(event.index);
+      if (index === null) return;
+      update((current) =>
+        current.batch === null
+          ? current
+          : { ...current, batch: { ...current.batch, tiles: applyPreviewEvent(current.batch.tiles, { ...event, index }) } },
       );
     },
     onItem: (event) => {

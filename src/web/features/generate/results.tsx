@@ -10,6 +10,14 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import { imageUrl } from '../../api';
 import { Button, Spinner } from '../../components';
 import { useStudio } from '../../studio';
+import {
+  formatClock,
+  formatEta,
+  formatSecondsPerStep,
+  pipelineStages,
+  previewBlurPx,
+  stageHeadline,
+} from './helpers';
 import type { GenerationBatch, GenerationTile, TileSummary } from './useGeneration';
 
 export interface ResultsGridProps {
@@ -180,6 +188,161 @@ function elapsedLabel(clock: TileClock | undefined, now: number): string | null 
   return formatElapsed((clock.settledAt ?? now) - clock.startedAt);
 }
 
+function fallbackDetail(stage: string | null): string {
+  switch (stage) {
+    case null:
+    case 'waiting':
+      return 'Waiting for a GPU slot';
+    case 'preparing':
+      return 'Warming the graph';
+    case 'loading':
+      return 'Loading model weights';
+    case 'enhancing':
+      return 'Expanding your prompt';
+    case 'encoding':
+      return 'Building conditioning tensors';
+    case 'sampling':
+      return 'Denoising latent image';
+    case 'decoding':
+      return 'Decoding latent to pixels';
+    case 'saving':
+      return 'Writing the PNG';
+    default:
+      return 'Working';
+  }
+}
+
+interface TileLoadingProps {
+  tile: GenerationTile;
+  total: number;
+  width: number;
+  height: number;
+  /** Milliseconds since this tile's attempt started, or null when there is no clock. */
+  elapsedMs: number | null;
+}
+
+/**
+ * Everything a tile shows while it is still waiting or denoising. With a preview frame it
+ * becomes a live image with a glass HUD; without one it is an animated status panel. Both
+ * read the same stage, detail, step and clock state, so the switch is only a visual one.
+ */
+function TileLoading({ tile, total, width, height, elapsedMs }: TileLoadingProps): ReactNode {
+  const live = tile.phase === 'running' && tile.previewUrl !== undefined && tile.previewUrl.length > 0;
+  const headline = stageHeadline(tile.stage);
+  // A step message replaces the node detail, so keep the node line as the title and the
+  // step line as the measurement instead of showing "Step 4 of 6" twice.
+  const detail = tile.detail ?? null;
+  const stepDetail = detail !== null && /^Step \d+ of \d+$/.test(detail) ? null : detail;
+  const nodeDetail = stepDetail ?? fallbackDetail(tile.stage);
+  const percent = tile.percent === null ? null : Math.min(100, Math.max(0, Math.round(tile.percent)));
+  const stepText =
+    tile.step === null || tile.totalSteps === null ? null : `Step ${tile.step} / ${tile.totalSteps}`;
+  const speed = formatSecondsPerStep(tile.stage === 'sampling' ? tile.avgStepMs : null);
+  const remainingSteps =
+    tile.step === null || tile.totalSteps === null ? null : Math.max(0, tile.totalSteps - tile.step);
+  const eta = formatEta(
+    tile.avgStepMs === undefined || remainingSteps === null ? null : tile.avgStepMs * remainingSteps,
+  );
+  const clock = elapsedMs === null ? null : formatClock(elapsedMs);
+  const steps = pipelineStages(tile.stage, tile.completedStages ?? []);
+  const blur = previewBlurPx(tile.step, tile.totalSteps);
+  const slotLabel = total > 1 ? `Image ${tile.index + 1} of ${total}` : `${width} × ${height}`;
+  const topLabel = tile.stage === 'decoding' || tile.stage === 'saving' ? 'Decoding final...' : 'Live preview';
+  const hudLine = [stepText, percent === null ? null : `${percent}%`, speed].filter(Boolean).join(' · ');
+  const richDetail = [nodeDetail, speed, eta].filter(Boolean).join(' · ');
+  const barClass = percent === null ? 'gen-progress is-indeterminate' : 'gen-progress';
+  const barFill = <span className="gen-progress-fill" style={percent === null ? undefined : { width: `${percent}%` }} />;
+  const pipeline = (
+    <ul className="gen-pipeline" aria-label="Pipeline progress">
+      {steps.map((step) => (
+        <li key={step.id} className={`is-${step.state}`}>
+          <span className="gen-pipeline-mark" aria-hidden="true">
+            {step.state === 'done' ? '✓' : ''}
+          </span>
+          {step.label}
+        </li>
+      ))}
+    </ul>
+  );
+
+  return (
+    <div className={`gen-loading${live ? ' is-live' : ''}`}>
+      {live ? (
+        <img
+          className="tile-live-preview"
+          src={tile.previewUrl}
+          alt=""
+          draggable={false}
+          style={{ filter: `blur(${blur}px)` }}
+        />
+      ) : (
+        <div className="gen-ambient" aria-hidden="true">
+          <span className="gen-ambient-mesh" />
+          <span className="gen-ambient-scan" />
+          <span className="gen-ambient-grid" />
+        </div>
+      )}
+
+      {live ? (
+        <>
+          <div className="gen-hud-top">
+            <span className="gen-live-dot" aria-hidden="true" />
+            <span className="gen-live-label">{topLabel}</span>
+            <span className="gen-hud-clock">
+              {clock === null ? null : (
+                <span className="gen-clock" role="timer">
+                  {clock}
+                </span>
+              )}
+              {eta === null ? null : <span className="gen-eta">{eta}</span>}
+            </span>
+          </div>
+          <div className="gen-live-hud">
+            <p className="gen-hud-title">{nodeDetail}</p>
+            <p className="gen-hud-detail">{hudLine.length === 0 ? headline : hudLine}</p>
+            <span
+              className={barClass}
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={percent ?? undefined}
+            >
+              {barFill}
+            </span>
+            {pipeline}
+          </div>
+        </>
+      ) : (
+        <div className="gen-panel">
+          <div className="gen-panel-inner">
+            <div className="gen-panel-eyebrow">
+              <span className="gen-ring" aria-hidden="true" />
+              <span className="gen-panel-slot">{slotLabel}</span>
+              {clock === null ? null : (
+                <span className="gen-panel-clock" role="timer">
+                  {clock}
+                </span>
+              )}
+            </div>
+            <p className="gen-panel-title">{headline}</p>
+            <p className="gen-panel-detail">{richDetail}</p>
+            {pipeline}
+            <span
+              className={barClass}
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={percent ?? undefined}
+            >
+              {barFill}
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface ResultTileProps {
   tile: GenerationTile;
   total: number;
@@ -187,6 +350,8 @@ interface ResultTileProps {
   height: number;
   /** Elapsed time in a display form, or null when there is no honest start to count from. */
   elapsed: string | null;
+  /** The same duration as a number, for the loading clock. */
+  elapsedMs: number | null;
   settled: boolean;
   canRetry: boolean;
   alterationSourceId: string | null;
@@ -201,6 +366,7 @@ function ResultTile({
   width,
   height,
   elapsed,
+  elapsedMs,
   settled,
   canRetry,
   alterationSourceId,
@@ -212,6 +378,7 @@ function ResultTile({
   const ready = tile.phase === 'done' && tile.imageId !== null;
   const isAlterSource = ready && alterationSourceId !== null && tile.imageId === alterationSourceId;
   const canAlter = ready && alterationSourceId !== null;
+  const going = isGoing(tile);
 
   return (
     <article
@@ -220,15 +387,19 @@ function ResultTile({
       aria-label={label}
     >
       <span className="gen-tile-index">{String(tile.index + 1).padStart(2, '0')}</span>
-      <span className="gen-tile-tags">
-        {elapsed === null ? null : (
-          // role=timer keeps the once a second change out of live announcements.
-          <span className={tile.phase === 'running' ? 'gen-tile-elapsed is-live' : 'gen-tile-elapsed'} role="timer">
-            {elapsed}
-          </span>
-        )}
-        <span className={`gen-tile-state ${stateClass(tile)}`}>{stateLabel(tile)}</span>
-      </span>
+      {going ? null : (
+        <span className="gen-tile-tags">
+          {elapsed === null ? null : (
+            // role=timer keeps the once a second change out of live announcements.
+            <span className={tile.phase === 'running' ? 'gen-tile-elapsed is-live' : 'gen-tile-elapsed'} role="timer">
+              {elapsed}
+            </span>
+          )}
+          <span className={`gen-tile-state ${stateClass(tile)}`}>{stateLabel(tile)}</span>
+        </span>
+      )}
+
+      {going ? <TileLoading tile={tile} total={total} width={width} height={height} elapsedMs={elapsedMs} /> : null}
 
       {tile.phase === 'done' && tile.imageId !== null ? (
         <button
@@ -248,34 +419,9 @@ function ResultTile({
         </div>
       ) : null}
 
-      {tile.phase === 'waiting' ? (
-        <div className="gen-tile-body">
-          <p className="gen-tile-note">Queued</p>
-        </div>
-      ) : null}
-
       {tile.phase === 'cancelled' ? (
         <div className="gen-tile-body">
           <p className="gen-tile-note">Cancelled</p>
-        </div>
-      ) : null}
-
-      {tile.phase === 'running' ? (
-        <div className="gen-tile-body gen-tile-progress">
-          <p className="gen-tile-stage">{tile.stage ?? 'Sampling'}</p>
-          {/* A provider that reports no step progress sends no percent, so there is no
-              bar to fill and no number to show. The elapsed clock is the whole signal. */}
-          {tile.percent === null ? null : (
-            <>
-              <p className="gen-tile-step">
-                {tile.step !== null && tile.totalSteps !== null ? `step ${tile.step} of ${tile.totalSteps}` : 'working'}
-                {` / ${tile.percent}%`}
-              </p>
-              <span className="gen-bar" role="presentation">
-                <span className="gen-bar-fill" style={{ width: `${tile.percent}%` }} />
-              </span>
-            </>
-          )}
         </div>
       ) : null}
 
@@ -289,35 +435,37 @@ function ResultTile({
         </div>
       ) : null}
 
-      <span className="gen-tile-meta">
-        <span>{tile.width === null || tile.height === null ? `${width} x ${height}` : `${tile.width} x ${tile.height}`}</span>
-        {canAlter && tile.imageId !== null ? (
-          isAlterSource ? (
-            <span className="gen-alter-badge">Altering</span>
-          ) : (
-            <button
-              type="button"
-              className="gen-alter-action"
-              title={`Alter image ${tile.index + 1} instead`}
-              onClick={(event) => {
-                event.stopPropagation();
-                onSelectSource(tile.imageId ?? '');
-              }}
-            >
-              Alter this
-            </button>
-          )
-        ) : null}
-        <span>
-          {tile.phase === 'done'
-            ? tile.imageId === null
-              ? 'not stored'
-              : 'stored'
-            : tile.phase === 'failed' || tile.phase === 'cancelled'
-              ? 'not stored'
-              : 'pending'}
+      {going ? null : (
+        <span className="gen-tile-meta">
+          <span>{tile.width === null || tile.height === null ? `${width} x ${height}` : `${tile.width} x ${tile.height}`}</span>
+          {canAlter && tile.imageId !== null ? (
+            isAlterSource ? (
+              <span className="gen-alter-badge">Altering</span>
+            ) : (
+              <button
+                type="button"
+                className="gen-alter-action"
+                title={`Alter image ${tile.index + 1} instead`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSelectSource(tile.imageId ?? '');
+                }}
+              >
+                Alter this
+              </button>
+            )
+          ) : null}
+          <span>
+            {tile.phase === 'done'
+              ? tile.imageId === null
+                ? 'not stored'
+                : 'stored'
+              : tile.phase === 'failed' || tile.phase === 'cancelled'
+                ? 'not stored'
+                : 'pending'}
+          </span>
         </span>
-      </span>
+      )}
     </article>
   );
 }
@@ -524,14 +672,17 @@ export function ResultsGrid({
         className={`gen-grid is-cols-${columns}`}
         style={gridScaleStyle(batch.width, batch.height, batch.tiles.length, columns)}
       >
-        {batch.tiles.map((tile) => (
+        {batch.tiles.map((tile) => {
+          const clock = tickClocks.get(tile.index);
+          return (
           <ResultTile
             key={tile.index}
             tile={tile}
             total={batch.tiles.length}
             width={batch.width}
             height={batch.height}
-            elapsed={elapsedLabel(tickClocks.get(tile.index), now)}
+            elapsed={elapsedLabel(clock, now)}
+            elapsedMs={clock === undefined ? null : (clock.settledAt ?? now) - clock.startedAt}
             settled={!running}
             canRetry={canRetry}
             alterationSourceId={alterationSourceId}
@@ -539,7 +690,8 @@ export function ResultsGrid({
             onOpen={onOpenImage}
             onSelectSource={onSelectSource}
           />
-        ))}
+          );
+        })}
       </div>
 
       {batch.revisedPrompt === null ? null : <RevisedPrompt text={batch.revisedPrompt} />}

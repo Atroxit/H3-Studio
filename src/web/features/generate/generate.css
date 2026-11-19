@@ -256,6 +256,10 @@
   border: 1px solid var(--line);
   border-radius: var(--radius-panel);
   background: var(--panel-sunken);
+  /* The loading view asks its own tile how much room it has, so a four-up grid gets a
+     compact HUD without a second set of media queries. */
+  container-type: inline-size;
+  container-name: tile;
 }
 
 .gen-tile.is-running {
@@ -325,6 +329,12 @@
   pointer-events: none;
 }
 
+/* The loading view paints its own HUD over the tile, so the index pill rises above it. */
+.gen-tile.is-waiting .gen-tile-index,
+.gen-tile.is-running .gen-tile-index {
+  z-index: 4;
+}
+
 .gen-tile-tags {
   position: absolute;
   top: var(--space-2);
@@ -368,6 +378,425 @@
 
 .gen-tile-state.is-cancelled {
   color: var(--text-muted);
+}
+
+/* Loading view: a live preview frame when ComfyUI streams one, an animated status panel
+   before that. Everything sits over the tile, so the finished, failed and cancelled
+   layouts below are untouched. */
+.gen-loading {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  background:
+    radial-gradient(120% 90% at 28% 12%, rgba(244, 244, 245, 0.055), transparent 58%),
+    radial-gradient(90% 80% at 82% 92%, rgba(244, 244, 245, 0.04), transparent 62%),
+    linear-gradient(160deg, var(--panel-sunken) 0%, var(--panel) 100%);
+}
+
+.gen-loading.is-live::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    radial-gradient(120% 100% at 50% 50%, transparent 52%, rgba(8, 8, 10, 0.32) 100%),
+    linear-gradient(180deg, rgba(8, 8, 10, 0.18) 0%, transparent 26%, transparent 56%, rgba(8, 8, 10, 0.24) 100%);
+}
+
+.tile-live-preview {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  animation: gen-preview-in 320ms ease-out both;
+  transition: filter 420ms ease, opacity 260ms ease;
+  will-change: filter;
+}
+
+.gen-ambient {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* A slow breathing mesh behind the status panel. Transform and opacity only, so the
+   compositor keeps this cheap even while the tile is at 4K. */
+.gen-ambient-mesh {
+  position: absolute;
+  inset: -42%;
+  background:
+    radial-gradient(closest-side at 34% 38%, rgba(244, 244, 245, 0.12), transparent 72%),
+    radial-gradient(closest-side at 68% 62%, rgba(244, 244, 245, 0.08), transparent 70%),
+    radial-gradient(closest-side at 52% 88%, rgba(244, 244, 245, 0.06), transparent 68%);
+  filter: blur(22px);
+  animation: gen-ambient-drift 16s ease-in-out infinite alternate;
+  will-change: transform, opacity;
+}
+
+.gen-ambient-scan {
+  position: absolute;
+  top: -24%;
+  bottom: -24%;
+  left: -45%;
+  width: 42%;
+  background: linear-gradient(100deg, transparent 0%, rgba(244, 244, 245, 0.10) 48%, transparent 100%);
+  opacity: 0.7;
+  transform: translate3d(-30%, 0, 0) rotate(9deg);
+  animation: gen-ambient-scan 6.5s linear infinite;
+  will-change: transform, opacity;
+}
+
+.gen-ambient-grid {
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(244, 244, 245, 0.13) 1px, transparent 1px);
+  background-size: 14px 14px;
+  opacity: 0.24;
+  mask-image: radial-gradient(ellipse at 50% 46%, #000 8%, transparent 76%);
+  -webkit-mask-image: radial-gradient(ellipse at 50% 46%, #000 8%, transparent 76%);
+}
+
+@keyframes gen-preview-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes gen-ambient-drift {
+  from {
+    transform: translate3d(-3%, -2%, 0) scale(1);
+    opacity: 0.62;
+  }
+
+  to {
+    transform: translate3d(3%, 2%, 0) scale(1.12);
+    opacity: 1;
+  }
+}
+
+@keyframes gen-ambient-scan {
+  0% {
+    transform: translate3d(-40%, -6%, 0) rotate(9deg);
+    opacity: 0;
+  }
+
+  14% {
+    opacity: 0.72;
+  }
+
+  58% {
+    opacity: 0.38;
+  }
+
+  100% {
+    transform: translate3d(300%, 6%, 0) rotate(9deg);
+    opacity: 0;
+  }
+}
+
+/* Live mode: a glass top bar with the label and clock, and a heavier HUD at the bottom. */
+.gen-hud-top {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) var(--space-3);
+  /* Clears the index pill, which still marks the slot on every tile. */
+  padding-left: calc(var(--space-2) + 38px);
+  background: linear-gradient(180deg, rgba(8, 8, 10, 0.86) 0%, rgba(8, 8, 10, 0.42) 62%, transparent 100%);
+  backdrop-filter: blur(6px);
+}
+
+.gen-live-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 rgba(244, 244, 245, 0.5);
+  animation: gen-live-pulse 1.7s ease-out infinite;
+}
+
+.gen-live-label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gen-hud-clock {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: baseline;
+  gap: 6px;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.gen-clock {
+  color: var(--text);
+}
+
+.gen-eta {
+  color: var(--text);
+}
+
+.gen-live-hud {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: var(--space-10) var(--space-3) var(--space-3);
+  background: linear-gradient(0deg, rgba(8, 8, 10, 0.94) 0%, rgba(8, 8, 10, 0.68) 52%, transparent 100%);
+  backdrop-filter: blur(2px);
+}
+
+.gen-hud-title {
+  overflow: hidden;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gen-hud-detail {
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Ready mode: a centred status panel over the ambient canvas. */
+.gen-panel {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--space-6) + 10px) var(--space-4) var(--space-6);
+}
+
+.gen-panel-inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(360px, 100%);
+  min-width: 0;
+}
+
+.gen-panel-eyebrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.gen-ring {
+  position: relative;
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--accent-line);
+  border-radius: 50%;
+}
+
+.gen-ring::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border: 1px solid var(--accent-line);
+  border-radius: 50%;
+  opacity: 0.5;
+  animation: gen-ring 2s ease-out infinite;
+}
+
+.gen-panel-slot {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gen-panel-clock {
+  margin-left: auto;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.gen-panel-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  color: var(--text);
+}
+
+.gen-panel-detail {
+  min-height: 15px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.gen-pipeline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gen-pipeline li {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: rgba(20, 20, 24, 0.72);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1.3;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.gen-pipeline li.is-done {
+  border-color: rgba(143, 214, 148, 0.34);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.gen-pipeline li.is-active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+  animation: gen-pill-pulse 1.9s ease-in-out infinite;
+}
+
+.gen-pipeline-mark:empty {
+  display: none;
+}
+
+.gen-progress {
+  position: relative;
+  display: block;
+  height: 3px;
+  margin-top: 3px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(244, 244, 245, 0.14);
+}
+
+.gen-progress-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  box-shadow: 0 0 10px rgba(244, 244, 245, 0.32);
+  transition: width 220ms linear;
+}
+
+.gen-progress.is-indeterminate .gen-progress-fill {
+  width: 38%;
+  transform: translateX(-110%);
+  animation: gen-progress-sweep 1.6s ease-in-out infinite;
+}
+
+@keyframes gen-live-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(244, 244, 245, 0.5);
+  }
+
+  70% {
+    box-shadow: 0 0 0 6px rgba(244, 244, 245, 0);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 rgba(244, 244, 245, 0);
+  }
+}
+
+@keyframes gen-ring {
+  0% {
+    opacity: 0.5;
+    transform: scale(0.7);
+  }
+
+  80% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.5);
+  }
+}
+
+@keyframes gen-pill-pulse {
+  0%,
+  100% {
+    border-color: var(--accent-line);
+  }
+
+  50% {
+    border-color: var(--accent);
+  }
+}
+
+@keyframes gen-progress-sweep {
+  0% {
+    transform: translateX(-110%);
+  }
+
+  100% {
+    transform: translateX(320%);
+  }
 }
 
 .gen-tile-body {
@@ -1139,12 +1568,95 @@
   }
 }
 
+/* Narrow tiles: the same information, packed. Container queries keep a four-up grid
+   legible instead of letting the HUD clip. */
+@container tile (max-width: 320px) {
+  .gen-hud-top {
+    padding-left: calc(var(--space-2) + 30px);
+  }
+
+  .gen-panel {
+    padding: calc(var(--space-6) + 8px) var(--space-3) var(--space-6);
+  }
+
+  .gen-panel-inner {
+    gap: 6px;
+  }
+
+  .gen-panel-title {
+    font-size: var(--text-sm);
+  }
+
+  .gen-pipeline li {
+    padding: 1px 4px;
+    font-size: 8px;
+  }
+
+  .gen-eta {
+    display: none;
+  }
+}
+
+@container tile (max-width: 230px) {
+  .gen-tile-index {
+    display: none;
+  }
+
+  .gen-hud-top {
+    padding-left: var(--space-3);
+  }
+
+  .gen-panel-detail,
+  .gen-hud-detail {
+    display: none;
+  }
+
+  .gen-live-hud {
+    padding-top: var(--space-8);
+  }
+
+  .gen-panel-eyebrow {
+    gap: 5px;
+  }
+}
+
+@container tile (max-width: 172px) {
+  .gen-live-label,
+  .gen-live-hud .gen-pipeline,
+  .gen-panel .gen-pipeline {
+    display: none;
+  }
+
+  .gen-hud-clock {
+    margin-left: auto;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .gen-skeleton {
     animation: none;
   }
 
   .gen-bar-fill {
+    transition: none;
+  }
+
+  .gen-ambient-mesh,
+  .gen-ambient-scan,
+  .gen-live-dot,
+  .gen-ring::after,
+  .gen-pipeline li.is-active,
+  .gen-progress.is-indeterminate .gen-progress-fill,
+  .tile-live-preview {
+    animation: none;
+  }
+
+  .gen-ambient-scan {
+    opacity: 0;
+  }
+
+  .tile-live-preview,
+  .gen-progress-fill {
     transition: none;
   }
 }

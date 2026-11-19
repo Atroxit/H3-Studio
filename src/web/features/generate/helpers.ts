@@ -149,3 +149,112 @@ function parseGraph(templateJson: string): Record<string, unknown> | null {
     return null;
   }
 }
+
+/** The loading view clock: always m:ss, so the width never changes as it counts. */
+export function formatClock(ms: number): string {
+  const total = Number.isFinite(ms) ? Math.max(0, Math.floor(ms / 1000)) : 0;
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+/** Real time per denoise step, from the rolling average the controller keeps. */
+export function formatSecondsPerStep(ms: number | null | undefined): string | null {
+  if (ms === undefined || ms === null || !Number.isFinite(ms) || ms <= 0) return null;
+  const seconds = ms / 1000;
+  return seconds < 10 ? `${seconds.toFixed(1)}s/step` : `${Math.round(seconds)}s/step`;
+}
+
+/** The remaining sampling time, worded so it never reads as a promise. */
+export function formatEta(ms: number | null | undefined): string | null {
+  if (ms === undefined || ms === null || !Number.isFinite(ms) || ms <= 0) return null;
+  const seconds = Math.max(1, Math.round(ms / 1000));
+  if (seconds < 60) return `~${seconds}s left`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest === 0 ? `~${minutes}m left` : `~${minutes}m ${rest}s left`;
+}
+
+/** The human title for a provider stage. Unknown stages still read as work in progress. */
+export function stageHeadline(stage: string | null): string {
+  switch (stage) {
+    case null:
+    case 'waiting':
+      return 'Queued';
+    case 'preparing':
+      return 'Preparing pipeline';
+    case 'loading':
+      return 'Loading models';
+    case 'enhancing':
+      return 'Enhancing prompt';
+    case 'encoding':
+      return 'Encoding prompt';
+    case 'sampling':
+      return 'Generating image';
+    case 'decoding':
+      return 'Decoding pixels';
+    case 'saving':
+      return 'Finalizing PNG';
+    default:
+      return 'Working';
+  }
+}
+
+export type PipelinePhase = 'prepare' | 'enhance' | 'encode' | 'diffuse' | 'decode';
+export type PipelineState = 'done' | 'active' | 'pending';
+
+export interface PipelineStep {
+  id: PipelinePhase;
+  label: string;
+  state: PipelineState;
+}
+
+const PIPELINE_LABELS: Readonly<Record<PipelinePhase, string>> = {
+  prepare: 'Prepare',
+  enhance: 'Enhance',
+  encode: 'Encode',
+  diffuse: 'Diffuse',
+  decode: 'Decode',
+};
+
+const PIPELINE_ORDER: readonly PipelinePhase[] = ['prepare', 'enhance', 'encode', 'diffuse', 'decode'];
+
+function phaseForStage(stage: string | null): PipelinePhase {
+  if (stage === 'enhancing') return 'enhance';
+  if (stage === 'encoding') return 'encode';
+  if (stage === 'sampling') return 'diffuse';
+  if (stage === 'decoding' || stage === 'saving') return 'decode';
+  return 'prepare';
+}
+
+/**
+ * The compact stepper the loading tile shows. Enhance only appears when the graph actually
+ * ran it, because a run with the enhancer off has no such phase to report. Completed phases
+ * come from the controller, so the pills agree with the headline above them.
+ */
+export function pipelineStages(
+  stage: string | null,
+  completedStages: readonly string[] = [],
+): PipelineStep[] {
+  const active = phaseForStage(stage);
+  const showEnhance = stage === 'enhancing' || completedStages.includes('enhancing');
+  const ids = PIPELINE_ORDER.filter((id) => id !== 'enhance' || showEnhance);
+  const done = new Set<PipelinePhase>();
+  for (const completed of completedStages) done.add(phaseForStage(completed));
+  const activePosition = ids.indexOf(active);
+  return ids.map((id, position) => {
+    const isDone = done.has(id) || (activePosition >= 0 && position < activePosition);
+    const state: PipelineState = isDone ? 'done' : id === active ? 'active' : 'pending';
+    return { id, label: PIPELINE_LABELS[id], state };
+  });
+}
+
+/**
+ * Early latent2rgb frames are soft and low resolution, so a step proportional blur makes
+ * them read as atmosphere that resolves into focus, instead of a broken image.
+ */
+export function previewBlurPx(step: number | null, totalSteps: number | null): number {
+  if (step === null || totalSteps === null || !Number.isFinite(step) || !Number.isFinite(totalSteps) || totalSteps <= 0) {
+    return 4;
+  }
+  const progress = Math.min(1, Math.max(0, step / totalSteps));
+  return Math.round(4 * (1 - progress) * 10) / 10;
+}

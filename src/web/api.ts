@@ -234,15 +234,19 @@ export async function getStats(): Promise<StudioStats> {
 }
 
 type ProgressEvent = Extract<GenerationEvent, { type: 'progress' }>;
+type PreviewEvent = Extract<GenerationEvent, { type: 'preview' }>;
 type ItemEvent = Extract<GenerationEvent, { type: 'item' }>;
 
 type StreamEvent =
   | { type: 'progress'; event: ProgressEvent }
+  | { type: 'preview'; event: PreviewEvent }
   | { type: 'item'; event: ItemEvent }
   | { type: 'batch'; batch: BatchRecord };
 
 export interface GenerationStreamHandlers {
   onProgress?: (event: ProgressEvent) => void;
+  /** A live denoise frame. It is never part of the stored batch. */
+  onPreview?: (event: PreviewEvent) => void;
   onItem?: (event: ItemEvent) => void;
   /** Called once for the final batch, after which the stream is closed. */
   onBatch?: (batch: BatchRecord) => void;
@@ -260,6 +264,7 @@ function parseStreamEvent(raw: string): StreamEvent | null {
   // The server writes the shapes from src/core/types.ts, so once the
   // discriminator matches the payload is trusted as written.
   if (value.type === 'progress') return { type: 'progress', event: value as unknown as ProgressEvent };
+  if (value.type === 'preview') return { type: 'preview', event: value as unknown as PreviewEvent };
   if (value.type === 'item') return { type: 'item', event: value as unknown as ItemEvent };
   if (value.type === 'batch') return { type: 'batch', batch: value.batch as unknown as BatchRecord };
   return null;
@@ -285,6 +290,10 @@ export function openGenerationEvents(batchId: string, handlers: GenerationStream
     if (parsed === null) return;
     if (parsed.type === 'progress') {
       handlers.onProgress?.(parsed.event);
+      return;
+    }
+    if (parsed.type === 'preview') {
+      handlers.onPreview?.(parsed.event);
       return;
     }
     if (parsed.type === 'item') {

@@ -11,9 +11,12 @@ import {
   applyPromptEnhancer,
   attachReferenceImages,
   createComfyUIAdapter,
+  createProgressWatch,
   defaultWorkflowTemplate,
+  detailForNode,
   expandMultiSeedGraph,
   formatReferencePrompt,
+  parseBinaryPreview,
 } from '../../src/core/providers/comfyui';
 import { LibraryStore } from '../../src/core/store';
 import type {
@@ -1350,5 +1353,259 @@ describe('ComfyUI multi seed expansion', () => {
       (event): event is Extract<GenerationEvent, { type: 'item' }> => event.type === 'item',
     );
     expect(itemEvents.map((event) => event.index)).toEqual([0, 1, 2]);
+  });
+});
+
+function previewBuffer(
+  eventType: number,
+  formatOrUnused: number,
+  imageBytes: Uint8Array,
+  metadata?: Record<string, unknown>,
+): ArrayBuffer {
+  const metaBytes = metadata === undefined ? null : new TextEncoder().encode(JSON.stringify(metadata));
+  const metaLength = metaBytes === null ? 0 : metaBytes.byteLength;
+  const buffer = new ArrayBuffer(8 + metaLength + imageBytes.byteLength);
+  const header = new DataView(buffer);
+  header.setUint32(0, eventType, false);
+  header.setUint32(4, metaBytes === null ? formatOrUnused : metaLength, false);
+  const bytes = new Uint8Array(buffer);
+  if (metaBytes !== null) bytes.set(metaBytes, 8);
+  bytes.set(imageBytes, 8 + metaLength);
+  return buffer;
+}
+
+function decodeDataUrl(dataUrl: string): { mime: string; bytes: Uint8Array } {
+  const match = /^data:([^;]+);base64,(.*)$/.exec(dataUrl);
+  if (match === null) throw new Error(`not a base64 data URL: ${dataUrl.slice(0, 40)}`);
+  return { mime: match[1] ?? '', bytes: new Uint8Array(Buffer.from(match[2] ?? '', 'base64')) };
+}
+
+describe('ComfyUI binary preview frames', () => {
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0x10, 0x20]);
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d]);
+
+  it('decodes a PREVIEW_IMAGE JPEG frame', () => {
+    const parsed = parseBinaryPreview(previewBuffer(1, 1, jpeg));
+    expect(parsed).not.toBeNull();
+    expect(parsed?.promptId).toBeUndefined();
+    const decoded = decodeDataUrl(parsed?.dataUrl ?? '');
+    expect(decoded.mime).toBe('image/jpeg');
+    expect(decoded.bytes).toEqual(jpeg);
+  });
+
+  it('decodes a PREVIEW_IMAGE PNG frame from a Uint8Array view', () => {
+    const buffer = previewBuffer(1, 2, png);
+    const parsed = parseBinaryPreview(new Uint8Array(buffer));
+    expect(parsed).not.toBeNull();
+    expect(decodeDataUrl(parsed?.dataUrl ?? '').mime).toBe('image/png');
+    expect(decodeDataUrl(parsed?.dataUrl ?? '').bytes).toEqual(png);
+  });
+
+  it('decodes PREVIEW_IMAGE_WITH_METADATA and keeps prompt and node ids', () => {
+    const parsed = parseBinaryPreview(
+      previewBuffer(4, 0, png, { prompt_id: 'prompt-9', node_id: '6', image_type: 'image/png' }),
+    );
+    expect(parsed?.promptId).toBe('prompt-9');
+    expect(parsed?.nodeId).toBe('6');
+    expect(decodeDataUrl(parsed?.dataUrl ?? '').mime).toBe('image/png');
+  });
+
+  it('defaults metadata image_type to JPEG', () => {
+    const parsed = parseBinaryPreview(previewBuffer(4, 0, jpeg, { prompt_id: 'prompt-9' }));
+    expect(decodeDataUrl(parsed?.dataUrl ?? '').mime).toBe('image/jpeg');
+  });
+
+  it('returns null for truncated, empty, malformed and unrecognised buffers', () => {
+    expect(parseBinaryPreview(new ArrayBuffer(4))).toBeNull();
+    expect(parseBinaryPreview(previewBuffer(1, 3, jpeg))).toBeNull();
+    expect(parseBinaryPreview(previewBuffer(1, 1, new Uint8Array()))).toBeNull();
+    expect(parseBinaryPreview(previewBuffer(4, 0, png, { prompt_id: 'p' }))).not.toBeNull();
+
+    const badMetadata = previewBuffer(4, 0, png);
+    new TextEncoder().encodeInto('{not json', new Uint8Array(badMetadata, 8));
+    expect(parseBinaryPreview(badMetadata)).toBeNull();
+
+    const truncatedMetadata = previewBuffer(4, 0, png, { prompt_id: 'p' });
+    new DataView(truncatedMetadata).setUint32(4, 4096, false);
+    expect(parseBinaryPreview(truncatedMetadata)).toBeNull();
+
+    // Event 3 is a plain text frame, not a preview.
+    expect(parseBinaryPreview(previewBuffer(3, 1, jpeg))).toBeNull();
+  });
+
+  it('rejects an image larger than the 2 MB safety cap', () => {
+    expect(parseBinaryPreview(previewBuffer(1, 1, new Uint8Array(2 * 1024 * 1024 + 1)))).toBeNull();
+  });
+});
+
+describe('ComfyUI progress watch', () => {
+  class FakeWebSocket {
+    static instances: FakeWebSocket[] = [];
+    binaryType = 'blob';
+    closed = false;
+    private readonly listeners = new Map<string, ((event: { data: unknown }) => void)[]>();
+
+    constructor(readonly url: string) {
+      FakeWebSocket.instances.push(this);
+    }
+
+    addEventListener(type: string, listener: (event: { data: unknown }) => void): void {
+      const list = this.listeners.get(type) ?? [];
+      list.push(listener);
+      this.listeners.set(type, list);
+    }
+
+    emit(type: string, data: unknown): void {
+      for (const listener of this.listeners.get(type) ?? []) listener({ data });
+    }
+
+    close(): void {
+      this.closed = true;
+    }
+  }
+
+  function withFakeWebSocket(run: () => void): void {
+    const original = globalThis.WebSocket;
+    FakeWebSocket.instances = [];
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    try {
+      run();
+    } finally {
+      globalThis.WebSocket = original;
+    }
+  }
+
+  function watchFor(
+    graph: Record<string, unknown>,
+    events: GenerationEvent[],
+    slots?: ReadonlyMap<string, number>,
+  ): { socket: FakeWebSocket; watch: ReturnType<typeof createProgressWatch> } {
+    const controller = new AbortController();
+    const watch = createProgressWatch(
+      'ws://stub.test/ws',
+      graph,
+      { signal: controller.signal, onEvent: (event) => events.push(event) },
+      0,
+      slots,
+    );
+    const socket = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    if (socket === undefined) throw new Error('the watch did not open a socket');
+    expect(socket.binaryType).toBe('arraybuffer');
+    watch.bind('prompt-1');
+    return { socket, watch };
+  }
+
+  const graph = {
+    '1': { class_type: 'UNETLoader', inputs: { unet_name: 'minimax_h3_image_pruned_w4a8.safetensors' } },
+    '2': { class_type: 'CLIPLoader', inputs: { clip_name: 'qwen3.5_9b_w4a8_gptq.safetensors' } },
+    '3': { class_type: 'VAELoader', inputs: {} },
+    '4': { class_type: 'TextGenerateV2', inputs: {} },
+    '5': { class_type: 'MiniMaxH3ImageConditioning', inputs: {} },
+    '6': { class_type: 'KSampler', inputs: {} },
+    '7': { class_type: 'VAEDecode', inputs: {} },
+    '8': { class_type: 'SaveImage', inputs: {} },
+    '9': { class_type: 'LoadImage', inputs: {} },
+  };
+
+  it('says what each pipeline node is actually doing', () => {
+    expect(detailForNode(graph['1'], '1', graph)).toBe('Loading MiniMax H3 weights (W4A8)');
+    expect(detailForNode(graph['2'], '2', graph)).toBe('Loading prompt enhancer model');
+    expect(detailForNode(graph['3'], '3', graph)).toBe('Loading VAE decoder');
+    expect(detailForNode(graph['4'], '4', graph)).toBe('Rewriting & expanding prompt');
+    expect(detailForNode(graph['5'], '5', graph)).toBe('Encoding prompt & canvas conditioning');
+    expect(detailForNode(graph['6'], '6', graph)).toBe('Denoising latent image');
+    expect(detailForNode(graph['6'], '6', graph, 1, 3)).toBe('Denoising image 2 of 3');
+    expect(detailForNode(graph['7'], '7', graph)).toBe('Decoding latent to full-resolution pixels');
+    expect(detailForNode(graph['8'], '8', graph)).toBe('Writing PNG output');
+    expect(detailForNode(graph['9'], '9', graph)).toBe('Preparing reference image');
+  });
+
+  it('maps CLIPLoader names to the right text encoder', () => {
+    const caseOf = (clipName: string): string | undefined =>
+      detailForNode({ class_type: 'CLIPLoader', inputs: { clip_name: clipName } }, '1', {});
+    expect(caseOf('qwen3vl_8b_fp8.safetensors')).toBe('Loading Qwen3-VL text encoder');
+    expect(caseOf('qwen3.8_27b_minimax_h3_image_pe_w4a8_gptq.safetensors')).toBe(
+      'Loading prompt enhancer model',
+    );
+    expect(caseOf('clip_l.safetensors')).toBe('Loading text encoder');
+  });
+
+  it('emits rich detail, execution_cached and step messages', () => {
+    withFakeWebSocket(() => {
+      const events: GenerationEvent[] = [];
+      const { socket, watch } = watchFor(graph, events);
+
+      socket.emit(
+        'message',
+        JSON.stringify({ type: 'execution_cached', data: { nodes: ['1', '2'], prompt_id: 'prompt-1' } }),
+      );
+      for (const nodeId of ['1', '2', '3', '4', '5', '6', '7', '8', '9']) {
+        socket.emit(
+          'message',
+          JSON.stringify({ type: 'executing', data: { node: nodeId, prompt_id: 'prompt-1' } }),
+        );
+      }
+      socket.emit(
+        'message',
+        JSON.stringify({ type: 'progress', data: { value: 3, max: 6, prompt_id: 'prompt-1' } }),
+      );
+
+      const progress = events.filter(
+        (event): event is Extract<GenerationEvent, { type: 'progress' }> => event.type === 'progress',
+      );
+      expect(progress[0]).toEqual({
+        type: 'progress',
+        index: 0,
+        stage: 'preparing',
+        detail: 'Models warm in VRAM',
+        cached: true,
+      });
+      expect(progress.slice(1).map((event) => [event.stage, event.detail])).toEqual([
+        ['loading', 'Loading MiniMax H3 weights (W4A8)'],
+        ['loading', 'Loading prompt enhancer model'],
+        ['loading', 'Loading VAE decoder'],
+        ['enhancing', 'Rewriting & expanding prompt'],
+        ['encoding', 'Encoding prompt & canvas conditioning'],
+        ['sampling', 'Denoising latent image'],
+        ['decoding', 'Decoding latent to full-resolution pixels'],
+        ['saving', 'Writing PNG output'],
+        ['loading', 'Preparing reference image'],
+        ['sampling', 'Step 3 of 6'],
+      ]);
+      const last = progress[progress.length - 1];
+      expect(last).toMatchObject({ step: 3, totalSteps: 6, percent: 50 });
+      watch.close();
+      expect(socket.closed).toBe(true);
+    });
+  });
+
+  it('routes binary preview frames to the sampler slot that produced them', () => {
+    withFakeWebSocket(() => {
+      const events: GenerationEvent[] = [];
+      const slots = new Map([
+        ['6', 1],
+        ['batch_sampler_1', 2],
+      ]);
+      const { socket, watch } = watchFor(graph, events, slots);
+      const imageBytes = new Uint8Array([0xff, 0xd8, 0xff]);
+      socket.emit(
+        'message',
+        previewBuffer(4, 0, imageBytes, { prompt_id: 'prompt-1', node_id: '6', image_type: 'image/jpeg' }),
+      );
+
+      const preview = events.find(
+        (event): event is Extract<GenerationEvent, { type: 'preview' }> => event.type === 'preview',
+      );
+      expect(preview?.index).toBe(1);
+      expect(decodeDataUrl(preview?.dataUrl ?? '').bytes).toEqual(imageBytes);
+
+      // A frame for another prompt is not ours, even if the socket carries it.
+      socket.emit(
+        'message',
+        previewBuffer(4, 0, imageBytes, { prompt_id: 'prompt-other', node_id: '6', image_type: 'image/jpeg' }),
+      );
+      expect(events.filter((event) => event.type === 'preview')).toHaveLength(1);
+      watch.close();
+    });
   });
 });

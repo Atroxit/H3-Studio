@@ -79,7 +79,20 @@ export interface GeneratedItem {
 }
 
 export type GenerationEvent =
-  | { type: 'progress'; index: number; stage: string; step?: number; totalSteps?: number; percent?: number }
+  | {
+      type: 'progress';
+      index: number;
+      stage: string;
+      /** A human readable line about the node doing the work right now. */
+      detail?: string;
+      step?: number;
+      totalSteps?: number;
+      percent?: number;
+      /** True when ComfyUI reported cached nodes, so the pipeline is already warm. */
+      cached?: boolean;
+    }
+  /** A low resolution frame streamed while ComfyUI denoises. Never persisted. */
+  | { type: 'preview'; index: number; dataUrl: string }
   | { type: 'item'; index: number; item: GeneratedItem };
 
 export interface GenerationContext {

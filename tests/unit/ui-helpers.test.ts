@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
+  formatClock,
+  formatEta,
+  formatSecondsPerStep,
+  pipelineStages,
+  previewBlurPx,
   promptProblem,
   ratioOf,
   readH3ExpanderState,
@@ -7,9 +12,12 @@ import {
   seedProblem,
   setH3ExpanderState,
   sizeProblem,
+  stageHeadline,
   uniqueNotes,
 } from '../../src/web/features/generate/helpers';
 import {
+  applyPreviewEvent,
+  applyProgressEvent,
   resolveAlterationTarget,
   type GenerationBatch,
   type GenerationTile,
@@ -248,6 +256,80 @@ function batchOf(tiles: GenerationTile[]): GenerationBatch {
   };
 }
 
+describe('progress folding', () => {
+  it('tracks stages, details, step speed and completed phases', () => {
+    let tiles = [waitingTile(0)];
+    tiles = applyProgressEvent(
+      tiles,
+      { type: 'progress', index: 0, stage: 'loading', detail: 'Loading VAE decoder' },
+      1_000,
+    );
+    expect(tiles[0]).toMatchObject({ phase: 'running', stage: 'loading', detail: 'Loading VAE decoder' });
+
+    tiles = applyProgressEvent(
+      tiles,
+      { type: 'progress', index: 0, stage: 'encoding', detail: 'Encoding prompt & canvas conditioning' },
+      1_500,
+    );
+    expect(tiles[0]?.completedStages).toEqual(['loading']);
+
+    tiles = applyProgressEvent(
+      tiles,
+      { type: 'progress', index: 0, stage: 'sampling', step: 1, totalSteps: 4, percent: 25 },
+      2_000,
+    );
+    expect(tiles[0]?.completedStages).toEqual(['loading', 'encoding']);
+    expect(tiles[0]?.stepStartedAt).toBe(2_000);
+    expect(tiles[0]?.avgStepMs).toBeUndefined();
+
+    tiles = applyProgressEvent(
+      tiles,
+      { type: 'progress', index: 0, stage: 'sampling', step: 2, totalSteps: 4, percent: 50 },
+      2_200,
+    );
+    expect(tiles[0]?.avgStepMs).toBe(200);
+
+    tiles = applyProgressEvent(
+      tiles,
+      { type: 'progress', index: 0, stage: 'sampling', step: 3, totalSteps: 4, percent: 75 },
+      2_500,
+    );
+    expect(tiles[0]?.avgStepMs).toBe(230);
+
+    tiles = applyProgressEvent(
+      tiles,
+      { type: 'progress', index: 0, stage: 'decoding', detail: 'Decoding latent to full-resolution pixels' },
+      2_800,
+    );
+    expect(tiles[0]?.completedStages).toEqual(['loading', 'encoding', 'sampling']);
+  });
+
+  it('does not let a poll guess mark sampling complete', () => {
+    // A polling percent arrives before the socket reports anything, so the stage starts at
+    // sampling; a loader event after it must not record sampling as a finished phase.
+    let tiles = [waitingTile(0)];
+    tiles = applyProgressEvent(tiles, { type: 'progress', index: 0, stage: 'sampling', percent: 10 }, 1_000);
+    tiles = applyProgressEvent(tiles, { type: 'progress', index: 0, stage: 'loading' }, 1_100);
+    expect(tiles[0]?.completedStages).toBeUndefined();
+  });
+
+  it('moves a waiting tile to running on the first preview frame', () => {
+    const tiles = applyPreviewEvent([waitingTile(0), waitingTile(1)], {
+      type: 'preview',
+      index: 1,
+      dataUrl: 'data:image/jpeg;base64,AA==',
+    });
+    expect(tiles[0]?.phase).toBe('waiting');
+    expect(tiles[1]).toMatchObject({ phase: 'running', previewUrl: 'data:image/jpeg;base64,AA==' });
+  });
+
+  it('ignores preview frames once a tile is settled', () => {
+    const settled = readyTile(0, 'img_one');
+    const tiles = applyPreviewEvent([settled], { type: 'preview', index: 0, dataUrl: 'data:image/jpeg;base64,AA==' });
+    expect(tiles[0]).toBe(settled);
+  });
+});
+
 describe('resolveAlterationTarget', () => {
   it('has no target without a batch or without reference support', () => {
     const batch = batchOf([readyTile(0, 'img_one')]);
@@ -292,6 +374,78 @@ describe('uniqueNotes', () => {
   it('removes duplicate and blank notes without changing the order', () => {
     expect(uniqueNotes(['a', 'a', 'b', ' b ', '', 'c'])).toEqual(['a', 'b', 'c']);
     expect(uniqueNotes([])).toEqual([]);
+  });
+});
+
+describe('loading view formatting', () => {
+  it('formats the elapsed clock as m:ss', () => {
+    expect(formatClock(0)).toBe('0:00');
+    expect(formatClock(8_400)).toBe('0:08');
+    expect(formatClock(65_000)).toBe('1:05');
+    expect(formatClock(-500)).toBe('0:00');
+    expect(formatClock(Number.NaN)).toBe('0:00');
+  });
+
+  it('formats per step speed with one decimal below ten seconds', () => {
+    expect(formatSecondsPerStep(2_300)).toBe('2.3s/step');
+    expect(formatSecondsPerStep(12_400)).toBe('12s/step');
+    expect(formatSecondsPerStep(0)).toBeNull();
+    expect(formatSecondsPerStep(undefined)).toBeNull();
+  });
+
+  it('formats the remaining sampling time as an estimate', () => {
+    expect(formatEta(6_000)).toBe('~6s left');
+    expect(formatEta(80_000)).toBe('~1m 20s left');
+    expect(formatEta(120_000)).toBe('~2m left');
+    expect(formatEta(0)).toBeNull();
+    expect(formatEta(null)).toBeNull();
+  });
+
+  it('turns provider stages into human headlines', () => {
+    expect(stageHeadline(null)).toBe('Queued');
+    expect(stageHeadline('waiting')).toBe('Queued');
+    expect(stageHeadline('preparing')).toBe('Preparing pipeline');
+    expect(stageHeadline('loading')).toBe('Loading models');
+    expect(stageHeadline('enhancing')).toBe('Enhancing prompt');
+    expect(stageHeadline('encoding')).toBe('Encoding prompt');
+    expect(stageHeadline('sampling')).toBe('Generating image');
+    expect(stageHeadline('decoding')).toBe('Decoding pixels');
+    expect(stageHeadline('saving')).toBe('Finalizing PNG');
+  });
+
+  it('marks the real pipeline phases done, active and pending', () => {
+    expect(pipelineStages('sampling', ['loading', 'enhancing', 'encoding'])).toEqual([
+      { id: 'prepare', label: 'Prepare', state: 'done' },
+      { id: 'enhance', label: 'Enhance', state: 'done' },
+      { id: 'encode', label: 'Encode', state: 'done' },
+      { id: 'diffuse', label: 'Diffuse', state: 'active' },
+      { id: 'decode', label: 'Decode', state: 'pending' },
+    ]);
+    expect(pipelineStages('decoding', ['loading', 'encoding'])).toEqual([
+      { id: 'prepare', label: 'Prepare', state: 'done' },
+      { id: 'encode', label: 'Encode', state: 'done' },
+      { id: 'diffuse', label: 'Diffuse', state: 'done' },
+      { id: 'decode', label: 'Decode', state: 'active' },
+    ]);
+  });
+
+  it('shows Enhance only when the graph actually ran it', () => {
+    expect(pipelineStages('enhancing', [])[1]).toEqual({ id: 'enhance', label: 'Enhance', state: 'active' });
+    expect(pipelineStages('loading', []).map((step) => step.id)).toEqual([
+      'prepare',
+      'encode',
+      'diffuse',
+      'decode',
+    ]);
+  });
+
+  it('deblurs the preview as the step count approaches the total', () => {
+    expect(previewBlurPx(1, 6)).toBe(3.3);
+    expect(previewBlurPx(3, 6)).toBe(2);
+    expect(previewBlurPx(6, 6)).toBe(0);
+    expect(previewBlurPx(null, 6)).toBe(4);
+    expect(previewBlurPx(2, null)).toBe(4);
+    expect(previewBlurPx(0, 0)).toBe(4);
   });
 });
 

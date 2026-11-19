@@ -46,6 +46,75 @@ const DEFAULT_CLIENT_ID = 'h3-studio';
 const MAX_BATCH = 4;
 const MAX_POLL_PERCENT = 95;
 const MAX_RANDOM_SEED = 2_147_483_647;
+/** ComfyUI binary event ids on /ws: 1 is a preview frame, 4 the same frame plus metadata. */
+const PREVIEW_IMAGE_EVENT = 1;
+const PREVIEW_IMAGE_WITH_METADATA_EVENT = 4;
+/** A preview larger than this is a mistake or an attack, not a denoise frame. */
+const MAX_PREVIEW_BYTES = 2 * 1024 * 1024;
+const PREVIEW_MIME_BY_FORMAT: Readonly<Record<number, string>> = {
+  1: 'image/jpeg',
+  2: 'image/png',
+};
+/**
+ * ComfyUI preview frames are a small binary protocol: a uint32 event id, then either a
+ * format id or a metadata length, then the encoded image bytes. This is pure so the
+ * socket handler and the unit suite can share it.
+ */
+export interface BinaryPreview {
+  promptId?: string;
+  nodeId?: string;
+  dataUrl: string;
+}
+
+export function parseBinaryPreview(data: ArrayBuffer | Uint8Array): BinaryPreview | null {
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+  if (bytes.byteLength < 8) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const eventType = view.getUint32(0, false);
+
+  if (eventType === PREVIEW_IMAGE_EVENT) {
+    const mime = PREVIEW_MIME_BY_FORMAT[view.getUint32(4, false)];
+    if (mime === undefined) return null;
+    return encodePreview(mime, bytes.subarray(8));
+  }
+
+  if (eventType === PREVIEW_IMAGE_WITH_METADATA_EVENT) {
+    const metaLength = view.getUint32(4, false);
+    if (8 + metaLength >= bytes.byteLength) return null;
+    let metadata: unknown;
+    try {
+      metadata = JSON.parse(new TextDecoder().decode(bytes.subarray(8, 8 + metaLength))) as unknown;
+    } catch {
+      return null;
+    }
+    const record = isRecord(metadata) ? metadata : {};
+    const mime = readMetadataString(record, 'image_type') ?? 'image/jpeg';
+    const preview = encodePreview(mime, bytes.subarray(8 + metaLength));
+    if (preview === null) return null;
+    const promptId = readMetadataString(record, 'prompt_id');
+    const nodeId = readMetadataString(record, 'node_id');
+    return {
+      ...preview,
+      ...(promptId === undefined ? {} : { promptId }),
+      ...(nodeId === undefined ? {} : { nodeId }),
+    };
+  }
+
+  return null;
+}
+
+function encodePreview(mime: string, imageBytes: Uint8Array): BinaryPreview | null {
+  if (imageBytes.byteLength === 0 || imageBytes.byteLength > MAX_PREVIEW_BYTES) return null;
+  if (!mime.startsWith('image/')) return null;
+  return { dataUrl: `data:${mime};base64,${Buffer.from(imageBytes).toString('base64')}` };
+}
+
+function readMetadataString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return undefined;
+}
 const REFERENCE_CONDITIONING_CLASSES: readonly string[] = ['MiniMaxH3ImageConditioning', 'PH3ImageConditioning'];
 const REFERENCE_MIME_BY_EXTENSION: Record<string, string> = {
   '.png': 'image/png',
@@ -979,21 +1048,94 @@ async function interruptPrompt(baseUrl: string, promptId: string): Promise<void>
 function stageForClassType(classType: string | null): string {
   if (classType === null) return 'sampling';
   const lowered = classType.toLowerCase();
-  if (lowered.includes('sampler')) return 'sampling';
+  // Saving before loading: SaveImage and PreviewImage both mention "image".
+  if (lowered.includes('saveimage') || lowered.includes('previewimage')) return 'saving';
   if (lowered.includes('decode')) return 'decoding';
+  if (lowered.includes('sampler')) return 'sampling';
+  if (lowered.startsWith('textgenerate')) return 'enhancing';
+  // Every loader blocks the graph before it can encode anything, so it is its own stage.
+  if (lowered.includes('loader') || lowered.includes('loadimage')) return 'loading';
   if (
     lowered.includes('encode') ||
     lowered.includes('conditioning') ||
-    lowered.includes('text') ||
-    lowered.includes('clip') ||
-    lowered.includes('loader')
+    lowered.includes('text')
   ) {
     return 'encoding';
   }
   return 'sampling';
 }
 
-interface ProgressWatch {
+function nodeInputs(node: unknown): Record<string, unknown> {
+  if (!isRecord(node)) return {};
+  const inputs = node['inputs'];
+  return isRecord(inputs) ? inputs : {};
+}
+
+function nodeInputString(inputs: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = inputs[key];
+    if (typeof value === 'string' && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+/** True when a lowercase filename contains a token, not merely a substring of another word. */
+function hasToken(filename: string, token: string): boolean {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`).test(filename);
+}
+
+/**
+ * The line the loading view shows under the stage: specific enough that a slow run still
+ * tells the user which model or node is holding the GPU. The slot arguments describe a
+ * multi image batch, so one sampler can say "image 2 of 4".
+ */
+export function detailForNode(
+  node: unknown,
+  _nodeId: string,
+  _graph: Record<string, unknown>,
+  slot = 0,
+  totalSlots = 1,
+): string | undefined {
+  const classType = nodeClassType(node);
+  if (classType === null) return undefined;
+  const lowered = classType.toLowerCase();
+  const inputs = nodeInputs(node);
+
+  // CLIPLoader: the H3 graphs load either the enhancer or a Qwen text encoder here.
+  if (lowered.includes('clip') && lowered.includes('loader')) {
+    const name = (nodeInputString(inputs, ['clip_name', 'clip_name1', 'clip_name2', 'ckpt_name']) ?? '').toLowerCase();
+    if (name.includes('qwen3.8') || name.includes('qwen3.5') || hasToken(name, 'pe')) {
+      return 'Loading prompt enhancer model';
+    }
+    if (name.includes('qwen3vl')) return 'Loading Qwen3-VL text encoder';
+    return 'Loading text encoder';
+  }
+
+  if (lowered.startsWith('textgenerate')) return 'Rewriting & expanding prompt';
+
+  if (lowered.includes('unetloader') || lowered.includes('checkpointloader')) {
+    const name = (nodeInputString(inputs, ['unet_name', 'ckpt_name', 'model_name']) ?? '').toLowerCase();
+    if (name.includes('w4a8')) return 'Loading MiniMax H3 weights (W4A8)';
+    if (name.includes('int8')) return 'Loading MiniMax H3 weights (INT8)';
+    if (name.includes('minimax') || hasToken(name, 'h3')) return 'Loading MiniMax H3 weights';
+    return 'Loading diffusion model';
+  }
+
+  if (lowered.includes('vaeloader')) return 'Loading VAE decoder';
+  if (lowered.includes('loadimage')) return 'Preparing reference image';
+  if (lowered.includes('conditioning') || lowered.includes('encode')) {
+    return 'Encoding prompt & canvas conditioning';
+  }
+  if (lowered.includes('sampler')) {
+    return totalSlots > 1 ? `Denoising image ${slot + 1} of ${totalSlots}` : 'Denoising latent image';
+  }
+  if (lowered.includes('decode')) return 'Decoding latent to full-resolution pixels';
+  if (lowered.includes('saveimage') || lowered.includes('previewimage')) return 'Writing PNG output';
+  return undefined;
+}
+
+export interface ProgressWatch {
   /** Ties the socket to its prompt, once the server has answered with an id. */
   bind(promptId: string): void;
   /** True once real step progress arrived, so polling stops guessing at a percentage. */
@@ -1006,7 +1148,7 @@ interface ProgressWatch {
  * loop is the completion mechanism, so a backend, a proxy or a test without WebSocket
  * support only loses the finer progress, never the generation.
  */
-function createProgressWatch(
+export function createProgressWatch(
   wsUrl: string,
   graph: Record<string, unknown>,
   ctx: GenerationContext,
@@ -1017,18 +1159,27 @@ function createProgressWatch(
   for (const [nodeId, node] of Object.entries(graph)) {
     nodeStages.set(nodeId, stageForClassType(nodeClassType(node)));
   }
+  const totalSlots = samplerSlots === undefined ? 1 : Math.max(1, samplerSlots.size);
 
   let promptId: string | null = null;
   let sawProgress = false;
   // A shared prompt runs its samplers one after another, so the executing node decides
   // which tile the step progress belongs to.
   let activeIndex = index;
+  let activeStage = 'sampling';
   let socket: WebSocket | null = null;
   try {
     const SocketConstructor = globalThis.WebSocket;
     if (typeof SocketConstructor === 'function') socket = new SocketConstructor(wsUrl);
   } catch {
     socket = null;
+  }
+  if (socket !== null) {
+    try {
+      socket.binaryType = 'arraybuffer';
+    } catch {
+      // A socket implementation without binary support still gives us text progress.
+    }
   }
 
   const close = (): void => {
@@ -1040,6 +1191,22 @@ function createProgressWatch(
     } catch {
       // A socket that already closed needs nothing.
     }
+  };
+
+  const nodeDetail = (nodeId: string): string | undefined => {
+    const slot = samplerSlots?.get(nodeId) ?? activeIndex;
+    return detailForNode(graph[nodeId], nodeId, graph, slot, totalSlots);
+  };
+
+  const emitPreview = (buffer: ArrayBuffer | Uint8Array): void => {
+    const preview = parseBinaryPreview(buffer);
+    if (preview === null) return;
+    if (promptId !== null && preview.promptId !== undefined && preview.promptId !== promptId) return;
+    if (preview.nodeId !== undefined) {
+      const slot = samplerSlots?.get(preview.nodeId);
+      if (slot !== undefined) activeIndex = slot;
+    }
+    ctx.onEvent({ type: 'preview', index: activeIndex, dataUrl: preview.dataUrl });
   };
 
   const handleMessage = (text: string): void => {
@@ -1068,7 +1235,28 @@ function createProgressWatch(
       if (nodeId === null || nodeId.length === 0) return;
       const slot = samplerSlots?.get(nodeId);
       if (slot !== undefined) activeIndex = slot;
-      ctx.onEvent({ type: 'progress', index: activeIndex, stage: nodeStages.get(nodeId) ?? 'sampling' });
+      activeStage = nodeStages.get(nodeId) ?? 'sampling';
+      const detail = nodeDetail(nodeId);
+      ctx.onEvent({
+        type: 'progress',
+        index: activeIndex,
+        stage: activeStage,
+        ...(detail === undefined ? {} : { detail }),
+      });
+      return;
+    }
+
+    if (type === 'execution_cached') {
+      const nodes = payload['nodes'];
+      if (!sawProgress && Array.isArray(nodes) && nodes.length > 0) {
+        ctx.onEvent({
+          type: 'progress',
+          index: activeIndex,
+          stage: 'preparing',
+          detail: 'Models warm in VRAM',
+          cached: true,
+        });
+      }
       return;
     }
 
@@ -1078,10 +1266,20 @@ function createProgressWatch(
       if (typeof value !== 'number' || typeof max !== 'number') return;
       if (!Number.isFinite(value) || !Number.isFinite(max) || max <= 0) return;
       sawProgress = true;
+      if (activeStage === 'enhancing') {
+        ctx.onEvent({
+          type: 'progress',
+          index: activeIndex,
+          stage: 'enhancing',
+          detail: `Rewriting prompt (${value} / ${max} tokens)`,
+        });
+        return;
+      }
       ctx.onEvent({
         type: 'progress',
         index: activeIndex,
         stage: 'sampling',
+        detail: `Step ${value} of ${max}`,
         step: value,
         totalSteps: max,
         percent: Math.round((value / max) * 100),
@@ -1091,8 +1289,25 @@ function createProgressWatch(
 
   if (socket !== null) {
     socket.addEventListener('message', (event: MessageEvent<unknown>) => {
-      if (typeof event.data !== 'string') return;
-      handleMessage(event.data);
+      const data: unknown = event.data;
+      if (typeof data === 'string') {
+        handleMessage(data);
+        return;
+      }
+      if (data instanceof ArrayBuffer) {
+        emitPreview(data);
+        return;
+      }
+      if (ArrayBuffer.isView(data)) {
+        emitPreview(new Uint8Array(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength));
+        return;
+      }
+      if (typeof Blob !== 'undefined' && data instanceof Blob) {
+        void data
+          .arrayBuffer()
+          .then((buffer) => emitPreview(buffer))
+          .catch(() => undefined);
+      }
     });
     socket.addEventListener('error', close);
     socket.addEventListener('close', () => {
