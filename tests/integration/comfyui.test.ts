@@ -1,13 +1,18 @@
+import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { synthImage } from '../../src/core/png';
 import { ComfyUIError, createComfyUIAdapter, defaultWorkflowTemplate } from '../../src/core/providers/comfyui';
+import { LibraryStore } from '../../src/core/store';
 import type {
   GenerationEvent,
   GenerationRequest,
   ProviderConfig,
 } from '../../src/core/types';
+import { GenerationHub, type BatchStreamEvent } from '../../src/server/jobs';
 
 // A real PNG, used as the bytes ComfyUI serves from /view.
 const PNG_BYTES = synthImage({ width: 16, height: 16, seed: 7, label: 'comfyui test' });
@@ -551,5 +556,239 @@ describe('ComfyUI adapter', () => {
     ]) {
       expect(serialized).toContain(placeholder);
     }
+  });
+
+  it('emits an item event with the PNG bytes on success', async () => {
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-item' } },
+      historyResponse: () => ({
+        status: 200,
+        body: {
+          'prompt-item': {
+            outputs: { '9': { images: [{ filename: 'h3_item.png', subfolder: '', type: 'output' }] } },
+          },
+        },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(comfyConfig(stub.baseUrl, { pollIntervalMs: 10, timeoutMs: 2000 }));
+    const run = context();
+
+    const outcome = await adapter.generate(BASE_REQUEST, {
+      signal: run.signal,
+      onEvent: (event) => run.events.push(event),
+    });
+
+    const itemEvents = run.events.filter(
+      (event): event is Extract<GenerationEvent, { type: 'item' }> => event.type === 'item',
+    );
+    expect(itemEvents).toHaveLength(1);
+    const first = itemEvents[0];
+    if (first === undefined) throw new Error('expected one item event');
+    expect(first.index).toBe(0);
+    expect(first.item.ok).toBe(true);
+    expect(first.item.bytes).toEqual(PNG_BYTES);
+    expect(outcome.items).toHaveLength(1);
+  });
+
+  it('saves the PNG into a LibraryStore through GenerationHub', async () => {
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-hub' } },
+      historyResponse: () => ({
+        status: 200,
+        body: {
+          'prompt-hub': {
+            outputs: { '9': { images: [{ filename: 'h3_hub.png', subfolder: '', type: 'output' }] } },
+          },
+        },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const rootDir = await mkdtemp(path.join(tmpdir(), 'h3-comfy-hub-'));
+    try {
+      const store = new LibraryStore({ rootDir });
+      await store.init();
+      const config = comfyConfig(stub.baseUrl, { pollIntervalMs: 10, timeoutMs: 5000 });
+      const hub = new GenerationHub({ store, adapterFactory: (candidate) => createComfyUIAdapter(candidate) });
+      const batch = await hub.start(config, BASE_REQUEST);
+
+      const events: BatchStreamEvent[] = [];
+      hub.subscribe(batch.id, (event) => {
+        events.push(event);
+      });
+      const deadline = Date.now() + 5000;
+      while (!events.some((event) => event.type === 'batch') && Date.now() < deadline) {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 10);
+        });
+      }
+
+      const closing = events.find((event) => event.type === 'batch');
+      if (closing === undefined || closing.type !== 'batch') throw new Error('no batch event was published');
+      expect(closing.batch.status).toBe('complete');
+      expect(closing.batch.images).toHaveLength(1);
+
+      const stored = closing.batch.images[0];
+      if (stored === undefined) throw new Error('expected one stored image');
+      const read = await store.readImage(stored.id);
+      if (read === null) throw new Error('expected the image bytes in the library');
+      expect(Uint8Array.from(read.bytes)).toEqual(PNG_BYTES);
+      expect(read.meta.width).toBe(16);
+      expect(read.meta.height).toBe(16);
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it('marks a ComfyUI runtime execution_error as a retryable failed item', async () => {
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-runtime' } },
+      historyResponse: () => ({
+        status: 200,
+        body: {
+          'prompt-runtime': {
+            status: {
+              status_str: 'error',
+              completed: false,
+              messages: [
+                ['execution_start', { prompt_id: 'prompt-runtime' }],
+                [
+                  'execution_error',
+                  {
+                    prompt_id: 'prompt-runtime',
+                    node_id: '7',
+                    node_type: 'KSampler',
+                    exception_message: 'HIP out of memory',
+                    exception_type: 'torch.OutOfMemoryError',
+                  },
+                ],
+              ],
+            },
+          },
+        },
+      }),
+    });
+    const adapter = createComfyUIAdapter(comfyConfig(stub.baseUrl, { pollIntervalMs: 10, timeoutMs: 2000 }));
+    const run = context();
+
+    const outcome = await adapter.generate(BASE_REQUEST, {
+      signal: run.signal,
+      onEvent: (event) => run.events.push(event),
+    });
+
+    expect(outcome.items).toHaveLength(1);
+    const item = outcome.items[0];
+    if (item === undefined) throw new Error('expected one item');
+    expect(item.ok).toBe(false);
+    expect(item.failure?.code).toBe('execution_error');
+    expect(item.failure?.retryable).toBe(true);
+    expect(item.failure?.message).toContain('KSampler');
+    expect(item.failure?.message).toContain('HIP out of memory');
+
+    const itemEvents = run.events.filter(
+      (event): event is Extract<GenerationEvent, { type: 'item' }> => event.type === 'item',
+    );
+    expect(itemEvents).toHaveLength(1);
+    expect(itemEvents[0]?.index).toBe(0);
+    expect(itemEvents[0]?.item.failure?.code).toBe('execution_error');
+  });
+
+  it('runs a sequential batch when the template has no batch placeholder', async () => {
+    const sequentialTemplate = {
+      '1': {
+        class_type: 'KSampler',
+        inputs: { seed: '{{seed}}', steps: '{{steps}}', width: '{{width}}', height: '{{height}}' },
+      },
+      '2': { class_type: 'SaveImage', inputs: { filename_prefix: 'h3-studio', images: ['1', 0] } },
+    };
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-seq' } },
+      historyResponse: (poll) => {
+        if (poll === 1) {
+          return {
+            status: 200,
+            body: {
+              'prompt-seq': {
+                status: {
+                  status_str: 'error',
+                  messages: [
+                    ['execution_error', { node_id: '1', node_type: 'KSampler', exception_message: 'slot zero died' }],
+                  ],
+                },
+              },
+            },
+          };
+        }
+        return {
+          status: 200,
+          body: { 'prompt-seq': { outputs: { '2': { images: [{ filename: 'slot_one.png', subfolder: '' }] } } } },
+        };
+      },
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(
+      comfyConfig(stub.baseUrl, {
+        pollIntervalMs: 10,
+        timeoutMs: 2000,
+        workflowTemplate: JSON.stringify(sequentialTemplate),
+      }),
+    );
+    const request: GenerationRequest = { prompt: 'two plates', width: 512, height: 512, count: 2, seed: 1000 };
+    const run = context();
+
+    const outcome = await adapter.generate(request, {
+      signal: run.signal,
+      onEvent: (event) => run.events.push(event),
+    });
+
+    const posts = stub.requests.filter((entry) => entry.method === 'POST' && entry.path === '/prompt');
+    expect(posts).toHaveLength(2);
+    const seeds = posts.map((entry) => {
+      const graph = record(record(entry.body)['prompt']);
+      const sampler = nodesOfType(graph, 'KSampler')[0];
+      if (sampler === undefined) throw new Error('missing KSampler in a posted graph');
+      return inputsOf(sampler)['seed'];
+    });
+    expect(seeds).toEqual([1000, 1001]);
+
+    expect(outcome.items).toHaveLength(2);
+    expect(outcome.items[0]?.index).toBe(0);
+    expect(outcome.items[0]?.ok).toBe(false);
+    expect(outcome.items[0]?.failure?.code).toBe('execution_error');
+    expect(outcome.items[1]?.index).toBe(1);
+    expect(outcome.items[1]?.ok).toBe(true);
+    expect(outcome.items[1]?.bytes).toEqual(PNG_BYTES);
+
+    const itemEvents = run.events.filter(
+      (event): event is Extract<GenerationEvent, { type: 'item' }> => event.type === 'item',
+    );
+    expect(itemEvents.map((event) => event.index)).toEqual([0, 1]);
+    expect(itemEvents[0]?.item.ok).toBe(false);
+    expect(itemEvents[1]?.item.ok).toBe(true);
+  });
+
+  it('falls back to capabilities.fixedSteps when the request omits steps', async () => {
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-steps' } },
+      historyResponse: () => ({
+        status: 200,
+        body: { 'prompt-steps': { outputs: { '9': { images: [{ filename: 'fixed.png', subfolder: '' }] } } } },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(
+      comfyConfig(stub.baseUrl, {
+        pollIntervalMs: 10,
+        timeoutMs: 2000,
+        capabilities: { fixedSteps: 6, adjustableSteps: false },
+      }),
+    );
+    const run = context();
+
+    await adapter.generate(BASE_REQUEST, { signal: run.signal, onEvent: () => {} });
+
+    const sampler = nodesOfType(postedGraph(stub), 'KSampler')[0];
+    if (sampler === undefined) throw new Error('missing KSampler node');
+    expect(inputsOf(sampler)['steps']).toBe(6);
   });
 });

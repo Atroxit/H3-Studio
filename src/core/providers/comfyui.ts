@@ -36,7 +36,7 @@ const DEFAULT_STEPS = 20;
 const DEFAULT_CFG = 7;
 const DEFAULT_CHECKPOINT = 'v1-5-pruned-emaonly.safetensors';
 const DEFAULT_POLL_INTERVAL_MS = 1000;
-const DEFAULT_TIMEOUT_MS = 300_000;
+const DEFAULT_TIMEOUT_MS = 900_000;
 const DEFAULT_CLIENT_ID = 'h3-studio';
 const MAX_BATCH = 4;
 const MAX_POLL_PERCENT = 95;
@@ -369,6 +369,18 @@ function clampBatch(count: number): number {
   return Math.min(MAX_BATCH, Math.max(1, Math.trunc(count)));
 }
 
+/** A model with fixed sampling declares its step count in options.capabilities.fixedSteps. */
+function fixedStepsFromOptions(options: Record<string, unknown>): number | null {
+  const capabilities = options['capabilities'];
+  if (!isRecord(capabilities)) return null;
+  const fixedSteps = capabilities['fixedSteps'];
+  return typeof fixedSteps === 'number' && Number.isInteger(fixedSteps) && fixedSteps > 0 ? fixedSteps : null;
+}
+
+function templateHasBatchPlaceholder(template: WorkflowGraph): boolean {
+  return JSON.stringify(template).includes('{{batch}}');
+}
+
 function buildReplacements(
   request: GenerationRequest,
   options: Record<string, unknown>,
@@ -376,13 +388,16 @@ function buildReplacements(
   seed: number,
 ): Record<string, Replacement> {
   const checkpoint = readString(options, 'ckptName') ?? config.model ?? DEFAULT_CHECKPOINT;
+  // A retry from /api/batches/:id/retry carries no steps, so a fixed step model must
+  // still be sampled at its own step count instead of the generic default.
+  const steps = request.steps ?? fixedStepsFromOptions(options) ?? DEFAULT_STEPS;
   return {
     prompt: request.prompt,
     negativePrompt: request.negativePrompt ?? '',
     width: request.width,
     height: request.height,
     seed,
-    steps: request.steps ?? DEFAULT_STEPS,
+    steps,
     cfg: request.guidance ?? DEFAULT_CFG,
     ckpt: checkpoint,
     batch: clampBatch(request.count),
@@ -461,10 +476,19 @@ interface ComfyImageRef {
   subfolder: string;
 }
 
-/** Null means the history entry is not ready yet. */
-function imagesFromHistory(history: unknown, promptId: string): ComfyImageRef[] | null {
-  if (!isRecord(history) || !Object.hasOwn(history, promptId)) return null;
-  const entry = history[promptId];
+/** What one /history poll says about a prompt. */
+type HistoryState =
+  | { state: 'pending' }
+  | { state: 'error'; message: string }
+  | { state: 'done'; images: ComfyImageRef[] };
+
+interface ExecutionErrorDetails {
+  nodeType?: string;
+  nodeId?: string;
+  exceptionMessage?: string;
+}
+
+function imagesFromEntry(entry: unknown): ComfyImageRef[] {
   const outputs = isRecord(entry) ? entry['outputs'] : undefined;
   if (!isRecord(outputs)) return [];
   const images: ComfyImageRef[] = [];
@@ -477,6 +501,59 @@ function imagesFromHistory(history: unknown, promptId: string): ComfyImageRef[] 
     }
   }
   return images;
+}
+
+/**
+ * ComfyUI reports a runtime failure through history, not through POST /prompt: the entry
+ * carries status_str "error" and a messages list of [eventType, payload] tuples. The
+ * execution_error tuple names the node and the exception, which is what the user needs.
+ */
+function executionErrorDetails(status: Record<string, unknown>): ExecutionErrorDetails | null {
+  const messages = status['messages'];
+  if (!Array.isArray(messages)) return null;
+  for (const entry of messages) {
+    if (!Array.isArray(entry) || entry.length < 2) continue;
+    const eventType = entry[0];
+    const payload = entry[1];
+    if (eventType !== 'execution_error' || !isRecord(payload)) continue;
+    const details: ExecutionErrorDetails = {};
+    const nodeType = payload['node_type'];
+    const nodeId = payload['node_id'];
+    const exception = payload['exception_message'];
+    if (typeof nodeType === 'string' && nodeType.length > 0) details.nodeType = nodeType;
+    if (typeof nodeId === 'string' && nodeId.length > 0) details.nodeId = nodeId;
+    if (typeof nodeId === 'number' && Number.isFinite(nodeId)) details.nodeId = String(nodeId);
+    if (typeof exception === 'string' && exception.trim().length > 0) details.exceptionMessage = exception.trim();
+    return details;
+  }
+  return null;
+}
+
+function executionErrorMessage(promptId: string, details: ExecutionErrorDetails | null): string {
+  const fallback = `ComfyUI reported an execution error for prompt ${promptId}`;
+  if (details === null) return fallback;
+  const where = details.nodeType ?? (details.nodeId === undefined ? '' : `node ${details.nodeId}`);
+  const nodeLabel =
+    where.length === 0
+      ? ''
+      : details.nodeType !== undefined && details.nodeId !== undefined
+        ? `${where} (node ${details.nodeId})`
+        : where;
+  const parts: string[] = [];
+  if (nodeLabel.length > 0) parts.push(nodeLabel);
+  if (details.exceptionMessage !== undefined) parts.push(details.exceptionMessage);
+  if (parts.length === 0) return fallback;
+  return `ComfyUI execution error in ${parts.join(': ')}`;
+}
+
+function historyState(history: unknown, promptId: string): HistoryState {
+  if (!isRecord(history) || !Object.hasOwn(history, promptId)) return { state: 'pending' };
+  const entry = history[promptId];
+  const status = isRecord(entry) ? entry['status'] : undefined;
+  if (isRecord(status) && status['status_str'] === 'error') {
+    return { state: 'error', message: executionErrorMessage(promptId, executionErrorDetails(status)) };
+  }
+  return { state: 'done', images: imagesFromEntry(entry) };
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -506,12 +583,13 @@ interface PollOptions {
   timeoutMs: number;
 }
 
-async function waitForImages(
+async function waitForHistory(
   baseUrl: string,
   promptId: string,
   pollOptions: PollOptions,
   ctx: GenerationContext,
-): Promise<ComfyImageRef[]> {
+  index: number,
+): Promise<HistoryState> {
   const deadline = Date.now() + pollOptions.timeoutMs;
   let polls = 0;
   for (;;) {
@@ -523,15 +601,15 @@ async function waitForImages(
       );
     }
     polls += 1;
-    ctx.onEvent({ type: 'progress', index: 0, stage: 'sampling', percent: pollPercent(polls) });
+    ctx.onEvent({ type: 'progress', index, stage: 'sampling', percent: pollPercent(polls) });
     const response = await fetch(`${baseUrl}/history/${encodeURIComponent(promptId)}`, {
       signal: ctx.signal,
     });
     if (!response.ok) {
       throw new ComfyUIError(`ComfyUI GET /history failed with HTTP ${response.status}`, 'http');
     }
-    const images = imagesFromHistory(parseJson(await response.text()), promptId);
-    if (images !== null) return images;
+    const state = historyState(parseJson(await response.text()), promptId);
+    if (state.state !== 'pending') return state;
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
       throw new ComfyUIError(
@@ -586,6 +664,70 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
     timeoutMs: readPositiveNumber(options, 'timeoutMs', DEFAULT_TIMEOUT_MS),
   };
 
+  /** Fetches every image of one finished prompt, emitting each item as it settles. */
+  async function itemFromImage(
+    index: number,
+    image: ComfyImageRef,
+    seed: number,
+    startedMs: number,
+    ctx: GenerationContext,
+  ): Promise<GeneratedItem> {
+    try {
+      const bytes = await fetchImageBytes(baseUrl, image, ctx.signal);
+      return { index, ok: true, bytes, seed, durationMs: Date.now() - startedMs };
+    } catch (error) {
+      if (ctx.signal.aborted) throw error;
+      const message = `ComfyUI image ${image.filename} could not be fetched: ${errorMessage(error)}`;
+      return failedItem(index, message, 'image_fetch', true);
+    }
+  }
+
+  /**
+   * A template without {{batch}} runs one prompt per slot, sequentially. Everything already
+   * finished is kept: a late slot failure is one retryable item, not a lost batch.
+   */
+  async function generateSlot(
+    template: WorkflowGraph,
+    request: GenerationRequest,
+    slot: number,
+    slotSeed: number,
+    ctx: GenerationContext,
+  ): Promise<GeneratedItem> {
+    const slotStartedMs = Date.now();
+    let promptId: string;
+    try {
+      const graph = substituteWorkflow(
+        template,
+        buildReplacements({ ...request, count: 1 }, options, config, slotSeed),
+      );
+      promptId = await queuePrompt(baseUrl, clientId, graph, ctx.signal);
+    } catch (error) {
+      throwIfAborted(ctx.signal);
+      if (!(error instanceof ComfyUIError)) throw error;
+      return failedItem(slot, error.message, error.code, error.code !== 'invalid_template');
+    }
+    let images: ComfyImageRef[];
+    try {
+      const history = await waitForHistory(baseUrl, promptId, pollOptions, ctx, slot);
+      if (history.state === 'error') return failedItem(slot, history.message, 'execution_error', true);
+      images = history.state === 'done' ? history.images : [];
+    } catch (error) {
+      throwIfAborted(ctx.signal);
+      if (!(error instanceof ComfyUIError)) throw error;
+      return failedItem(slot, error.message, error.code, error.code !== 'invalid_template');
+    }
+    const image = images[0];
+    if (image === undefined) {
+      return failedItem(
+        slot,
+        `ComfyUI finished prompt ${promptId} without returning an image`,
+        'no_images',
+        true,
+      );
+    }
+    return itemFromImage(slot, image, slotSeed, slotStartedMs, ctx);
+  }
+
   async function generate(
     request: GenerationRequest,
     ctx: GenerationContext,
@@ -595,29 +737,47 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
     throwIfAborted(ctx.signal);
     const seed = resolveSeed(request.seed);
     const template = templateFromOptions(options);
-    const graph = substituteWorkflow(template, buildReplacements(request, options, config, seed));
-    const promptId = await queuePrompt(baseUrl, clientId, graph, ctx.signal);
-    const images = await waitForImages(baseUrl, promptId, pollOptions, ctx);
     const items: GeneratedItem[] = [];
-    for (const [index, image] of images.entries()) {
-      try {
-        const bytes = await fetchImageBytes(baseUrl, image, ctx.signal);
-        items.push({ index, ok: true, bytes, seed, durationMs: Date.now() - startedMs });
-      } catch (error) {
-        if (ctx.signal.aborted) throw error;
-        const message = `ComfyUI image ${image.filename} could not be fetched: ${errorMessage(error)}`;
-        items.push(failedItem(index, message, 'image_fetch', true));
-      }
-    }
-    if (items.length === 0) {
-      items.push(failedItem(0, `ComfyUI finished prompt ${promptId} without returning an image`, 'no_images', false));
-    }
-    return {
+    const outcome = (): GenerationOutcome => ({
       providerId: config.id,
       items,
       startedAt: startedAt.toISOString(),
       finishedAt: new Date().toISOString(),
-    };
+    });
+
+    if (request.count > 1 && !templateHasBatchPlaceholder(template)) {
+      for (let slot = 0; slot < request.count; slot += 1) {
+        throwIfAborted(ctx.signal);
+        const slotSeed = seed + slot;
+        const item = await generateSlot(template, request, slot, slotSeed, ctx);
+        items.push(item);
+        ctx.onEvent({ type: 'item', index: slot, item });
+      }
+      return outcome();
+    }
+
+    const graph = substituteWorkflow(template, buildReplacements(request, options, config, seed));
+    const promptId = await queuePrompt(baseUrl, clientId, graph, ctx.signal);
+    const history = await waitForHistory(baseUrl, promptId, pollOptions, ctx, 0);
+    if (history.state === 'error') {
+      const item = failedItem(0, history.message, 'execution_error', true);
+      items.push(item);
+      ctx.onEvent({ type: 'item', index: 0, item });
+      return outcome();
+    }
+    if (history.state === 'done') {
+      for (const [index, image] of history.images.entries()) {
+        const item = await itemFromImage(index, image, seed, startedMs, ctx);
+        items.push(item);
+        ctx.onEvent({ type: 'item', index, item });
+      }
+    }
+    if (items.length === 0) {
+      const item = failedItem(0, `ComfyUI finished prompt ${promptId} without returning an image`, 'no_images', false);
+      items.push(item);
+      ctx.onEvent({ type: 'item', index: 0, item });
+    }
+    return outcome();
   }
 
   return {

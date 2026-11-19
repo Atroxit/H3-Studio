@@ -30,7 +30,7 @@ const MAX_JSON_BYTES = 40 * 1024 * 1024;
 const MAX_IMAGE_IDS = 200;
 const MAX_GENERATION_COUNT = 10;
 const MIN_IMAGE_SIZE = 64;
-const MAX_IMAGE_SIZE = 4096;
+const MAX_IMAGE_SIZE = 8192;
 const MAX_BATCH_LIST = 500;
 
 const EXTENSION_BY_MIME: Record<string, string> = {

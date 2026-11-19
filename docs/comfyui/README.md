@@ -20,6 +20,10 @@ used at the top level.
   The graph depends on node types that older builds do not ship
   (`MiniMaxH3ImageConditioning`, `TextGenerateV2`, `ComfySwitchNode`, `JsonExtractString`,
   `StringReplace`).
+* Verified on 2026-11-19 against the installed pack **0.11.111** on ComfyUI `v0.46.0`: the
+  shipped `image_minimax_h3_image_t2i.json` matched
+  `docs/comfyui/reference/image_minimax_h3_image_t2i.json` byte for byte, so the derivation still
+  describes the template the server actually ships.
 * The API graph was **derived mechanically** from the subgraph, not retyped by hand. A throwaway
   script inside `%TEMP%` read the subgraph's `widgets_values_named` for every widget value, the
   subgraph's `links` table for every edge (using the link's `origin_id` and `origin_slot`, and the
@@ -74,9 +78,11 @@ Placeholders that exist in the adapter but are deliberately **not** used here:
 * `{{cfg}}`: H3 Image is a distilled model and the official graph samples at cfg `1`. A request
   level guidance value must not move it.
 * `{{ckpt}}`: the graph has three separate loaders with fixed file names, no checkpoint node.
-* `{{batch}}`: this graph has no `batch_size` input. One queued prompt produces one image, so the
-  provider options for this template should set `capabilities.maxBatch` to `1`. With a larger batch
-  the runner asks for N images, gets one, and reports the batch as partial.
+* `{{batch}}`: this graph has no `batch_size` input. One queued prompt produces one image. The
+  adapter detects the missing placeholder and, for `count > 1`, runs one prompt per slot
+  sequentially with `seed + slot`. A live batch of two at 2048x2048 completed in `319.36s`
+  (about 159 seconds per image) with two distinct PNGs, so `capabilities.maxBatch` can be 4 with
+  this template.
 * `{{negativePrompt}}`: unused, see the next section.
 
 ## The negative prompt path, kept exactly as the original
@@ -132,8 +138,16 @@ its `STRING` output is what actually reaches node `5`.
 
 ## Requirements
 
-* ComfyUI installed and reachable, version **0.45.0 or newer**, with the template pack nodes present.
-* The four model files visible to ComfyUI:
+* ComfyUI installed and reachable, version **0.45.0 or newer**, with the template pack nodes
+  present. The live verification used `v0.46.0` (`v0.46.0-2-gd5d59c401`), Python 3.12.13 in an
+  isolated venv at `E:\ComfyUI`, `comfyui-frontend-package` `1.59.6`, `comfy-kitchen` `0.2.41`
+  with its native `hip` backend active, and PyTorch `2.9.1+rocm7.2.1` from AMD's ROCm 7.2.1
+  Windows repository.
+* `comfy-aimdo` `0.6.0` is installed but `init_devices` returns False on ROCm 7.2, because
+  DynamicVRAM needs ROCm 7.14 or newer. The graph runs without it.
+* The four model files visible to ComfyUI. The verified install references them without copying
+  through `E:\ComfyUI\extra_model_paths.yaml` pointing at `E:/Models/h3-image`, and all four
+  appeared in `/object_info`:
 
 ```
 ComfyUI/models/diffusion_models/minimax_h3_image_pruned_int8_convrot.safetensors
@@ -142,21 +156,60 @@ ComfyUI/models/text_encoders/qwen3.5_9b_w4a8_gptq.safetensors
 ComfyUI/models/vae/minimax_h3_image_vae_fp16.safetensors
 ```
 
-## Status: not executed yet
+## Status: verified live on 2026-11-19
 
-**This graph has NOT been run against a live ComfyUI.** It is a careful, mechanically checked
-starting point, not a proven workflow. Before the H3 provider is described as working, one real
-generation must prove, on a live server:
+This graph was run against a live ComfyUI with MiniMax H3 Image INT8 on ROCm 7.2.1 and produced
+real images, with **zero edits to `h3-image-api-template.json`**. All five checks below passed:
 
-1. `POST /prompt` accepts the graph: no `node_errors`, meaning every `class_type` and every input
-   name is real on that server version.
-2. The server lists all four model filenames exactly as written here.
-3. `VAEDecode` to `SaveImage` writes one image and the adapter fetches it from `/view`.
-4. The raw prompt reaches the model with the switch off: the result follows the request prompt, and
-   the expander branch does not load.
-5. Width and height arrive as numbers equal to the request, not as strings and not as 3104.
+1. `POST /prompt` accepted the graph with `node_errors: {}`.
+2. The server listed all four model filenames exactly as written here.
+3. `VAEDecode` to `SaveImage` wrote one image and the adapter fetched it from `/view`.
+4. The raw prompt reached the model with the switch off: results followed the request prompt and
+   the 9B expander branch did not load.
+5. Width and height arrived as numbers equal to the request (`2048x2048`), not as strings and not
+   as the graph default `3104`.
 
-Nothing in this document is evidence that any of those five steps passed.
+Live environment:
+
+| Item | Value |
+| --- | --- |
+| OS and CPU | Windows 11, Ryzen 9 7950X3D, 31.15 GB RAM, 23.0 GB pagefile (`C:\pagefile.sys`) |
+| GPU | AMD Radeon RX 7900 XTX 24 GB, `gfx1100`, driver `32.0.32015.12012` |
+| ComfyUI | `v0.46.0` (`v0.46.0-2-gd5d59c401`), Python 3.12.13 venv via `uv` at `E:\ComfyUI` |
+| Template pack | `comfyui-workflow-templates` `0.11.111` |
+| Frontend | `comfyui-frontend-package` `1.59.6` |
+| PyTorch | `2.9.1+rocm7.2.1`, torchvision `0.24.1+rocm7.2.1`, torchaudio `2.9.1+rocm7.2.1`; `torch.cuda.is_available() == True` on the 7900 XTX, GPU matmul passed |
+| comfy-kitchen | `0.2.41`, native `hip` backend active (`int8_linear`, `dequantize_int8_convrot_weight_dtype`, `quantize_and_rotate_rowwise`) |
+| comfy-aimdo | `0.6.0`, `init_devices` returns False on ROCm 7.2, DynamicVRAM needs ROCm 7.14 or newer |
+
+Launch flags and measured behaviour:
+
+```
+python.exe -u main.py --listen 127.0.0.1 --port 8188 --cache-none --disable-pinned-memory --disable-smart-memory
+```
+
+* `NORMAL_VRAM` keeps the Qwen3-VL-32B text encoder on `cuda:0` with partial GPU offload: about
+  22.1 to 22.6 GB loaded in VRAM and 3.3 to 3.8 GB offloaded. `--lowvram` forced the 32B encoder
+  onto the CPU and was discarded.
+* The DiT (`minimax_h3_image_pruned_int8_convrot.safetensors`, 20.0 GB) loads 100% into the 24 GB
+  card and samples 6 Euler steps at 2048x2048 in about 12 seconds (`2.16 s/it`).
+* A direct smoke prompt (`2048x2048`, 6 steps, seed 42, a teacup on an oak table) took `102.75s`
+  wall (`102.18s` in ComfyUI history) and wrote
+  `E:\ComfyUI\output\minimax_h3_image_t2i_00002_.png` (5,966,084 bytes).
+* `E:\ComfyUI\custom_nodes\h3_memory_handoff.py`, under `--cache-none`, discards loaded GPU models
+  in place at `post-minimax-clip-encode` (on `comfy.sd.CLIP.encode_from_tokens_scheduled`),
+  `pre-load_clip`, `pre-load_diffusion_model` and `pre-VAEDecode`. It pops
+  `comfy.model_management.current_loaded_models`, releases the tensors, runs `gc.collect()` twice
+  and `torch.cuda.empty_cache()`, and never calls `model_unload()`. Calling `unload_all_models()`
+  instead copies the GPU weights into CPU RAM first (observed crash in `unpatch_model` ->
+  `model.to("cpu")` -> `alloc_cpu`). Without the handoff, GPU commit plus CPU tensors passed the
+  54.15 GB Windows commit limit and the process died with `0xC0000005`.
+* With the handoff, private commit stayed flat at `7.74` to `7.84 GB` between stages, `5.64` to
+  `5.69 GB` idle after each prompt, peak working set `23.69 GB`, minimum free VRAM `1.37 GB`, and
+  no growth across 4 consecutive prompts.
+
+Not run in this pass: a live 16 MP generation (the presets exist and pass validation, only
+2048x2048 was sampled) and the prompt expander with `node "22".inputs.switch` set to `true`.
 
 ## Mapping uncertainties
 
@@ -200,8 +253,14 @@ value, wrong link slot, extra input) and failed on each mutation.
 ## Using it
 
 Store the whole file as the string value of the provider option `workflowTemplate`, with
-`capabilities` tuned for H3: `negativePrompt: false`, `guidance: false`, `adjustableSteps: true`,
-`maxBatch: 1`, `arbitrarySize: true`, and presets around the 4 MP to 16 MP range the template notes
-recommend. The reference workflow's own note says H3 Image works well from about 4 MP up, best near
-16 MP, with 16 MP examples such as 4096x4096, 4736x3552 and 5472x3072. Small canvases give poor
-results, so the default 512x512 preset of the generic ComfyUI provider is a bad fit for this graph.
+`capabilities` tuned for H3: `negativePrompt: false`, `guidance: false`, `adjustableSteps: false`,
+`fixedSteps: 6`, `maxBatch: 4`, `arbitrarySize: true`, `sizeMultiple: 32`, and presets at 4 MP and
+16 MP (`2048x2048`, `4096x4096`, `4736x3552`, `3552x4736`, `5472x3072`, `3072x5472`). That is what
+`H3_IMAGE_CAPABILITIES` in `src/web/App.tsx` supplies. Set the provider option `timeoutMs` to
+`900000`: a single 2048x2048 image measured `102s` directly in ComfyUI and `157` to `178s` through
+the app, and a batch of two ran `319s` as two sequential prompts.
+
+The reference workflow's own note says H3 Image works well from about 4 MP up, best near 16 MP.
+Small canvases give poor results, so the default 512x512 preset of the generic ComfyUI provider is a
+bad fit for this graph. `src/server/app.ts` now allows canvases up to `8192` per side, so all five
+16 MP presets pass validation; only `2048x2048` has actually been sampled so far.

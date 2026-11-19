@@ -152,10 +152,11 @@ const H3_IMAGE_CAPABILITIES: ProviderCapabilities = {
   fixedSteps: 6,
   guidance: false,
   maxReferenceImages: 0,
-  maxBatch: 1,
+  maxBatch: 4,
   arbitrarySize: true,
   sizeMultiple: 32,
   presets: [
+    { id: '2048x2048', label: '2048x2048 (4 MP)', width: 2048, height: 2048 },
     { id: '4096x4096', label: '4096x4096', width: 4096, height: 4096 },
     { id: '4736x3552', label: '4736x3552', width: 4736, height: 3552 },
     { id: '3552x4736', label: '3552x4736', width: 3552, height: 4736 },
@@ -164,7 +165,10 @@ const H3_IMAGE_CAPABILITIES: ProviderCapabilities = {
   ],
   outputFormats: ['png'],
   streamingProgress: true,
-  notes: ['H3 fixes 6 steps and guidance 1, and it rejects a negative prompt.'],
+  notes: [
+    'H3 fixes 6 steps and guidance 1, and it rejects a negative prompt.',
+    'Batches above one run as sequential single image prompts.',
+  ],
 };
 
 function formatBytes(bytes: number): string {

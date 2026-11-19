@@ -582,6 +582,23 @@ describe('references and generation', () => {
     expect(batch.status).toBe('cancelled');
   });
 
+  it('accepts a 16 MP H3 canvas of 5472 by 3072', async () => {
+    const result = await api<{ batchId: string }>('POST', '/api/generations', {
+      providerId: 'mock',
+      prompt: 'a wide 16 MP plate',
+      width: 5472,
+      height: 3072,
+      count: 1,
+      seed: 5,
+    });
+    expect(result.status).toBe(202);
+    const batch = await waitForSettled(bodyOf(result).batchId);
+    expect(batch.status).toBe('complete');
+    expect(batch.images).toHaveLength(1);
+    expect(batch.images[0]?.width).toBe(5472);
+    expect(batch.images[0]?.height).toBe(3072);
+  });
+
   it('rejects malformed generation bodies and unknown providers', async () => {
     const bodies = [
       { providerId: 'mock', prompt: '', width: 512, height: 512, count: 1 },
