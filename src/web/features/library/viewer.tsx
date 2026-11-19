@@ -2,7 +2,16 @@
 // Arrow keys move through the batch, Escape closes, and focus goes back to the
 // tile that opened it.
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
 import type { BatchRecord } from '../../../core/types';
 import { imageUrl } from '../../api';
 import { Button } from '../../components';
@@ -11,6 +20,67 @@ import { formatBytes, formatCount, formatTimestamp, orderedImages } from './useL
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/** The drag distance, in pixels, that turns a click into a pan. */
+const DRAG_THRESHOLD = 4;
+
+export interface ZoomScrollInput {
+  /** Normalized click point inside the fitted image, 0..1. */
+  ratioX: number;
+  ratioY: number;
+  /** Desired anchor position inside the scroll viewport (e.g. cursor X/Y relative to viewport, or viewport/2 for centering). */
+  anchorX: number;
+  anchorY: number;
+  /** Full rendered image width/height at 1:1 (actual) scale. */
+  contentWidth: number;
+  contentHeight: number;
+  /** Inner offset of the image inside the scroll container (e.g. border/margin offset). */
+  contentOffsetX: number;
+  contentOffsetY: number;
+  /** Visible viewport dimensions of the scroll container (clientWidth, clientHeight). */
+  viewportWidth: number;
+  viewportHeight: number;
+  /** Total scrollable dimensions of the scroll container (scrollWidth, scrollHeight). */
+  scrollWidth: number;
+  scrollHeight: number;
+}
+
+function clampUnit(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(0, value));
+}
+
+/**
+ * Works out where the scroll container must sit so the clicked spot on the
+ * fitted image lands under the cursor once the image is shown at 1:1.
+ */
+export function computeZoomScroll(input: ZoomScrollInput): { left: number; top: number } {
+  const targetX = input.contentOffsetX + clampUnit(input.ratioX) * input.contentWidth;
+  const targetY = input.contentOffsetY + clampUnit(input.ratioY) * input.contentHeight;
+  const maxLeft = Math.max(0, input.scrollWidth - input.viewportWidth);
+  const maxTop = Math.max(0, input.scrollHeight - input.viewportHeight);
+  return {
+    left: Math.round(Math.min(maxLeft, Math.max(0, targetX - input.anchorX))),
+    top: Math.round(Math.min(maxTop, Math.max(0, targetY - input.anchorY))),
+  };
+}
+
+interface PendingZoom {
+  ratioX: number;
+  ratioY: number;
+  /** Raw cursor screen coordinates, or null to centre the image in the viewport. */
+  clientX: number | null;
+  clientY: number | null;
+}
+
+interface DragStart {
+  pointerId: number;
+  clientX: number;
+  clientY: number;
+  scrollLeft: number;
+  scrollTop: number;
+  moved: boolean;
+}
 
 export interface ImageViewerProps {
   batch: BatchRecord;
@@ -47,6 +117,13 @@ export function ImageViewer({
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const pendingZoomRef = useRef<PendingZoom | null>(null);
+  const suppressClickRef = useRef(false);
+  const dragRef = useRef<DragStart | null>(null);
+  const detachDragListenersRef = useRef<(() => void) | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
 
   // The overlay takes focus, and hands it back to the opener when it closes.
   useEffect(() => {
@@ -108,9 +185,155 @@ export function ImageViewer({
     };
   }, [images.length, onClose]);
 
+  // Drop any window pan listeners if the viewer unmounts mid drag.
+  useEffect(
+    () => () => {
+      detachDragListenersRef.current?.();
+      detachDragListenersRef.current = null;
+    },
+    [],
+  );
+
+  // Apply the pending zoom target once the 1:1 layout exists and before paint.
+  useLayoutEffect(() => {
+    if (zoom !== 'actual') return;
+    const wrap = wrapRef.current;
+    const img = imageRef.current;
+    const pending = pendingZoomRef.current;
+    pendingZoomRef.current = null;
+    if (wrap === null || img === null || pending === null) return;
+    const wrapRect = wrap.getBoundingClientRect();
+    const imgRect = img.getBoundingClientRect();
+    if (imgRect.width <= 0 || imgRect.height <= 0) return;
+    // The wrap may have grown since the click, so the anchor is recomputed against
+    // the post-zoom viewport rect.
+    const anchorX = pending.clientX === null ? wrap.clientWidth / 2 : pending.clientX - wrapRect.left;
+    const anchorY = pending.clientY === null ? wrap.clientHeight / 2 : pending.clientY - wrapRect.top;
+    const next = computeZoomScroll({
+      ratioX: pending.ratioX,
+      ratioY: pending.ratioY,
+      anchorX,
+      anchorY,
+      contentWidth: imgRect.width,
+      contentHeight: imgRect.height,
+      contentOffsetX: imgRect.left - wrapRect.left + wrap.scrollLeft,
+      contentOffsetY: imgRect.top - wrapRect.top + wrap.scrollTop,
+      viewportWidth: wrap.clientWidth,
+      viewportHeight: wrap.clientHeight,
+      scrollWidth: wrap.scrollWidth,
+      scrollHeight: wrap.scrollHeight,
+    });
+    wrap.scrollLeft = next.left;
+    wrap.scrollTop = next.top;
+  }, [zoom]);
+
   const safePosition = images.length === 0 ? 0 : Math.min(position, images.length - 1);
   const image = images[safePosition];
-  const toggleZoom = (): void => setZoom((current) => (current === 'fit' ? 'actual' : 'fit'));
+
+  // A different image always opens fitted, so a stale 1:1 offset never carries over.
+  // A pending drag is dropped too, and its listeners are detached, so navigating with
+  // the arrow keys mid-drag cannot leave the pan state stuck.
+  useEffect(() => {
+    detachDragListenersRef.current?.();
+    detachDragListenersRef.current = null;
+    dragRef.current = null;
+    setZoom('fit');
+    setIsDragging(false);
+    pendingZoomRef.current = null;
+    suppressClickRef.current = false;
+  }, [image?.id]);
+
+  const toggleZoom = (): void => {
+    suppressClickRef.current = false;
+    if (zoom === 'actual') {
+      pendingZoomRef.current = null;
+      setZoom('fit');
+      return;
+    }
+    pendingZoomRef.current = { ratioX: 0.5, ratioY: 0.5, clientX: null, clientY: null };
+    setZoom('actual');
+  };
+
+  const handleImageClick = (event: ReactMouseEvent<HTMLButtonElement>): void => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    if (zoom === 'actual') {
+      setZoom('fit');
+      return;
+    }
+    const wrap = wrapRef.current;
+    const img = imageRef.current;
+    if (event.detail > 0 && wrap !== null && img !== null) {
+      const imgRect = img.getBoundingClientRect();
+      if (imgRect.width > 0 && imgRect.height > 0) {
+        pendingZoomRef.current = {
+          ratioX: (event.clientX - imgRect.left) / imgRect.width,
+          ratioY: (event.clientY - imgRect.top) / imgRect.height,
+          clientX: event.clientX,
+          clientY: event.clientY,
+        };
+        setZoom('actual');
+        return;
+      }
+    }
+    toggleZoom();
+  };
+
+  const handlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>): void => {
+    suppressClickRef.current = false;
+    if (zoom !== 'actual' || event.button !== 0) return;
+    const wrap = wrapRef.current;
+    if (wrap === null) return;
+    detachDragListenersRef.current?.();
+
+    const drag: DragStart = {
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      scrollLeft: wrap.scrollLeft,
+      scrollTop: wrap.scrollTop,
+      moved: false,
+    };
+    dragRef.current = drag;
+
+    const handleMove = (moveEvent: PointerEvent): void => {
+      if (moveEvent.pointerId !== drag.pointerId) return;
+      const dx = moveEvent.clientX - drag.clientX;
+      const dy = moveEvent.clientY - drag.clientY;
+      if (!drag.moved) {
+        if (Math.hypot(dx, dy) <= DRAG_THRESHOLD) return;
+        drag.moved = true;
+        setIsDragging(true);
+      }
+      moveEvent.preventDefault();
+      wrap.scrollLeft = drag.scrollLeft - dx;
+      wrap.scrollTop = drag.scrollTop - dy;
+    };
+
+    const finish = (upEvent: PointerEvent): void => {
+      if (upEvent.pointerId !== drag.pointerId) return;
+      detach();
+      if (dragRef.current === drag) dragRef.current = null;
+      if (!drag.moved) return;
+      // The click that follows this release belongs to the pan, not to a zoom toggle.
+      suppressClickRef.current = true;
+      setIsDragging(false);
+    };
+
+    const detach = (): void => {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      if (detachDragListenersRef.current === detach) detachDragListenersRef.current = null;
+    };
+    detachDragListenersRef.current = detach;
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+  };
 
   const copyPrompt = async (): Promise<void> => {
     try {
@@ -202,20 +425,32 @@ export function ImageViewer({
             >
               <ChevronIcon pointsLeft />
             </button>
-            <div className={zoom === 'actual' ? 'lb-viewer-image-wrap is-actual' : 'lb-viewer-image-wrap'}>
+            <div
+              className={[
+                'lb-viewer-image-wrap',
+                zoom === 'actual' ? 'is-actual' : '',
+                isDragging ? 'is-dragging' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
+              ref={wrapRef}
+            >
               <button
                 type="button"
                 className="lb-viewer-image-button"
-                onClick={toggleZoom}
+                onClick={handleImageClick}
+                onPointerDown={handlePointerDown}
                 aria-label={zoom === 'actual' ? 'Fit the image to the window' : 'Show the image at actual pixels'}
                 aria-pressed={zoom === 'actual'}
               >
                 <img
                   className="lb-viewer-image"
+                  ref={imageRef}
                   src={imageUrl(image.id)}
                   alt={`Image ${safePosition + 1} of ${images.length} in the batch for ${batch.prompt}`}
                   width={image.width}
                   height={image.height}
+                  draggable={false}
                 />
               </button>
             </div>
@@ -278,8 +513,8 @@ export function ImageViewer({
         </dl>
 
         <p className="lb-viewer-hint">
-          Arrow keys move between images. Escape closes the viewer. Click the image or 1:1 to switch between fit and
-          actual pixels.
+          Arrow keys move between images. Escape closes the viewer. Click any spot to zoom to 1:1, drag to pan, and
+          click again to fit.
         </p>
       </div>
     </div>

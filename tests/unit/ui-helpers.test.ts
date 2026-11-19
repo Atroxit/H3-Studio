@@ -9,6 +9,7 @@ import {
   sizeProblem,
   uniqueNotes,
 } from '../../src/web/features/generate/helpers';
+import { computeZoomScroll, type ZoomScrollInput } from '../../src/web/features/library/viewer';
 
 describe('ratioOf', () => {
   it('names the canonical ratios the presets actually mean', () => {
@@ -87,6 +88,62 @@ describe('the H3 prompt expander helper', () => {
     ).toBeNull();
     expect(setH3ExpanderState('{}', true)).toBeNull();
     expect(setH3ExpanderState('not json', true)).toBeNull();
+  });
+});
+
+describe('computeZoomScroll', () => {
+  const base: ZoomScrollInput = {
+    ratioX: 0.5,
+    ratioY: 0.5,
+    anchorX: 400,
+    anchorY: 300,
+    contentWidth: 2000,
+    contentHeight: 1000,
+    contentOffsetX: 0,
+    contentOffsetY: 0,
+    viewportWidth: 800,
+    viewportHeight: 600,
+    scrollWidth: 2000,
+    scrollHeight: 1000,
+  };
+
+  it('zooms toward the bottom-right spot that was clicked', () => {
+    expect(computeZoomScroll({ ...base, ratioX: 0.9, ratioY: 0.9, anchorX: 760, anchorY: 560 })).toEqual({
+      left: 1040,
+      top: 340,
+    });
+  });
+
+  it('centres the scroll offset for a centre click', () => {
+    expect(computeZoomScroll(base)).toEqual({ left: 600, top: 200 });
+  });
+
+  it('clamps a top-left click to the scroll origin', () => {
+    expect(computeZoomScroll({ ...base, ratioX: 0.02, ratioY: 0.02, anchorX: 100, anchorY: 100 })).toEqual({
+      left: 0,
+      top: 0,
+    });
+  });
+
+  it('clamps a bottom-right click to the maximum scroll offset', () => {
+    expect(computeZoomScroll({ ...base, ratioX: 1, ratioY: 1, anchorX: 10, anchorY: 10 })).toEqual({
+      left: 1200,
+      top: 400,
+    });
+  });
+
+  it('returns the origin when the content fits inside the viewport', () => {
+    expect(
+      computeZoomScroll({
+        ...base,
+        ratioX: 1,
+        ratioY: 1,
+        contentWidth: 400,
+        contentHeight: 300,
+        scrollWidth: 500,
+        scrollHeight: 300,
+      }),
+    ).toEqual({ left: 0, top: 0 });
   });
 });
 

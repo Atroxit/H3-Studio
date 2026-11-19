@@ -538,11 +538,18 @@
 .lb-viewer-image-wrap.is-actual .lb-viewer-image-button {
   width: max-content;
   margin: 0 auto;
-  cursor: zoom-out;
+  cursor: grab;
+  user-select: none;
+}
+
+.lb-viewer-image-wrap.is-dragging .lb-viewer-image-button {
+  cursor: grabbing;
 }
 
 .lb-viewer-image {
   display: block;
+  width: auto;
+  height: auto;
   max-width: 100%;
   max-height: calc(100vh - 220px);
   margin: 0 auto;
@@ -550,6 +557,8 @@
   border-radius: 6px;
   background: var(--panel-sunken);
   object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .lb-viewer-image-wrap.is-actual .lb-viewer-image {
