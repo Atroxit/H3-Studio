@@ -45,6 +45,8 @@ export interface GenerationRequest {
   steps?: number;
   guidance?: number;
   referenceIds?: string[];
+  /** Runs the graph's prompt enhancer, when the graph has one and no reference image is in play. */
+  enhancePrompt?: boolean;
   extra?: Record<string, unknown>;
 }
 
@@ -93,6 +95,16 @@ export interface ProviderAdapter {
   generate(request: GenerationRequest, ctx: GenerationContext): Promise<GenerationOutcome>;
 }
 
+/** How the studio starts a local backend it manages, instead of asking the user to. */
+export interface ProviderLaunchConfig {
+  enabled: boolean;
+  command: string;
+  args?: string[];
+  cwd?: string;
+  /** How long to wait for the backend to answer its health check. Defaults to 60 s. */
+  waitForHealthMs?: number;
+}
+
 export interface ProviderConfig {
   id: string;
   kind: ProviderKind;
@@ -102,6 +114,8 @@ export interface ProviderConfig {
   model?: string;
   /** A provider the studio may use. Absent means enabled. False keeps it in settings but out of the way. */
   enabled?: boolean;
+  /** A process the studio spawns on boot and stops on shutdown. */
+  launch?: ProviderLaunchConfig;
   options?: Record<string, unknown>;
 }
 

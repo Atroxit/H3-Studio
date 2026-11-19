@@ -962,6 +962,40 @@
   min-height: 56px;
 }
 
+/* A switch with its explanation, so the setting reads as one control. */
+.gen-check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-control);
+  background: var(--panel-sunken);
+  cursor: pointer;
+}
+
+.gen-check input {
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+.gen-check input:disabled {
+  cursor: not-allowed;
+}
+
+.gen-check-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.gen-check-title {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text);
+}
+
 .gen-ref-list {
   display: flex;
   flex-direction: column;

@@ -39,6 +39,7 @@ const DEFAULT_CFG = 7;
 const DEFAULT_CHECKPOINT = 'v1-5-pruned-emaonly.safetensors';
 const DEFAULT_POLL_INTERVAL_MS = 1000;
 const DEFAULT_TIMEOUT_MS = 900_000;
+const INTERRUPT_TIMEOUT_MS = 2000;
 const DEFAULT_CLIENT_ID = 'h3-studio';
 const MAX_BATCH = 4;
 const MAX_POLL_PERCENT = 95;
@@ -492,6 +493,38 @@ export function attachReferenceImages(
 }
 
 /**
+ * Turns the graph's prompt enhancer on or off. The H3 template routes the prompt through
+ * a ComfySwitchNode whose switch picks the raw prompt or the Qwen3.5 9B expansion, so
+ * toggling that node is the whole feature. An alteration must keep the user's own words,
+ * so a reference image always forces the enhancer off. The graph is cloned: a template
+ * from options is shared across requests and runs.
+ */
+export function applyPromptEnhancer(
+  graph: Record<string, unknown>,
+  enhancePrompt: boolean | undefined,
+  hasReferences: boolean,
+): Record<string, unknown> {
+  if (enhancePrompt === undefined) return graph;
+  const wanted = hasReferences ? false : enhancePrompt;
+  const cloned: Record<string, unknown> = {};
+  let changed = false;
+  for (const [nodeId, node] of Object.entries(graph)) {
+    if (!isRecord(node)) {
+      cloned[nodeId] = node;
+      continue;
+    }
+    const inputs = node['inputs'];
+    if (nodeClassType(node) === 'ComfySwitchNode' && isRecord(inputs) && typeof inputs['switch'] === 'boolean') {
+      cloned[nodeId] = { ...node, inputs: { ...inputs, switch: wanted } };
+      changed = true;
+      continue;
+    }
+    cloned[nodeId] = node;
+  }
+  return changed ? cloned : graph;
+}
+
+/**
  * H3 reads a reference image from a <Picture N> token in the prompt. A plain alteration
  * instruction names no picture, so the first one is added; a prompt that already names a
  * picture is left exactly as the user wrote it.
@@ -707,6 +740,158 @@ function pollPercent(polls: number): number {
   return Math.min(MAX_POLL_PERCENT, polls * 10);
 }
 
+/** The same host and port, spoken over a WebSocket. */
+function websocketBaseUrl(baseUrl: string): string {
+  if (baseUrl.startsWith('https://')) return `wss://${baseUrl.slice('https://'.length)}`;
+  if (baseUrl.startsWith('http://')) return `ws://${baseUrl.slice('http://'.length)}`;
+  return baseUrl;
+}
+
+/**
+ * Aborting a wait must stop the work, not just stop watching it. This is best effort:
+ * a backend that is already unreachable has nothing to interrupt.
+ */
+async function interruptPrompt(baseUrl: string, promptId: string): Promise<void> {
+  try {
+    await fetch(`${baseUrl}/interrupt`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ prompt_id: promptId }),
+      signal: AbortSignal.timeout(INTERRUPT_TIMEOUT_MS),
+    });
+  } catch {
+    // The generation is failing on the abort anyway, so a lost interrupt changes nothing.
+  }
+}
+
+/** The friendly stage a node belongs to, from its class name. */
+function stageForClassType(classType: string | null): string {
+  if (classType === null) return 'sampling';
+  const lowered = classType.toLowerCase();
+  if (lowered.includes('sampler')) return 'sampling';
+  if (lowered.includes('decode')) return 'decoding';
+  if (
+    lowered.includes('encode') ||
+    lowered.includes('conditioning') ||
+    lowered.includes('text') ||
+    lowered.includes('clip') ||
+    lowered.includes('loader')
+  ) {
+    return 'encoding';
+  }
+  return 'sampling';
+}
+
+interface ProgressWatch {
+  /** Ties the socket to its prompt, once the server has answered with an id. */
+  bind(promptId: string): void;
+  /** True once real step progress arrived, so polling stops guessing at a percentage. */
+  sawProgress(): boolean;
+  close(): void;
+}
+
+/**
+ * Listens to ComfyUI's own progress socket. Every failure here is silent: the polling
+ * loop is the completion mechanism, so a backend, a proxy or a test without WebSocket
+ * support only loses the finer progress, never the generation.
+ */
+function createProgressWatch(
+  wsUrl: string,
+  graph: Record<string, unknown>,
+  ctx: GenerationContext,
+  index: number,
+): ProgressWatch {
+  const nodeStages = new Map<string, string>();
+  for (const [nodeId, node] of Object.entries(graph)) {
+    nodeStages.set(nodeId, stageForClassType(nodeClassType(node)));
+  }
+
+  let promptId: string | null = null;
+  let sawProgress = false;
+  let socket: WebSocket | null = null;
+  try {
+    const SocketConstructor = globalThis.WebSocket;
+    if (typeof SocketConstructor === 'function') socket = new SocketConstructor(wsUrl);
+  } catch {
+    socket = null;
+  }
+
+  const close = (): void => {
+    const current = socket;
+    socket = null;
+    if (current === null) return;
+    try {
+      current.close();
+    } catch {
+      // A socket that already closed needs nothing.
+    }
+  };
+
+  const handleMessage = (text: string): void => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text) as unknown;
+    } catch {
+      return;
+    }
+    if (!isRecord(parsed)) return;
+    const type = parsed['type'];
+    const payload = parsed['data'];
+    if (!isRecord(payload)) return;
+    const messagePrompt = payload['prompt_id'];
+    if (promptId !== null && typeof messagePrompt === 'string' && messagePrompt !== promptId) return;
+
+    if (type === 'executing') {
+      const node = payload['node'];
+      const nodeId =
+        typeof node === 'string'
+          ? node
+          : typeof node === 'number' && Number.isFinite(node)
+            ? String(node)
+            : null;
+      // A null node means the prompt finished. History polling reports the completion.
+      if (nodeId === null || nodeId.length === 0) return;
+      ctx.onEvent({ type: 'progress', index, stage: nodeStages.get(nodeId) ?? 'sampling' });
+      return;
+    }
+
+    if (type === 'progress') {
+      const value = payload['value'];
+      const max = payload['max'];
+      if (typeof value !== 'number' || typeof max !== 'number') return;
+      if (!Number.isFinite(value) || !Number.isFinite(max) || max <= 0) return;
+      sawProgress = true;
+      ctx.onEvent({
+        type: 'progress',
+        index,
+        stage: 'sampling',
+        step: value,
+        totalSteps: max,
+        percent: Math.round((value / max) * 100),
+      });
+    }
+  };
+
+  if (socket !== null) {
+    socket.addEventListener('message', (event: MessageEvent<unknown>) => {
+      if (typeof event.data !== 'string') return;
+      handleMessage(event.data);
+    });
+    socket.addEventListener('error', close);
+    socket.addEventListener('close', () => {
+      socket = null;
+    });
+  }
+
+  return {
+    bind(next: string): void {
+      promptId = next;
+    },
+    sawProgress: () => sawProgress,
+    close,
+  };
+}
+
 interface PollOptions {
   intervalMs: number;
   timeoutMs: number;
@@ -718,6 +903,7 @@ async function waitForHistory(
   pollOptions: PollOptions,
   ctx: GenerationContext,
   index: number,
+  watch: ProgressWatch,
 ): Promise<HistoryState> {
   const deadline = Date.now() + pollOptions.timeoutMs;
   let polls = 0;
@@ -730,7 +916,11 @@ async function waitForHistory(
       );
     }
     polls += 1;
-    ctx.onEvent({ type: 'progress', index, stage: 'sampling', percent: pollPercent(polls) });
+    // Real step counts win. The poll estimate only fills the gap before the socket
+    // reports anything, so a WebSocket backend never shows a made up percentage.
+    if (!watch.sawProgress()) {
+      ctx.onEvent({ type: 'progress', index, stage: 'sampling', percent: pollPercent(polls) });
+    }
     const response = await fetch(`${baseUrl}/history/${encodeURIComponent(promptId)}`, {
       signal: ctx.signal,
     });
@@ -747,6 +937,39 @@ async function waitForHistory(
       );
     }
     await sleep(Math.min(pollOptions.intervalMs, remaining), ctx.signal);
+  }
+}
+
+interface PromptRun {
+  promptId: string;
+  history: HistoryState;
+}
+
+/**
+ * Queues one graph, streams its progress, and waits for its history entry. Aborting
+ * here also tells ComfyUI to interrupt, so GPU sampling stops immediately.
+ */
+async function runPrompt(
+  baseUrl: string,
+  wsUrl: string,
+  clientId: string,
+  graph: Record<string, unknown>,
+  pollOptions: PollOptions,
+  ctx: GenerationContext,
+  index: number,
+): Promise<PromptRun> {
+  const watch = createProgressWatch(wsUrl, graph, ctx, index);
+  let promptId: string | null = null;
+  try {
+    promptId = await queuePrompt(baseUrl, clientId, graph, ctx.signal);
+    watch.bind(promptId);
+    const history = await waitForHistory(baseUrl, promptId, pollOptions, ctx, index, watch);
+    return { promptId, history };
+  } catch (error) {
+    if (promptId !== null && ctx.signal.aborted) await interruptPrompt(baseUrl, promptId);
+    throw error;
+  } finally {
+    watch.close();
   }
 }
 
@@ -788,6 +1011,7 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
   const baseUrl = config.baseUrl.replace(/\/+$/, '');
   const options = config.options ?? {};
   const clientId = readString(options, 'clientId') ?? DEFAULT_CLIENT_ID;
+  const progressUrl = `${websocketBaseUrl(baseUrl)}/ws?clientId=${encodeURIComponent(clientId)}`;
   const pollOptions: PollOptions = {
     intervalMs: readPositiveNumber(options, 'pollIntervalMs', DEFAULT_POLL_INTERVAL_MS),
     timeoutMs: readPositiveNumber(options, 'timeoutMs', DEFAULT_TIMEOUT_MS),
@@ -824,36 +1048,33 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
     ctx: GenerationContext,
   ): Promise<GeneratedItem> {
     const slotStartedMs = Date.now();
-    let promptId: string;
+    let run: PromptRun;
     try {
-      const graph = attachReferenceImages(
-        substituteWorkflow(
-          template,
-          buildReplacements({ ...request, count: 1 }, options, config, slotSeed),
+      const graph = applyPromptEnhancer(
+        attachReferenceImages(
+          substituteWorkflow(
+            template,
+            buildReplacements({ ...request, count: 1 }, options, config, slotSeed),
+          ),
+          uploadedRefs,
         ),
-        uploadedRefs,
+        request.enhancePrompt,
+        uploadedRefs.length > 0,
       );
-      promptId = await queuePrompt(baseUrl, clientId, graph, ctx.signal);
+      run = await runPrompt(baseUrl, progressUrl, clientId, graph, pollOptions, ctx, slot);
     } catch (error) {
       throwIfAborted(ctx.signal);
       if (!(error instanceof ComfyUIError)) throw error;
       return failedItem(slot, error.message, error.code, error.code !== 'invalid_template');
     }
-    let images: ComfyImageRef[];
-    try {
-      const history = await waitForHistory(baseUrl, promptId, pollOptions, ctx, slot);
-      if (history.state === 'error') return failedItem(slot, history.message, 'execution_error', true);
-      images = history.state === 'done' ? history.images : [];
-    } catch (error) {
-      throwIfAborted(ctx.signal);
-      if (!(error instanceof ComfyUIError)) throw error;
-      return failedItem(slot, error.message, error.code, error.code !== 'invalid_template');
+    if (run.history.state === 'error') {
+      return failedItem(slot, run.history.message, 'execution_error', true);
     }
-    const image = images[0];
+    const image = run.history.state === 'done' ? run.history.images[0] : undefined;
     if (image === undefined) {
       return failedItem(
         slot,
-        `ComfyUI finished prompt ${promptId} without returning an image`,
+        `ComfyUI finished prompt ${run.promptId} without returning an image`,
         'no_images',
         true,
       );
@@ -909,27 +1130,35 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
       return outcome();
     }
 
-    const graph = attachReferenceImages(
-      substituteWorkflow(template, buildReplacements(effectiveRequest, options, config, seed)),
-      uploadedRefs,
+    const graph = applyPromptEnhancer(
+      attachReferenceImages(
+        substituteWorkflow(template, buildReplacements(effectiveRequest, options, config, seed)),
+        uploadedRefs,
+      ),
+      effectiveRequest.enhancePrompt,
+      uploadedRefs.length > 0,
     );
-    const promptId = await queuePrompt(baseUrl, clientId, graph, ctx.signal);
-    const history = await waitForHistory(baseUrl, promptId, pollOptions, ctx, 0);
-    if (history.state === 'error') {
-      const item = failedItem(0, history.message, 'execution_error', true);
+    const run = await runPrompt(baseUrl, progressUrl, clientId, graph, pollOptions, ctx, 0);
+    if (run.history.state === 'error') {
+      const item = failedItem(0, run.history.message, 'execution_error', true);
       items.push(item);
       ctx.onEvent({ type: 'item', index: 0, item });
       return outcome();
     }
-    if (history.state === 'done') {
-      for (const [index, image] of history.images.entries()) {
+    if (run.history.state === 'done') {
+      for (const [index, image] of run.history.images.entries()) {
         const item = await itemFromImage(index, image, seed, startedMs, ctx);
         items.push(item);
         ctx.onEvent({ type: 'item', index, item });
       }
     }
     if (items.length === 0) {
-      const item = failedItem(0, `ComfyUI finished prompt ${promptId} without returning an image`, 'no_images', false);
+      const item = failedItem(
+        0,
+        `ComfyUI finished prompt ${run.promptId} without returning an image`,
+        'no_images',
+        false,
+      );
       items.push(item);
       ctx.onEvent({ type: 'item', index: 0, item });
     }

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { synthImage } from '../../src/core/png';
 import {
   ComfyUIError,
+  applyPromptEnhancer,
   attachReferenceImages,
   createComfyUIAdapter,
   defaultWorkflowTemplate,
@@ -320,6 +321,33 @@ describe('ComfyUI adapter', () => {
     // The 5000 ms poll timer was cleared, so the rejection arrives long before it could fire.
     expect(Date.now() - started).toBeLessThan(2000);
     expect(stub.historyPolls()).toBe(1);
+  });
+
+  it('tells ComfyUI to interrupt when the generation is aborted', async () => {
+    let markFirstPoll: () => void = () => {};
+    const firstPoll = new Promise<void>((resolve) => {
+      markFirstPoll = resolve;
+    });
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-abort' } },
+      onHistory: (poll) => {
+        if (poll === 1) markFirstPoll();
+      },
+    });
+    const adapter = createComfyUIAdapter(comfyConfig(stub.baseUrl, { pollIntervalMs: 5000, timeoutMs: 60_000 }));
+    const controller = new AbortController();
+    const generation = adapter.generate(BASE_REQUEST, { signal: controller.signal, onEvent: () => {} });
+
+    await firstPoll;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    controller.abort();
+
+    await expect(generation).rejects.toThrow(/aborted/);
+    const interrupts = stub.requests.filter((entry) => entry.method === 'POST' && entry.path === '/interrupt');
+    expect(interrupts).toHaveLength(1);
+    const body = interrupts[0]?.body;
+    if (!isRecord(body)) throw new Error('expected a JSON interrupt body');
+    expect(body['prompt_id']).toBe('prompt-abort');
   });
 
   it('substitutes placeholders inside the posted graph', async () => {
@@ -951,5 +979,85 @@ describe('ComfyUI reference images', () => {
     } finally {
       await rm(rootDir, { recursive: true, force: true });
     }
+  });
+});
+
+/** The prompt enhancer leg of the H3 template: one switch picks raw prompt or expansion. */
+const ENHANCER_TEMPLATE = {
+  '5': {
+    class_type: 'MiniMaxH3ImageConditioning',
+    inputs: { prompt: ['22', 0], width: '{{width}}', height: '{{height}}' },
+  },
+  '22': {
+    class_type: 'ComfySwitchNode',
+    inputs: { switch: false, on_false: ['24', 0], on_true: ['26', 0] },
+  },
+  '24': { class_type: 'PrimitiveStringMultiline', inputs: { value: '{{prompt}}' } },
+  '26': { class_type: 'JsonExtractString', inputs: { json_string: ['15', 0], key: 'expanded_caption' } },
+  '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'h3-studio', images: ['5', 0] } },
+};
+
+function switchOf(graph: Record<string, unknown>): unknown {
+  const node = graph['22'];
+  if (!isRecord(node)) throw new Error('missing the ComfySwitchNode');
+  return inputsOf(node)['switch'];
+}
+
+describe('ComfyUI prompt enhancer', () => {
+  it('returns the graph untouched when the request says nothing', () => {
+    expect(applyPromptEnhancer(ENHANCER_TEMPLATE, undefined, false)).toBe(ENHANCER_TEMPLATE);
+    expect(applyPromptEnhancer(ENHANCER_TEMPLATE, undefined, true)).toBe(ENHANCER_TEMPLATE);
+  });
+
+  it('toggles the switch node without changing the template', () => {
+    const on = applyPromptEnhancer(ENHANCER_TEMPLATE, true, false);
+    expect(switchOf(on)).toBe(true);
+    expect(switchOf(ENHANCER_TEMPLATE)).toBe(false);
+
+    const off = applyPromptEnhancer(on, false, false);
+    expect(switchOf(off)).toBe(false);
+    expect(switchOf(on)).toBe(true);
+    // The raw prompt node is still wired in, so turning the switch back on works.
+    const raw = on['24'];
+    if (!isRecord(raw)) throw new Error('missing the raw prompt node');
+    expect(inputsOf(raw)['value']).toBe('{{prompt}}');
+  });
+
+  it('forces the enhancer off during an alteration', () => {
+    expect(switchOf(applyPromptEnhancer(ENHANCER_TEMPLATE, true, true))).toBe(false);
+    expect(switchOf(applyPromptEnhancer(ENHANCER_TEMPLATE, false, true))).toBe(false);
+  });
+
+  it('returns a graph without a switch node unchanged', () => {
+    const graph: Record<string, unknown> = {
+      '1': { class_type: 'KSampler', inputs: { seed: 1 } },
+    };
+    expect(applyPromptEnhancer(graph, true, false)).toBe(graph);
+  });
+
+  it('posts the enhancer state the request asked for', async () => {
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-enhance' } },
+      historyResponse: () => ({
+        status: 200,
+        body: { 'prompt-enhance': { outputs: { '9': { images: [{ filename: 'enhanced.png', subfolder: '' }] } } } },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(
+      comfyConfig(stub.baseUrl, {
+        pollIntervalMs: 10,
+        timeoutMs: 2000,
+        workflowTemplate: JSON.stringify(ENHANCER_TEMPLATE),
+      }),
+    );
+    const run = context();
+
+    await adapter.generate(
+      { ...BASE_REQUEST, enhancePrompt: true },
+      { signal: run.signal, onEvent: () => {} },
+    );
+
+    expect(switchOf(postedGraph(stub))).toBe(true);
   });
 });

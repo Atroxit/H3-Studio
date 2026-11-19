@@ -21,6 +21,7 @@ import type {
 import { buildZip, type ZipEntry } from '../core/zip';
 import type { BatchStreamEvent, Subscription } from './jobs';
 import { GenerationHub, HEARTBEAT_MS } from './jobs';
+import { createProviderLauncher, type ProviderLauncher } from './launcher';
 import { ProviderSettings, providerInputSchema, providerPatchSchema } from './settings';
 
 const API_VERSION = '0.1.0';
@@ -62,6 +63,7 @@ const generationSchema = z.object({
   steps: z.number().int().min(1).max(200).optional(),
   guidance: z.number().min(0).max(50).optional(),
   referenceIds: z.array(z.string().min(1).max(128)).max(8).optional(),
+  enhancePrompt: z.boolean().optional(),
 });
 
 const referenceSchema = z.object({
@@ -234,7 +236,12 @@ class QueuedLibrary {
   }
 }
 
-export function createApp(options: { dataDir: string }): Express {
+/** createApp returns the express app plus the launcher the entry point must stop. */
+export interface StudioApplication extends Express {
+  launcher: ProviderLauncher;
+}
+
+export function createApp(options: { dataDir: string }): StudioApplication {
   const dataDir = path.resolve(options.dataDir);
   const referencesDir = path.join(dataDir, 'references');
   const store = new QueuedLibrary(new LibraryStore({ rootDir: dataDir }));
@@ -251,12 +258,37 @@ export function createApp(options: { dataDir: string }): Express {
   })();
   void ready.catch(() => undefined);
 
-  const app = express();
+  // A managed backend is only ever started from settings on disk, and its adapter's own
+  // health check decides when it is ready. Boot never fails because a backend is absent.
+  const launcher = createProviderLauncher(
+    async () => {
+      await ready;
+      return settings.list();
+    },
+    async (config) => {
+      try {
+        return (await createAdapter(config).health()).ok;
+      } catch {
+        return false;
+      }
+    },
+  );
+
+  const app = express() as StudioApplication;
+  app.launcher = launcher;
   app.disable('x-powered-by');
   app.use(express.json({ limit: MAX_JSON_BYTES }));
   app.use((_req: Request, _res: Response, next: NextFunction) => {
     ready.then(next, next);
   });
+
+  /** Starts a provider's managed backend in the background. A failed start is a warning. */
+  function startManagedBackend(config: ProviderConfig): void {
+    if (config.enabled === false || config.launch?.enabled !== true) return;
+    void launcher.ensureStarted(config).catch((error: unknown) => {
+      console.warn(`h3-studio: provider ${config.id} did not start: ${messageOf(error)}`);
+    });
+  }
 
   async function findReference(id: string): Promise<ReferenceImage | null> {
     const known = references.get(id);
@@ -290,6 +322,9 @@ export function createApp(options: { dataDir: string }): Express {
     const input = parseBody(providerInputSchema, req.body, res);
     if (input === null) return;
     const config = await settings.create(input);
+    // An enabled provider that asks the studio to start it is started right after it is
+    // saved, without making the save wait for a model load.
+    startManagedBackend(config);
     res.status(201).json(config);
   });
 
@@ -302,6 +337,7 @@ export function createApp(options: { dataDir: string }): Express {
       fail(res, 404, 'unknown_provider', `No provider with id "${id}".`);
       return;
     }
+    startManagedBackend(updated);
     res.json(updated);
   });
 
@@ -420,7 +456,17 @@ export function createApp(options: { dataDir: string }): Express {
       steps: input.steps,
       guidance: input.guidance,
       referenceIds: referencePaths,
+      enhancePrompt: input.enhancePrompt,
     };
+    // A managed backend may still be loading: waiting here is what makes generating
+    // straight after boot, or after switching provider, work on the first try.
+    if (config.launch?.enabled === true) {
+      try {
+        await launcher.ensureStarted(config);
+      } catch (error) {
+        console.warn(`h3-studio: provider ${config.id} did not start: ${messageOf(error)}`);
+      }
+    }
     const batch = await hub.start(config, request);
     res.status(202).json({ batchId: batch.id });
   });

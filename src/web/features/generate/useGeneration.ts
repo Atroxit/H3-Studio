@@ -90,6 +90,8 @@ export interface GenerationForm {
   seed: string;
   steps: number;
   guidance: number;
+  /** Runs the provider's prompt enhancer, when its graph has one. */
+  enhancePrompt: boolean;
   references: ReferenceImage[];
 }
 
@@ -452,6 +454,7 @@ export function toGenerationBody(
     width,
     height,
     count: clampCount(form.count, capabilities.maxBatch),
+    enhancePrompt: form.enhancePrompt,
   };
 
   if (capabilities.negativePrompt && form.negativePrompt.trim().length > 0) {
@@ -494,6 +497,7 @@ const EMPTY_FORM: GenerationForm = {
   seed: '',
   steps: DEFAULT_STEPS,
   guidance: DEFAULT_GUIDANCE,
+  enhancePrompt: false,
   references: [],
 };
 

@@ -34,13 +34,59 @@ async function main(): Promise<void> {
   const port = resolvePort();
   await mkdir(dataDir, { recursive: true });
 
-  const server = createApp({ dataDir }).listen(port, LOOPBACK, () => {
+  const app = createApp({ dataDir });
+  const launcher = app.launcher;
+
+  let stopping = false;
+  const shutdown = async (exitCode: number): Promise<void> => {
+    if (stopping) return;
+    stopping = true;
+    try {
+      await launcher.stopAll();
+    } catch (error) {
+      console.warn(`h3-studio: stopping managed backends failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    // A studio window that is going away must not wait on a stalled socket.
+    const forced = setTimeout(() => {
+      process.exit(exitCode);
+    }, 3000);
+    forced.unref();
+    server.close(() => {
+      clearTimeout(forced);
+      process.exit(exitCode);
+    });
+  };
+
+  // On Windows child.kill() terminates Node immediately without firing SIGTERM, so the
+  // Electron shell asks for an orderly shutdown here before falling back to kill().
+  app.post('/api/shutdown', (_req, res) => {
+    res.status(202).json({ ok: true });
+    void shutdown(0);
+  });
+
+  const server = app.listen(port, LOOPBACK, () => {
     console.log(`h3-studio: listening on http://${LOOPBACK}:${port} with data in ${dataDir}`);
+    // Managed backends start after the socket is open, so a slow model load never
+    // delays the studio window, and a backend that fails is only a warning.
+    void launcher.ensureEnabledStarted();
   });
 
   server.on('error', (error: Error) => {
     console.error(`h3-studio: cannot listen on http://${LOOPBACK}:${port}: ${error.message}`);
     process.exitCode = 1;
+  });
+
+  process.once('SIGINT', () => {
+    void shutdown(0);
+  });
+  process.once('SIGTERM', () => {
+    void shutdown(0);
+  });
+  // beforeExit has no way to set a code, so it only makes sure nothing is left running.
+  process.once('beforeExit', () => {
+    if (stopping) return;
+    stopping = true;
+    void launcher.stopAll();
   });
 }
 

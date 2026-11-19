@@ -46,6 +46,7 @@ export interface GenerationBody {
   steps?: number;
   guidance?: number;
   referenceIds?: string[];
+  enhancePrompt?: boolean;
 }
 
 export interface ReferenceBody {

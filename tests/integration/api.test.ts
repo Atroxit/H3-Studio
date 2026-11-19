@@ -246,6 +246,81 @@ describe('health and the provider surface', () => {
     expect(errorOf(again.body).code).toBe('unknown_provider');
   });
 
+  it('validates and preserves a provider launch config', async () => {
+    const created = await api<ProviderConfig>('POST', '/api/providers', {
+      kind: 'a1111',
+      label: 'Managed A1111',
+      baseUrl: 'http://127.0.0.1:7862',
+      enabled: false,
+      launch: {
+        enabled: true,
+        command: 'python',
+        args: ['launch.py', '--port', '7862'],
+        cwd: 'C:/tools/sd',
+        waitForHealthMs: 120_000,
+      },
+    });
+    expect(created.status).toBe(201);
+    const provider = bodyOf(created);
+    expect(provider.launch).toEqual({
+      enabled: true,
+      command: 'python',
+      args: ['launch.py', '--port', '7862'],
+      cwd: 'C:/tools/sd',
+      waitForHealthMs: 120_000,
+    });
+
+    // The saved config survives a patch that only turns autostart off.
+    const patched = await api<ProviderConfig>('PATCH', `/api/providers/${provider.id}`, {
+      launch: { enabled: false, command: 'python', args: ['launch.py'], waitForHealthMs: 5000 },
+    });
+    expect(patched.status).toBe(200);
+    expect(bodyOf(patched).launch).toEqual({
+      enabled: false,
+      command: 'python',
+      args: ['launch.py'],
+      waitForHealthMs: 5000,
+    });
+
+    const cleared = await api<ProviderConfig>('PATCH', `/api/providers/${provider.id}`, {
+      launch: { enabled: false, command: '' },
+    });
+    expect(cleared.status).toBe(200);
+    expect(bodyOf(cleared).launch).toEqual({ enabled: false, command: '' });
+
+    const listed = bodyOf(await api<ProviderConfig[]>('GET', '/api/providers')).find(
+      (config) => config.id === provider.id,
+    );
+    expect(listed?.launch).toEqual({ enabled: false, command: '' });
+
+    const badArgs = await api('POST', '/api/providers', {
+      kind: 'a1111',
+      label: 'Bad launch args',
+      baseUrl: 'http://127.0.0.1:7863',
+      launch: { enabled: true, command: 'python', args: 'launch.py' },
+    });
+    expect(badArgs.status).toBe(400);
+    expect(errorOf(badArgs.body).code).toBe('invalid_body');
+
+    const badWait = await api('POST', '/api/providers', {
+      kind: 'a1111',
+      label: 'Bad launch wait',
+      baseUrl: 'http://127.0.0.1:7864',
+      launch: { enabled: true, command: 'python', waitForHealthMs: 0 },
+    });
+    expect(badWait.status).toBe(400);
+
+    const badEnabled = await api('POST', '/api/providers', {
+      kind: 'a1111',
+      label: 'Bad launch switch',
+      baseUrl: 'http://127.0.0.1:7865',
+      launch: { enabled: 'yes', command: 'python' },
+    });
+    expect(badEnabled.status).toBe(400);
+
+    await api('DELETE', `/api/providers/${provider.id}`);
+  });
+
   it('rejects a bad provider body with the contract error envelope', async () => {
     const bad = await api('POST', '/api/providers', { kind: 'nonsense', label: '', baseUrl: 42 });
     expect(bad.status).toBe(400);

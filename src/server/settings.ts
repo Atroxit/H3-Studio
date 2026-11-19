@@ -143,6 +143,18 @@ const providerOptionsSchema = z.record(z.string(), z.unknown()).superRefine((opt
   checkCapabilities(options['capabilities'], ctx);
 });
 
+/**
+ * How a local backend is started. The command may be empty, which is how the form
+ * records autostart off without dropping the path the user typed.
+ */
+const providerLaunchSchema = z.object({
+  enabled: z.boolean(),
+  command: z.string().max(4096),
+  args: z.array(z.string().max(4096)).max(64).optional(),
+  cwd: z.string().max(4096).optional(),
+  waitForHealthMs: z.number().int().positive().max(3_600_000).optional(),
+});
+
 /** The persisted shape of one provider. Also the validation for a request body. */
 export const providerConfigSchema = z.object({
   id: z.string().min(1).max(128),
@@ -152,6 +164,7 @@ export const providerConfigSchema = z.object({
   apiKey: z.string().max(4096).optional(),
   model: z.string().max(200).optional(),
   enabled: z.boolean().optional(),
+  launch: providerLaunchSchema.optional(),
   options: providerOptionsSchema.optional(),
 });
 

@@ -133,6 +133,7 @@ const H3_IMAGE_CAPABILITIES: ProviderCapabilities = {
   arbitrarySize: true,
   sizeMultiple: 32,
   presets: [
+    { id: '1024x1024', label: '1024x1024 (1 MP Fast)', width: 1024, height: 1024 },
     { id: '2048x2048', label: '2048x2048 (4 MP)', width: 2048, height: 2048 },
     { id: '4096x4096', label: '4096x4096', width: 4096, height: 4096 },
     { id: '4736x3552', label: '4736x3552', width: 4736, height: 3552 },
@@ -193,6 +194,41 @@ function savedTimeoutSeconds(existing: ProviderConfig | null): string {
 
 function sameJson(left: Record<string, unknown> | null, right: Record<string, unknown> | null): boolean {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+/** Arguments are edited as text: space separated, one per line, or a JSON array. */
+function savedLaunchArguments(existing: ProviderConfig | null): string {
+  const args = existing?.launch?.args ?? [];
+  if (args.length === 0) return '';
+  return args.some((arg) => /\s/.test(arg)) ? JSON.stringify(args) : args.join(' ');
+}
+
+/** Null when a JSON array is malformed, so the field can say so instead of guessing. */
+function parseLaunchArguments(text: string): string[] | null {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return [];
+  if (trimmed.startsWith('[')) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed) as unknown;
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(parsed)) return null;
+    const args: string[] = [];
+    for (const entry of parsed) {
+      if (typeof entry !== 'string') return null;
+      args.push(entry);
+    }
+    return args;
+  }
+  if (trimmed.includes('\n')) {
+    return trimmed
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  }
+  return trimmed.split(/\s+/);
 }
 
 /**
@@ -780,6 +816,8 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
   const expanderId = `${graphId}-expander`;
   // Only ComfyUI reads a graph, so only its card grows the advanced section.
   const isComfy = meta.kind === 'comfyui';
+  // The mock runs inside the server, so there is nothing for the studio to start.
+  const supportsLaunch = meta.kind !== 'mock';
   const displayLabel = existing === null ? meta.label : existing.label;
   const enabled = existing !== null && existing.enabled !== false;
 
@@ -793,6 +831,10 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
     savedCapabilityOverride(existing),
   );
   const [timeoutSeconds, setTimeoutSeconds] = useState<string>(() => savedTimeoutSeconds(existing));
+  const [launchEnabled, setLaunchEnabled] = useState<boolean>(() => existing?.launch?.enabled === true);
+  const [launchCommand, setLaunchCommand] = useState<string>(() => existing?.launch?.command ?? '');
+  const [launchArgs, setLaunchArgs] = useState<string>(() => savedLaunchArguments(existing));
+  const [launchCwd, setLaunchCwd] = useState<string>(() => existing?.launch?.cwd ?? '');
 
   const workflowProblem = workflowTemplateProblem(workflow);
   const trimmedUrl = baseUrl.trim();
@@ -801,14 +843,32 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
   const timeoutValid =
     isComfy && timeoutSeconds.trim().length > 0 && Number.isInteger(timeoutValue) && timeoutValue > 0;
   const timeoutProblem = isComfy && !timeoutValid ? 'Timeout must be a whole number of seconds above zero.' : null;
+  const parsedLaunchArgs = parseLaunchArguments(launchArgs);
+  const launchProblem =
+    supportsLaunch && launchEnabled && launchCommand.trim().length === 0
+      ? 'A command is needed before the studio can start this provider.'
+      : supportsLaunch && parsedLaunchArgs === null
+        ? 'Arguments must be space separated, one per line, or a JSON array of strings.'
+        : null;
   const canSave =
-    idle && trimmedUrl.length > 0 && workflowProblem === null && (!isComfy || timeoutValid);
+    idle &&
+    trimmedUrl.length > 0 &&
+    workflowProblem === null &&
+    launchProblem === null &&
+    (!isComfy || timeoutValid);
   const expanderState = isComfy ? readH3ExpanderState(workflow) : null;
+  const launchDirty =
+    supportsLaunch &&
+    (launchEnabled !== (existing?.launch?.enabled === true) ||
+      launchCommand.trim() !== (existing?.launch?.command ?? '').trim() ||
+      JSON.stringify(parsedLaunchArgs) !== JSON.stringify(existing?.launch?.args ?? []) ||
+      launchCwd.trim() !== (existing?.launch?.cwd ?? '').trim());
   const dirty =
     existing === null ||
     trimmedUrl !== existing.baseUrl ||
     workflow !== savedWorkflowTemplate(existing) ||
     !sameJson(capabilities, savedCapabilityOverride(existing)) ||
+    launchDirty ||
     (isComfy && timeoutSeconds !== savedTimeoutSeconds(existing));
 
   /**
@@ -833,9 +893,31 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
       label: existing === null ? meta.label : existing.label,
       baseUrl: trimmedUrl,
     };
+    // Autostart is saved even when it is off, so turning it off is a real edit rather
+    // than a field that silently keeps the old command.
+    if (supportsLaunch && parsedLaunchArgs !== null) {
+      base.launch = {
+        enabled: launchEnabled,
+        command: launchCommand.trim(),
+        args: parsedLaunchArgs,
+        cwd: launchCwd.trim().length > 0 ? launchCwd.trim() : undefined,
+      };
+    }
     const options = optionsDraft();
     return options === undefined ? base : { ...base, options };
-  }, [existing, meta.kind, meta.label, optionsDraft, trimmedUrl]);
+  }, [
+    existing,
+    launchArgs,
+    launchCommand,
+    launchCwd,
+    launchEnabled,
+    meta.kind,
+    meta.label,
+    optionsDraft,
+    parsedLaunchArgs,
+    supportsLaunch,
+    trimmedUrl,
+  ]);
 
   const persist = useCallback(async (): Promise<ProviderConfig> => {
     if (configId === null) {
@@ -953,6 +1035,75 @@ function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
             setTimeoutSeconds(event.target.value);
           }}
         />
+      ) : null}
+      {supportsLaunch ? (
+        <section className="setup-launch" aria-labelledby={`${graphId}-launch`}>
+          <label className="setup-check" htmlFor={`${graphId}-launch-enabled`}>
+            <input
+              id={`${graphId}-launch-enabled`}
+              type="checkbox"
+              checked={launchEnabled}
+              disabled={!idle}
+              onChange={(event) => {
+                setLaunchEnabled(event.target.checked);
+              }}
+            />
+            <span className="setup-check-copy">
+              <span className="setup-check-title" id={`${graphId}-launch`}>
+                Auto-start with H3 Studio
+              </span>
+              <span className="field-hint">
+                Runs this command when the studio starts, and stops it again when the studio quits.
+              </span>
+            </span>
+          </label>
+          {launchEnabled ? (
+            <div className="setup-launch-fields">
+              <Field
+                label="Command"
+                value={launchCommand}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={!idle}
+                placeholder="python"
+                hint="The program to run. A bare name is looked up on PATH."
+                onChange={(event) => {
+                  setLaunchCommand(event.target.value);
+                }}
+              />
+              <Field
+                label="Arguments"
+                value={launchArgs}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={!idle}
+                invalid={parsedLaunchArgs === null}
+                placeholder="main.py --listen 127.0.0.1"
+                hint={launchProblem ?? 'Space separated, one per line, or a JSON array of strings.'}
+                onChange={(event) => {
+                  setLaunchArgs(event.target.value);
+                }}
+              />
+              <Field
+                label="Working folder"
+                value={launchCwd}
+                spellCheck={false}
+                autoComplete="off"
+                disabled={!idle}
+                placeholder="Optional, for example the ComfyUI folder"
+                hint="Optional. The command runs from here."
+                onChange={(event) => {
+                  setLaunchCwd(event.target.value);
+                }}
+              />
+            </div>
+          ) : null}
+          {launchProblem === null ? null : (
+            <p className="field-error" role="alert">
+              {launchProblem}
+            </p>
+          )}
+        </section>
       ) : null}
       <div className="setup-card-actions">
         <Button variant="secondary" busy={busy === 'testing'} disabled={!canSave} onClick={() => void testConnection()}>

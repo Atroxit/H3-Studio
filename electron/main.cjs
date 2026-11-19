@@ -19,6 +19,7 @@ const PORT_TRIES = 40;
 const HEALTH_TIMEOUT_MS = 30_000;
 
 let serverProcess = null;
+let serverPort = null;
 let mainWindow = null;
 let serverLog = [];
 
@@ -98,10 +99,44 @@ function startServer(port, dataDir) {
 }
 
 function stopServer() {
-  if (serverProcess === null) return;
+  if (serverProcess === null) return Promise.resolve();
   const child = serverProcess;
+  const port = serverPort;
   serverProcess = null;
-  try { child.kill(); } catch { /* already gone */ }
+  serverPort = null;
+  if (child.exitCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* already gone */ }
+      done();
+    }, 3500);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      done();
+    });
+    if (port !== null) {
+      const req = http.request(
+        { host: '127.0.0.1', port, path: '/api/shutdown', method: 'POST', timeout: 1500 },
+        (res) => res.resume(),
+      );
+      req.on('error', () => {
+        clearTimeout(timer);
+        try { child.kill(); } catch { /* already gone */ }
+        done();
+      });
+      req.end();
+    } else {
+      clearTimeout(timer);
+      try { child.kill(); } catch { /* already gone */ }
+      done();
+    }
+  });
 }
 
 function reportError(title, message) {
@@ -183,6 +218,7 @@ async function boot() {
   // images out of Electron's cache folder and out of the roaming profile.
   const dataDir = (process.env.H3_DATA_DIR ?? '').trim() || path.join(os.homedir(), '.h3-studio');
   const port = await pickPort();
+  serverPort = port;
   serverProcess = startServer(port, dataDir);
   const healthy = await waitForHealth(port);
   if (!healthy) {
@@ -221,6 +257,9 @@ if (!lock) {
   });
 
   app.on('before-quit', () => { app.isQuitting = true; });
-  app.on('window-all-closed', () => { stopServer(); app.quit(); });
-  app.on('quit', stopServer);
+  app.on('window-all-closed', () => {
+    app.isQuitting = true;
+    void stopServer().finally(() => app.quit());
+  });
+  app.on('quit', () => { void stopServer(); });
 }

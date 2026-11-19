@@ -147,6 +147,7 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const batchHeadingId = useId();
   const advancedHeadingId = useId();
   const advancedPanelId = useId();
+  const enhanceId = useId();
   const referencesHeadingId = useId();
   const notesHeadingId = useId();
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -206,7 +207,10 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
     ...(capabilities.negativePrompt ? [] : ['Negative prompt is not supported.']),
   ]);
   const advancedCount =
-    (capabilities.adjustableSteps ? 1 : 0) + (capabilities.guidance ? 1 : 0) + (capabilities.negativePrompt ? 1 : 0);
+    1 +
+    (capabilities.adjustableSteps ? 1 : 0) +
+    (capabilities.guidance ? 1 : 0) +
+    (capabilities.negativePrompt ? 1 : 0);
 
   const sizeEmptyNote =
     capabilities.presets.length === 0
@@ -438,6 +442,22 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
               />
             </div>
           ) : null}
+          <label className="gen-check" htmlFor={enhanceId}>
+            <input
+              id={enhanceId}
+              type="checkbox"
+              checked={form.enhancePrompt}
+              disabled={controller.running}
+              onChange={(event) => controller.updateForm({ enhancePrompt: event.target.checked })}
+            />
+            <span className="gen-check-copy">
+              <span className="gen-check-title">Prompt enhancer (Qwen3.5 9B)</span>
+              <span className="field-hint">
+                Rewrites short prompts into richer scene descriptions for higher quality (adds
+                ~15-20s). Bypassed during alterations.
+              </span>
+            </span>
+          </label>
         </div>
 
         {advancedNotes.map((note) => (
