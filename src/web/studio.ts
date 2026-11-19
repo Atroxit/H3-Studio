@@ -32,6 +32,10 @@ export interface StudioContextValue {
   selectView: (view: StudioView) => void;
   /** Loads a stored batch onto the Generate canvas. */
   openBatch: (batchId: string) => void;
+  /** Switches to Generate and clears the canvas for a brand new image. */
+  newImage: () => void;
+  /** Switches to Generate and opens this batch with this image as the alteration source. */
+  alterImage: (batchId: string, imageId: string) => void;
   /** Fills the Generate composer from a saved preset and switches to Generate. */
   applyPreset: (preset: Preset) => void;
   /** Fills the Generate composer from a batch or viewer and switches to Generate. */

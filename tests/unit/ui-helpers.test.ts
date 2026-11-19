@@ -9,6 +9,11 @@ import {
   sizeProblem,
   uniqueNotes,
 } from '../../src/web/features/generate/helpers';
+import {
+  resolveAlterationTarget,
+  type GenerationBatch,
+  type GenerationTile,
+} from '../../src/web/features/generate/useGeneration';
 import { computeZoomScroll, type ZoomScrollInput } from '../../src/web/features/library/viewer';
 
 describe('ratioOf', () => {
@@ -144,6 +149,95 @@ describe('computeZoomScroll', () => {
         scrollHeight: 300,
       }),
     ).toEqual({ left: 0, top: 0 });
+  });
+});
+
+function readyTile(index: number, imageId: string): GenerationTile {
+  return {
+    index,
+    phase: 'done',
+    stage: 'Ready',
+    step: null,
+    totalSteps: null,
+    percent: 100,
+    imageId,
+    width: 512,
+    height: 512,
+    failure: null,
+  };
+}
+
+function waitingTile(index: number): GenerationTile {
+  return {
+    index,
+    phase: 'waiting',
+    stage: null,
+    step: null,
+    totalSteps: null,
+    percent: null,
+    imageId: null,
+    width: null,
+    height: null,
+    failure: null,
+  };
+}
+
+function batchOf(tiles: GenerationTile[]): GenerationBatch {
+  return {
+    batchId: 'batch_test',
+    streamBatchId: null,
+    providerId: 'comfy-h3',
+    prompt: 'a brass lighthouse',
+    width: 512,
+    height: 512,
+    requested: tiles.length,
+    status: 'complete',
+    revisedPrompt: null,
+    tiles,
+    streamError: null,
+    startedAt: 0,
+    finishedAt: 1,
+    seed: 7,
+  };
+}
+
+describe('resolveAlterationTarget', () => {
+  it('has no target without a batch or without reference support', () => {
+    const batch = batchOf([readyTile(0, 'img_one')]);
+    expect(resolveAlterationTarget(null, null, 4)).toBeNull();
+    expect(resolveAlterationTarget(batch, null, 0)).toBeNull();
+    expect(resolveAlterationTarget(batch, 'img_one', 0)).toBeNull();
+  });
+
+  it('has no target while nothing in the batch is ready', () => {
+    expect(resolveAlterationTarget(batchOf([waitingTile(0), waitingTile(1)]), null, 4)).toBeNull();
+  });
+
+  it('defaults to the first ready image and lists every candidate', () => {
+    const target = resolveAlterationTarget(
+      batchOf([waitingTile(0), readyTile(1, 'img_one'), readyTile(2, 'img_two')]),
+      null,
+      4,
+    );
+    expect(target).not.toBeNull();
+    expect(target?.imageId).toBe('img_one');
+    expect(target?.index).toBe(1);
+    expect(target?.label).toBe('02');
+    expect(target?.candidates.map((candidate) => candidate.imageId)).toEqual(['img_one', 'img_two']);
+  });
+
+  it('picks the explicitly selected ready image', () => {
+    const batch = batchOf([readyTile(0, 'img_one'), readyTile(1, 'img_two')]);
+    const target = resolveAlterationTarget(batch, 'img_two', 4);
+    expect(target?.imageId).toBe('img_two');
+    expect(target?.index).toBe(1);
+    expect(target?.label).toBe('02');
+    expect(target?.candidates.map((candidate) => candidate.label)).toEqual(['01', '02']);
+  });
+
+  it('falls back to the first ready image when the selection is stale', () => {
+    const target = resolveAlterationTarget(batchOf([readyTile(0, 'img_one')]), 'img_gone', 4);
+    expect(target?.imageId).toBe('img_one');
   });
 });
 

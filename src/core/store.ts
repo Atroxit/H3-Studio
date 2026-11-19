@@ -499,6 +499,19 @@ export class LibraryStore {
     return null;
   }
 
+  /**
+   * Finds one stored image and the path its bytes live at. Bytes are not read: an adapter
+   * wants a path on disk, and reading a multi megabyte file here would only duplicate it.
+   */
+  async findImage(id: string): Promise<{ meta: StoredImage; path: string } | null> {
+    const index = await this.readIndex();
+    for (const batch of index.batches) {
+      const meta = batch.images.find((image) => image.id === id);
+      if (meta) return { meta, path: this.imagePath(meta) };
+    }
+    return null;
+  }
+
   async deleteBatch(batchId: string): Promise<boolean> {
     const batch = await this.transact((index) => {
       const found = index.batches.find((candidate) => candidate.id === batchId);

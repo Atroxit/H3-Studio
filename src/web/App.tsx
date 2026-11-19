@@ -20,7 +20,8 @@ import { readH3ExpanderState, setH3ExpanderState } from './features/generate/hel
 import {
   adoptPromptSettings,
   applyPresetToForm,
-  loadBatchById,
+  openStoredBatch,
+  startNewImage,
 } from './features/generate/useGeneration';
 import {
   StudioProvider,
@@ -127,7 +128,7 @@ const H3_IMAGE_CAPABILITIES: ProviderCapabilities = {
   adjustableSteps: false,
   fixedSteps: 6,
   guidance: false,
-  maxReferenceImages: 0,
+  maxReferenceImages: 4,
   maxBatch: 4,
   arbitrarySize: true,
   sizeMultiple: 32,
@@ -143,6 +144,7 @@ const H3_IMAGE_CAPABILITIES: ProviderCapabilities = {
   streamingProgress: true,
   notes: [
     'H3 fixes 6 steps and guidance 1, and it rejects a negative prompt.',
+    'H3 alters an existing image from up to 4 reference images, named in the prompt as <Picture 1> and so on.',
     'Batches above one run as sequential single image prompts.',
   ],
 };
@@ -402,8 +404,21 @@ export function App({ slots = {} }: AppProps): ReactNode {
   }, []);
 
   const openBatch = useCallback((batchId: string): void => {
-    void loadBatchById(batchId);
+    void openStoredBatch(batchId);
   }, []);
+
+  const newImage = useCallback((): void => {
+    selectView('generate');
+    startNewImage();
+  }, [selectView]);
+
+  const alterImage = useCallback(
+    (batchId: string, imageId: string): void => {
+      selectView('generate');
+      void openStoredBatch(batchId, imageId);
+    },
+    [selectView],
+  );
 
   const applyPreset = useCallback(
     (preset: Preset): void => {
@@ -439,12 +454,28 @@ export function App({ slots = {} }: AppProps): ReactNode {
       view,
       selectView,
       openBatch,
+      newImage,
+      alterImage,
       applyPreset,
       useSettings,
       notify,
       refresh,
     }),
-    [providers, provider, stats, presets, view, selectView, openBatch, applyPreset, useSettings, notify, refresh],
+    [
+      providers,
+      provider,
+      stats,
+      presets,
+      view,
+      selectView,
+      openBatch,
+      newImage,
+      alterImage,
+      applyPreset,
+      useSettings,
+      notify,
+      refresh,
+    ],
   );
 
   const imageCount = stats === null ? 0 : stats.imageCount;
@@ -559,6 +590,13 @@ export function App({ slots = {} }: AppProps): ReactNode {
             }
           >
             <aside className="rail" aria-label="Library summary and presets">
+              <Button variant="primary" className="rail-new-btn" onClick={newImage}>
+                <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M12 5.5v13M5.5 12h13" />
+                </svg>
+                New image
+              </Button>
+
               <section className="rail-section">
                 <div className="rail-head">
                   <h2 className="section-label">Library</h2>

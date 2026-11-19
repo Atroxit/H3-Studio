@@ -2,7 +2,7 @@
 // One real express app on a loopback socket, one temporary data directory, the mock
 // provider only, and no traffic beyond the test's own socket.
 
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -410,6 +410,68 @@ describe('references and generation', () => {
       height: 256,
       count: 1,
       referenceIds: ['ref_missing'],
+    });
+    expect(unknown.status).toBe(400);
+    expect(errorOf(unknown.body).code).toBe('unknown_reference');
+  });
+
+  it('accepts a stored library image id in referenceIds and resolves it on disk', async () => {
+    const sourceBatchId = await startGeneration({
+      providerId: 'mock',
+      prompt: 'a stored image to alter',
+      width: 128,
+      height: 128,
+      count: 1,
+      seed: 21,
+    });
+    const source = await waitForSettled(sourceBatchId);
+    const image = source.images[0];
+    if (image === undefined) throw new Error('expected the source batch to store an image');
+
+    // The stored image is a real file under the data directory: the route resolves the id
+    // to this path, and no upload happens for a library image.
+    const storedPath = path.join(dataDir, 'images', image.filename);
+    const original = await readFile(storedPath);
+    expect(original.byteLength).toBeGreaterThan(0);
+
+    const alterationBatchId = await startGeneration({
+      providerId: 'mock',
+      prompt: 'make it snow',
+      width: 128,
+      height: 128,
+      count: 1,
+      seed: 22,
+      referenceIds: [image.id],
+    });
+    const alteration = await waitForSettled(alterationBatchId);
+    expect(alteration.status).toBe('complete');
+    expect(alteration.images).toHaveLength(1);
+
+    // With the file gone the stored id is no longer a usable reference, which shows the
+    // route checks the resolved path rather than trusting the index alone.
+    await rm(storedPath, { force: true });
+    try {
+      const missingFile = await api('POST', '/api/generations', {
+        providerId: 'mock',
+        prompt: 'make it rain',
+        width: 128,
+        height: 128,
+        count: 1,
+        referenceIds: [image.id],
+      });
+      expect(missingFile.status).toBe(400);
+      expect(errorOf(missingFile.body).code).toBe('unknown_reference');
+    } finally {
+      await writeFile(storedPath, original);
+    }
+
+    const unknown = await api('POST', '/api/generations', {
+      providerId: 'mock',
+      prompt: 'an unknown stored image',
+      width: 128,
+      height: 128,
+      count: 1,
+      referenceIds: ['img_missing'],
     });
     expect(unknown.status).toBe(400);
     expect(errorOf(unknown.body).code).toBe('unknown_reference');

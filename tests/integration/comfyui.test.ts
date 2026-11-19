@@ -1,11 +1,17 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { synthImage } from '../../src/core/png';
-import { ComfyUIError, createComfyUIAdapter, defaultWorkflowTemplate } from '../../src/core/providers/comfyui';
+import {
+  ComfyUIError,
+  attachReferenceImages,
+  createComfyUIAdapter,
+  defaultWorkflowTemplate,
+  formatReferencePrompt,
+} from '../../src/core/providers/comfyui';
 import { LibraryStore } from '../../src/core/store';
 import type {
   GenerationEvent,
@@ -32,6 +38,7 @@ interface StubResponse {
 interface StubConfig {
   promptResponse?: StubResponse;
   historyResponse?: (poll: number) => StubResponse;
+  uploadResponse?: StubResponse;
   viewBytes?: Uint8Array;
   onHistory?: (poll: number) => void;
 }
@@ -81,6 +88,12 @@ function readRequestBody(request: IncomingMessage): Promise<unknown> {
         resolve(undefined);
         return;
       }
+      const contentType = request.headers['content-type'] ?? '';
+      if (!contentType.includes('application/json')) {
+        // A multipart upload has no JSON body. It is recorded as raw text.
+        resolve(text);
+        return;
+      }
       resolve(JSON.parse(text) as unknown);
     });
   });
@@ -111,6 +124,10 @@ function startStub(config: StubConfig = {}): Promise<Stub> {
 
       if (method === 'POST' && path === '/prompt') {
         sendJson(response, config.promptResponse ?? { status: 200, body: { prompt_id: 'prompt-1', number: 1 } });
+        return;
+      }
+      if (method === 'POST' && path === '/upload/image') {
+        sendJson(response, config.uploadResponse ?? { status: 200, body: { name: 'reference.png', subfolder: '' } });
         return;
       }
       if (method === 'GET' && path.startsWith('/history/')) {
@@ -790,5 +807,149 @@ describe('ComfyUI adapter', () => {
     const sampler = nodesOfType(postedGraph(stub), 'KSampler')[0];
     if (sampler === undefined) throw new Error('missing KSampler node');
     expect(inputsOf(sampler)['steps']).toBe(6);
+  });
+});
+
+/** A graph shaped like the H3 image template: one conditioning node that takes pictures. */
+const REFERENCE_TEMPLATE = {
+  '1': { class_type: 'PrimitiveStringMultiline', inputs: { value: '{{prompt}}' } },
+  '2': {
+    class_type: 'MiniMaxH3ImageConditioning',
+    inputs: { prompt: ['1', 0], width: '{{width}}', height: '{{height}}' },
+  },
+  '3': { class_type: 'SaveImage', inputs: { filename_prefix: 'h3-studio', images: ['2', 0] } },
+};
+
+describe('ComfyUI reference images', () => {
+  it('wires one LoadImage per reference into the conditioning node', () => {
+    const graph = attachReferenceImages(REFERENCE_TEMPLATE, ['first.png', 'nested/second.png']);
+
+    const conditioning = nodesOfType(graph, 'MiniMaxH3ImageConditioning')[0];
+    if (conditioning === undefined) throw new Error('missing conditioning node');
+    const conditioningInputs = inputsOf(conditioning);
+    expect(conditioningInputs['images.image_1']).toEqual(['ref_image_1', 0]);
+    expect(conditioningInputs['images.image_2']).toEqual(['ref_image_2', 0]);
+
+    const loaders = nodesOfType(graph, 'LoadImage');
+    expect(loaders).toHaveLength(2);
+    const first = graph['ref_image_1'];
+    const second = graph['ref_image_2'];
+    if (!isRecord(first) || !isRecord(second)) throw new Error('missing LoadImage nodes');
+    expect(inputsOf(first)).toEqual({ image: 'first.png', upload: 'image' });
+    expect(inputsOf(second)).toEqual({ image: 'nested/second.png', upload: 'image' });
+
+    // The template itself is untouched, so the next request starts from the same graph.
+    expect(nodesOfType(REFERENCE_TEMPLATE, 'LoadImage')).toHaveLength(0);
+    expect(inputsOf(REFERENCE_TEMPLATE['2'])).not.toHaveProperty('images.image_1');
+  });
+
+  it('returns the graph unchanged when there are no references', () => {
+    expect(attachReferenceImages(REFERENCE_TEMPLATE, [])).toBe(REFERENCE_TEMPLATE);
+  });
+
+  it('rejects a graph without a reference conditioning node', () => {
+    const graph: Record<string, unknown> = {
+      '1': { class_type: 'KSampler', inputs: { seed: 1 } },
+      '2': { class_type: 'SaveImage', inputs: { images: ['1', 0] } },
+    };
+    let failure: unknown = null;
+    try {
+      attachReferenceImages(graph, ['first.png']);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(ComfyUIError);
+    if (!(failure instanceof ComfyUIError)) throw new Error('expected a ComfyUIError');
+    expect(failure.code).toBe('unsupported_references');
+    expect(failure.message).toContain('does not have a reference image conditioning node');
+  });
+
+  it('names the first picture in an alteration prompt only when H3 needs it', () => {
+    expect(formatReferencePrompt('make it snow', REFERENCE_TEMPLATE, true)).toBe('Edit <Picture 1>. make it snow');
+    expect(formatReferencePrompt('  make it snow  ', REFERENCE_TEMPLATE, true)).toBe(
+      'Edit <Picture 1>. make it snow',
+    );
+    expect(formatReferencePrompt('Edit <Picture 2>. make it snow', REFERENCE_TEMPLATE, true)).toBe(
+      'Edit <Picture 2>. make it snow',
+    );
+    expect(formatReferencePrompt('make it snow', REFERENCE_TEMPLATE, false)).toBe('make it snow');
+    expect(formatReferencePrompt('make it snow', defaultWorkflowTemplate, true)).toBe('make it snow');
+  });
+
+  it('uploads reference paths once and queues a graph with the picture wired in', async () => {
+    const rootDir = await mkdtemp(path.join(tmpdir(), 'h3-comfy-ref-'));
+    const referencePath = path.join(rootDir, 'source.png');
+    await writeFile(referencePath, PNG_BYTES);
+    try {
+      const stub = await startStub({
+        promptResponse: { status: 200, body: { prompt_id: 'prompt-ref' } },
+        uploadResponse: { status: 200, body: { name: 'source.png', subfolder: 'h3' } },
+        historyResponse: () => ({
+          status: 200,
+          body: { 'prompt-ref': { outputs: { '3': { images: [{ filename: 'altered.png', subfolder: '' }] } } } },
+        }),
+        viewBytes: PNG_BYTES,
+      });
+      const adapter = createComfyUIAdapter(
+        comfyConfig(stub.baseUrl, {
+          pollIntervalMs: 10,
+          timeoutMs: 2000,
+          workflowTemplate: JSON.stringify(REFERENCE_TEMPLATE),
+        }),
+      );
+      const run = context();
+
+      const outcome = await adapter.generate(
+        { ...BASE_REQUEST, prompt: 'make it snow', referenceIds: [referencePath] },
+        { signal: run.signal, onEvent: () => {} },
+      );
+
+      expect(outcome.items).toHaveLength(1);
+      expect(outcome.items[0]?.ok).toBe(true);
+
+      const uploads = stub.requests.filter((entry) => entry.method === 'POST' && entry.path === '/upload/image');
+      expect(uploads).toHaveLength(1);
+      const rawUpload = uploads[0]?.body;
+      expect(typeof rawUpload).toBe('string');
+      if (typeof rawUpload !== 'string') throw new Error('expected the multipart body');
+      expect(rawUpload).toContain('name="image"; filename="source.png"');
+      expect(rawUpload).toContain('name="type"');
+
+      const graph = postedGraph(stub);
+      const loaders = nodesOfType(graph, 'LoadImage');
+      expect(loaders).toHaveLength(1);
+      const loader = loaders[0];
+      if (loader === undefined) throw new Error('missing LoadImage node');
+      expect(inputsOf(loader)['image']).toBe('h3/source.png');
+
+      const conditioning = nodesOfType(graph, 'MiniMaxH3ImageConditioning')[0];
+      if (conditioning === undefined) throw new Error('missing conditioning node');
+      expect(inputsOf(conditioning)['images.image_1']).toEqual(['ref_image_1', 0]);
+
+      const promptNode = nodesOfType(graph, 'PrimitiveStringMultiline')[0];
+      if (promptNode === undefined) throw new Error('missing prompt node');
+      expect(inputsOf(promptNode)['value']).toBe('Edit <Picture 1>. make it snow');
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails before uploading when the template has no reference node', async () => {
+    const rootDir = await mkdtemp(path.join(tmpdir(), 'h3-comfy-noref-'));
+    const referencePath = path.join(rootDir, 'source.png');
+    await writeFile(referencePath, PNG_BYTES);
+    try {
+      const stub = await startStub();
+      const adapter = createComfyUIAdapter(comfyConfig(stub.baseUrl, { pollIntervalMs: 10, timeoutMs: 2000 }));
+      const run = context();
+
+      await expect(
+        adapter.generate({ ...BASE_REQUEST, referenceIds: [referencePath] }, { signal: run.signal, onEvent: () => {} }),
+      ).rejects.toMatchObject({ code: 'unsupported_references' });
+      expect(stub.requests.some((entry) => entry.path === '/upload/image')).toBe(false);
+      expect(stub.requests.some((entry) => entry.path === '/prompt')).toBe(false);
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
   });
 });

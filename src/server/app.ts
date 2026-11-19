@@ -198,6 +198,7 @@ class QueuedLibrary {
   readonly recordFailure: LibraryStore['recordFailure'];
   readonly finishBatch: LibraryStore['finishBatch'];
   readonly readImage: LibraryStore['readImage'];
+  readonly findImage: LibraryStore['findImage'];
   readonly deleteBatch: LibraryStore['deleteBatch'];
   readonly listPresets: LibraryStore['listPresets'];
   readonly createPreset: LibraryStore['createPreset'];
@@ -215,6 +216,7 @@ class QueuedLibrary {
     this.recordFailure = (batchId, failure) => this.run(() => store.recordFailure(batchId, failure));
     this.finishBatch = (batchId, status, extra) => this.run(() => store.finishBatch(batchId, status, extra));
     this.readImage = (imageId) => this.run(() => store.readImage(imageId));
+    this.findImage = (imageId) => this.run(() => store.findImage(imageId));
     this.deleteBatch = (batchId) => this.run(() => store.deleteBatch(batchId));
     this.listPresets = () => this.run(() => store.listPresets());
     this.createPreset = (input) => this.run(() => store.createPreset(input));
@@ -391,14 +393,22 @@ export function createApp(options: { dataDir: string }): Express {
       return;
     }
     // Adapters read reference bytes from disk, so the ids become absolute paths here.
+    // An upload wins, then a stored library image: the Generate canvas passes the image
+    // it is altering as a plain imageId, so nothing has to be re-uploaded for an edit.
     const referencePaths: string[] = [];
     for (const referenceId of input.referenceIds ?? []) {
       const reference = await findReference(referenceId);
-      if (reference === null) {
-        fail(res, 400, 'unknown_reference', `No uploaded reference with id "${referenceId}".`);
-        return;
+      if (reference !== null) {
+        referencePaths.push(reference.path);
+        continue;
       }
-      referencePaths.push(reference.path);
+      const stored = await store.findImage(referenceId);
+      if (stored !== null && existsSync(stored.path)) {
+        referencePaths.push(stored.path);
+        continue;
+      }
+      fail(res, 400, 'unknown_reference', `No uploaded or stored image with id "${referenceId}".`);
+      return;
     }
     const request: GenerationRequest = {
       prompt: input.prompt,

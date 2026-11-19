@@ -100,6 +100,18 @@ export interface CapabilityState {
   error: string | null;
 }
 
+export interface AlterationCandidate {
+  imageId: string;
+  index: number;
+  /** Two digit tile label, so the switcher reads 01, 02 and so on. */
+  label: string;
+}
+
+export interface AlterationTarget extends AlterationCandidate {
+  /** Every ready tile of the batch, in tile order. */
+  candidates: AlterationCandidate[];
+}
+
 export interface TileSummary {
   total: number;
   waiting: number;
@@ -120,6 +132,12 @@ export interface GenerationController {
   summary: TileSummary | null;
   failed: number[];
   canGenerate: boolean;
+  /** The image an alteration would use, or null when the canvas is not altering. */
+  alterationTarget: AlterationTarget | null;
+  /** Every ready image of the viewed batch, for the composer switcher. */
+  alterationCandidates: readonly AlterationCandidate[];
+  /** Bumps whenever the composer should take focus. */
+  promptFocusNonce: number;
   /** Why the generate button is off, when it is off. */
   blockedReason: string | null;
   setPrompt: (value: string) => void;
@@ -134,6 +152,10 @@ export interface GenerationController {
   reloadCapabilities: () => void;
   reloadBatch: () => void;
   clearBatch: () => void;
+  /** Picks which ready image of the viewed batch is the alteration source. */
+  selectSourceImage: (imageId: string) => void;
+  /** Returns to a blank canvas, ready for a brand new image. */
+  startNewImage: () => void;
 }
 
 type ProgressEvent = Extract<GenerationEvent, { type: 'progress' }>;
@@ -298,6 +320,32 @@ export function isPreservedRetry(record: BatchRecord, retried: readonly number[]
   return incoming.every((index) => retried.includes(index));
 }
 
+/**
+ * The image an alteration run would start from. The batch on the canvas is the subject:
+ * its first ready tile by default, or the tile the user picked. A provider that accepts
+ * no reference images, or a batch with nothing ready yet, has no target at all.
+ */
+export function resolveAlterationTarget(
+  batch: GenerationBatch | null,
+  selectedSourceImageId: string | null,
+  maxReferenceImages: number,
+): AlterationTarget | null {
+  if (batch === null || maxReferenceImages <= 0) return null;
+  const candidates: AlterationCandidate[] = [];
+  for (const tile of batch.tiles) {
+    if (tile.phase !== 'done' || tile.imageId === null) continue;
+    candidates.push({
+      imageId: tile.imageId,
+      index: tile.index,
+      label: String(tile.index + 1).padStart(2, '0'),
+    });
+  }
+  const first = candidates[0];
+  if (first === undefined) return null;
+  const selected = candidates.find((candidate) => candidate.imageId === selectedSourceImageId) ?? first;
+  return { ...selected, candidates };
+}
+
 export function clampCount(count: number, maxBatch: number): number {
   const limit = Math.max(1, Math.trunc(Number.isFinite(maxBatch) ? maxBatch : 1));
   const value = Math.trunc(Number.isFinite(count) ? count : 1);
@@ -384,6 +432,7 @@ export function toGenerationBody(
   form: GenerationForm,
   capabilities: ProviderCapabilities,
   providerId: string,
+  alterationSourceId: string | null = null,
 ): PreparedBody {
   const prompt = form.prompt.trim();
   const promptIssue = promptProblem(prompt);
@@ -412,8 +461,14 @@ export function toGenerationBody(
   if (capabilities.seed && seed !== null) body.seed = seed;
   if (capabilities.adjustableSteps) body.steps = clampSteps(form.steps);
   if (capabilities.guidance) body.guidance = form.guidance;
-  if (capabilities.maxReferenceImages > 0 && form.references.length > 0) {
-    body.referenceIds = form.references.slice(0, capabilities.maxReferenceImages).map((reference) => reference.id);
+  if (capabilities.maxReferenceImages > 0) {
+    const limit = Math.max(0, Math.trunc(capabilities.maxReferenceImages));
+    const manual = form.references.map((reference) => reference.id);
+    // The alteration source goes first, so it always survives the reference limit, and a
+    // duplicate manual argument for the same image is dropped rather than sent twice.
+    const combined = alterationSourceId === null ? manual : [alterationSourceId, ...manual];
+    const referenceIds = combined.filter((id, position) => combined.indexOf(id) === position).slice(0, limit);
+    if (referenceIds.length > 0) body.referenceIds = referenceIds;
   }
 
   return { body, problem: null };
@@ -454,12 +509,23 @@ interface GenerationState {
   capability: CapabilityState;
   batch: GenerationBatch | null;
   running: boolean;
+  /** The tile the user picked as the alteration source, or null to default to the first. */
+  selectedSourceImageId: string | null;
+  /** A counter, so focusing the composer is an explicit event, not a render side effect. */
+  promptFocusNonce: number;
 }
 
 type Listener = () => void;
 
 const listeners = new Set<Listener>();
-let state: GenerationState = { form: EMPTY_FORM, capability: EMPTY_CAPABILITY, batch: null, running: false };
+let state: GenerationState = {
+  form: EMPTY_FORM,
+  capability: EMPTY_CAPABILITY,
+  batch: null,
+  running: false,
+  selectedSourceImageId: null,
+  promptFocusNonce: 0,
+};
 let activeRun: (() => void) | null = null;
 /** Incremented whenever a new run starts or an existing one is cancelled. */
 let runToken = 0;
@@ -552,8 +618,12 @@ async function hydrateLatestBatch(): Promise<void> {
   }
 }
 
-/** Loads one stored batch for inspection, retry or reuse. A live run is never replaced. */
-export async function loadBatchById(batchId: string): Promise<void> {
+/**
+ * Loads one stored batch for inspection, retry or reuse. A live run is never replaced.
+ * A source image id selects the tile an alteration starts from; null means the first
+ * ready tile. The composer takes focus, because this is a deliberate jump to the canvas.
+ */
+export async function loadBatchById(batchId: string, sourceImageId: string | null = null): Promise<void> {
   if (state.running) return;
   hydrationAttempted = true;
   const token = ++selectionToken;
@@ -562,11 +632,53 @@ export async function loadBatchById(batchId: string): Promise<void> {
     const record = await getBatch(batchId);
     if (token !== selectionToken || runId !== runToken) return;
     update((current) =>
-      current.running ? current : { ...current, batch: batchFromRecord(record), running: false },
+      current.running
+        ? current
+        : {
+            ...current,
+            batch: batchFromRecord(record),
+            running: false,
+            selectedSourceImageId: sourceImageId,
+            promptFocusNonce: current.promptFocusNonce + 1,
+          },
     );
   } catch {
     // A missing batch leaves the current canvas alone.
   }
+}
+
+/** Opens a stored batch on the canvas, optionally on one exact image as the alter source. */
+export function openStoredBatch(batchId: string, sourceImageId: string | null = null): Promise<void> {
+  return loadBatchById(batchId, sourceImageId);
+}
+
+/** Opens a stored batch on the canvas with this image selected for alteration. */
+export function alterImage(batchId: string, imageId: string): void {
+  void loadBatchById(batchId, imageId);
+}
+
+/** Clears the canvas back to a blank composer, ready for a brand new image. */
+export function startNewImage(): void {
+  if (state.running) return;
+  hydrationAttempted = true;
+  selectionToken += 1;
+  closeRun();
+  update((current) => ({
+    ...current,
+    batch: null,
+    running: false,
+    selectedSourceImageId: null,
+    promptFocusNonce: current.promptFocusNonce + 1,
+    form: { ...current.form, references: [] },
+  }));
+}
+
+function selectSourceImageState(imageId: string): void {
+  update((current) =>
+    current.selectedSourceImageId === imageId
+      ? current
+      : { ...current, selectedSourceImageId: imageId, promptFocusNonce: current.promptFocusNonce + 1 },
+  );
 }
 
 /** Fills the composer from a preset or batch, clamped to the active provider. */
@@ -579,8 +691,12 @@ export function adoptPromptSettings(settings: PromptSettings, providerId: string
     const width = settings.width === undefined ? current.form.width : snapToMultiple(settings.width, multiple);
     const height = settings.height === undefined ? current.form.height : snapToMultiple(settings.height, multiple);
     const count = settings.count === undefined ? current.form.count : clampCount(settings.count, maxBatch);
+    // Reusing a prompt means a new image from that prompt, not an alteration of whatever
+    // batch happened to be on the canvas. A live run keeps its own batch on screen.
     return {
       ...current,
+      batch: current.running ? current.batch : null,
+      selectedSourceImageId: current.running ? current.selectedSourceImageId : null,
       form: {
         ...current.form,
         providerId: providerId ?? current.form.providerId,
@@ -762,7 +878,17 @@ async function beginGeneration(onSettled: () => void): Promise<void> {
   const providerId = state.capability.providerId;
   if (capabilities === null || providerId === null) return;
 
-  const prepared = toGenerationBody(state.form, capabilities, providerId);
+  const alterationTarget = resolveAlterationTarget(
+    state.batch,
+    state.selectedSourceImageId,
+    capabilities.maxReferenceImages,
+  );
+  const prepared = toGenerationBody(
+    state.form,
+    capabilities,
+    providerId,
+    alterationTarget === null ? null : alterationTarget.imageId,
+  );
   if (prepared.body === null) return;
   const body = prepared.body;
 
@@ -784,7 +910,9 @@ async function beginGeneration(onSettled: () => void): Promise<void> {
     finishedAt: null,
     seed: body.seed ?? null,
   };
-  update((current) => ({ ...current, running: true, batch }));
+  // The selection belongs to the batch just left behind. Clearing it makes the finished
+  // alteration batch target its own first ready image, so editing can continue in place.
+  update((current) => ({ ...current, running: true, batch, selectedSourceImageId: null }));
 
   let created: { batchId: string };
   try {
@@ -946,10 +1074,7 @@ async function reloadBatchRun(onSettled: () => void): Promise<void> {
 
 /** Returns the canvas to the empty prompt-starter screen. A live run is never cleared. */
 function clearBatchState(): void {
-  if (state.running) return;
-  selectionToken += 1;
-  closeRun();
-  update((current) => (current.batch === null ? current : { ...current, batch: null, running: false }));
+  startNewImage();
 }
 
 /**
@@ -1027,6 +1152,24 @@ export function useGeneration(): GenerationController {
     clearBatchState();
   }, []);
 
+  const selectSourceImage = useCallback((imageId: string): void => {
+    selectSourceImageState(imageId);
+  }, []);
+
+  const startNewImageAction = useCallback((): void => {
+    startNewImage();
+  }, []);
+
+  const maxReferenceImages =
+    snapshot.capability.capabilities === null
+      ? 0
+      : Math.max(0, Math.trunc(snapshot.capability.capabilities.maxReferenceImages));
+  const alterationTarget = resolveAlterationTarget(
+    snapshot.batch,
+    snapshot.selectedSourceImageId,
+    maxReferenceImages,
+  );
+
   const promptIssue = promptProblem(snapshot.form.prompt);
   const sizeIssue = sizeProblem(snapshot.form.width, snapshot.form.height);
   const seedIssue = seedProblem(snapshot.form.seed);
@@ -1051,6 +1194,9 @@ export function useGeneration(): GenerationController {
     failed: snapshot.batch === null ? [] : failedIndices(snapshot.batch.tiles),
     canGenerate: blockedReason === null,
     blockedReason,
+    alterationTarget,
+    alterationCandidates: alterationTarget === null ? [] : alterationTarget.candidates,
+    promptFocusNonce: snapshot.promptFocusNonce,
     setPrompt,
     updateForm,
     choosePreset,
@@ -1063,5 +1209,7 @@ export function useGeneration(): GenerationController {
     reloadCapabilities,
     reloadBatch,
     clearBatch,
+    selectSourceImage,
+    startNewImage: startNewImageAction,
   };
 }

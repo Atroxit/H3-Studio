@@ -26,6 +26,10 @@ export interface ResultsGridProps {
   onOpenImage: (imageId: string, trigger: HTMLElement | null) => void;
   /** Adds a starter to the prompt, so a first run is one click away. */
   onUseStarter: (prompt: string) => void;
+  /** The tile an alteration would start from, or null when alterations are unavailable. */
+  alterationSourceId: string | null;
+  /** Picks another ready tile as the alteration source, without opening the viewer. */
+  onSelectSource: (imageId: string) => void;
 }
 
 /** The first screen: three prompts that only fill the composer, never submit it. */
@@ -169,15 +173,36 @@ interface ResultTileProps {
   elapsed: string | null;
   settled: boolean;
   canRetry: boolean;
+  alterationSourceId: string | null;
   onRetry: (index: number) => void;
   onOpen: (imageId: string, trigger: HTMLElement | null) => void;
+  onSelectSource: (imageId: string) => void;
 }
 
-function ResultTile({ tile, total, width, height, elapsed, settled, canRetry, onRetry, onOpen }: ResultTileProps): ReactNode {
+function ResultTile({
+  tile,
+  total,
+  width,
+  height,
+  elapsed,
+  settled,
+  canRetry,
+  alterationSourceId,
+  onRetry,
+  onOpen,
+  onSelectSource,
+}: ResultTileProps): ReactNode {
   const label = `Image ${tile.index + 1} of ${total}`;
+  const ready = tile.phase === 'done' && tile.imageId !== null;
+  const isAlterSource = ready && alterationSourceId !== null && tile.imageId === alterationSourceId;
+  const canAlter = ready && alterationSourceId !== null;
 
   return (
-    <article className={`gen-tile ${stateClass(tile)}`} style={ratioStyle(width, height)} aria-label={label}>
+    <article
+      className={`gen-tile ${stateClass(tile)}${isAlterSource ? ' is-alter-source' : ''}`}
+      style={ratioStyle(width, height)}
+      aria-label={label}
+    >
       <span className="gen-tile-index">{String(tile.index + 1).padStart(2, '0')}</span>
       <span className="gen-tile-tags">
         {elapsed === null ? null : (
@@ -250,6 +275,23 @@ function ResultTile({ tile, total, width, height, elapsed, settled, canRetry, on
 
       <span className="gen-tile-meta">
         <span>{tile.width === null || tile.height === null ? `${width} x ${height}` : `${tile.width} x ${tile.height}`}</span>
+        {canAlter && tile.imageId !== null ? (
+          isAlterSource ? (
+            <span className="gen-alter-badge">Altering</span>
+          ) : (
+            <button
+              type="button"
+              className="gen-alter-action"
+              title={`Alter image ${tile.index + 1} instead`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onSelectSource(tile.imageId ?? '');
+              }}
+            >
+              Alter this
+            </button>
+          )
+        ) : null}
         <span>
           {tile.phase === 'done'
             ? tile.imageId === null
@@ -311,6 +353,8 @@ export function ResultsGrid({
   onClear,
   onOpenImage,
   onUseStarter,
+  alterationSourceId,
+  onSelectSource,
 }: ResultsGridProps): ReactNode {
   const studio = useStudio();
   const tickClocks = reconcileClocks(batch, running);
@@ -340,8 +384,8 @@ export function ResultsGrid({
             </span>
           </div>
           <div className="gen-empty-copy">
-            <h3 className="gen-empty-title">Nothing generated yet</h3>
-            <p className="gen-empty-lead">Write a prompt, or start with one of these.</p>
+            <h3 className="gen-empty-title">Create a new image</h3>
+            <p className="gen-empty-lead">Write a prompt below, or start with one of these.</p>
           </div>
           <ul className="gen-starters" aria-label="Prompt starters">
             {PROMPT_STARTERS.map((starter) => (
@@ -416,8 +460,8 @@ export function ResultsGrid({
           >
             Use prompt
           </Button>
-          <Button variant="ghost" size="sm" disabled={running} onClick={onClear}>
-            Clear canvas
+          <Button variant="secondary" size="sm" disabled={running} onClick={onClear}>
+            New image
           </Button>
         </div>
       </header>
@@ -471,8 +515,10 @@ export function ResultsGrid({
             elapsed={elapsedLabel(tickClocks.get(tile.index), now)}
             settled={!running}
             canRetry={canRetry}
+            alterationSourceId={alterationSourceId}
             onRetry={(index) => onRetry([index])}
             onOpen={onOpenImage}
+            onSelectSource={onSelectSource}
           />
         ))}
       </div>

@@ -262,6 +262,12 @@
   border-color: var(--line);
 }
 
+/* The tile an alteration starts from, marked so the prompt box below has a visible subject. */
+.gen-tile.is-alter-source {
+  border-color: var(--accent-line);
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+
 .gen-tile-open {
   position: absolute;
   inset: 0;
@@ -457,6 +463,38 @@
   pointer-events: none;
 }
 
+/* Alteration controls in the tile footer. The footer itself ignores pointer events so the
+   tile stays one big open button; these two opt back in. */
+.gen-alter-badge,
+.gen-alter-action {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  pointer-events: auto;
+}
+
+.gen-alter-badge {
+  border: 1px solid var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.gen-alter-action {
+  border: 1px solid var(--line);
+  background: var(--scrim-strong);
+  color: var(--text);
+}
+
+.gen-alter-action:hover {
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
 /* Provider rewrite */
 .gen-revised {
   display: flex;
@@ -514,6 +552,78 @@
   gap: var(--space-2);
   padding-top: var(--space-3);
   border-top: 1px solid var(--line-soft);
+}
+
+/* Alteration bar: the source thumbnail, its tile label and a one click way out. */
+.gen-alter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-control);
+  background: var(--accent-soft);
+}
+
+.gen-alter-thumb {
+  display: block;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--panel-sunken);
+}
+
+.gen-alter-copy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.gen-alter-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.gen-alter-switch {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.gen-alter-pill {
+  min-width: 26px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--panel-sunken);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.gen-alter-pill:hover:not(:disabled) {
+  border-color: var(--accent-line);
+  color: var(--text);
+}
+
+.gen-alter-pill.is-active {
+  border-color: var(--accent);
+  background: var(--panel);
+  color: var(--accent);
+}
+
+.gen-alter-pill:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .gen-composer-head {

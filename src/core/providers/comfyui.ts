@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import type {
   GeneratedItem,
   GenerationContext,
@@ -41,6 +43,14 @@ const DEFAULT_CLIENT_ID = 'h3-studio';
 const MAX_BATCH = 4;
 const MAX_POLL_PERCENT = 95;
 const MAX_RANDOM_SEED = 2_147_483_647;
+const REFERENCE_CONDITIONING_CLASSES: readonly string[] = ['MiniMaxH3ImageConditioning', 'PH3ImageConditioning'];
+const REFERENCE_MIME_BY_EXTENSION: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+};
+const DEFAULT_REFERENCE_MIME = 'image/png';
 
 /** A standard text to image pipeline. Placeholders are replaced per request. */
 export const defaultWorkflowTemplate: WorkflowGraph = {
@@ -381,6 +391,125 @@ function templateHasBatchPlaceholder(template: WorkflowGraph): boolean {
   return JSON.stringify(template).includes('{{batch}}');
 }
 
+function nodeClassType(node: unknown): string | null {
+  if (!isRecord(node)) return null;
+  const classType = node['class_type'];
+  return typeof classType === 'string' ? classType : null;
+}
+
+/** True when the graph has the conditioning node that accepts reference image slots. */
+function templateSupportsReferences(template: WorkflowGraph): boolean {
+  return Object.values(template).some((node) => {
+    const classType = nodeClassType(node);
+    return classType !== null && REFERENCE_CONDITIONING_CLASSES.includes(classType);
+  });
+}
+
+/**
+ * Uploads one local file to ComfyUI's input directory and returns the name the graph
+ * refers to. ComfyUI answers with a name and an optional subfolder, and a LoadImage
+ * node addresses the two joined.
+ */
+async function uploadReferenceImage(
+  baseUrl: string,
+  filePath: string,
+  signal: AbortSignal,
+): Promise<string> {
+  const bytes = await readFile(filePath);
+  const mimeType = REFERENCE_MIME_BY_EXTENSION[path.extname(filePath).toLowerCase()] ?? DEFAULT_REFERENCE_MIME;
+  const form = new FormData();
+  form.append('image', new Blob([bytes], { type: mimeType }), path.basename(filePath));
+  form.append('type', 'input');
+  form.append('overwrite', 'true');
+
+  const response = await fetch(`${baseUrl}/upload/image`, { method: 'POST', body: form, signal });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new ComfyUIError(`ComfyUI POST /upload/image failed with HTTP ${response.status}`, 'http');
+  }
+  const payload = parseJson(text);
+  const name = isRecord(payload) ? payload['name'] : undefined;
+  if (typeof name !== 'string' || name.length === 0) {
+    throw new ComfyUIError('ComfyUI POST /upload/image returned no image name', 'bad_response');
+  }
+  const subfolder = isRecord(payload) ? payload['subfolder'] : undefined;
+  return typeof subfolder === 'string' && subfolder.length > 0 ? `${subfolder}/${name}` : name;
+}
+
+/**
+ * Adds one LoadImage node per uploaded reference and wires it to the MiniMax H3 image
+ * conditioning node, which takes references as images.image_1, images.image_2 and so on.
+ * The graph is cloned: a template from options is shared across requests and runs.
+ */
+export function attachReferenceImages(
+  graph: Record<string, unknown>,
+  uploadedNames: readonly string[],
+): Record<string, unknown> {
+  if (uploadedNames.length === 0) return graph;
+
+  const nodeIds = Object.keys(graph);
+  const conditioningIds = nodeIds.filter((nodeId) => {
+    const classType = nodeClassType(graph[nodeId]);
+    return classType !== null && REFERENCE_CONDITIONING_CLASSES.includes(classType);
+  });
+  if (conditioningIds.length === 0) {
+    throw new ComfyUIError(
+      'This ComfyUI workflow does not have a reference image conditioning node',
+      'unsupported_references',
+    );
+  }
+
+  const cloned: Record<string, unknown> = {};
+  for (const nodeId of nodeIds) {
+    const node = graph[nodeId];
+    const inputs = isRecord(node) ? node['inputs'] : undefined;
+    cloned[nodeId] = isRecord(node) && isRecord(inputs) ? { ...node, inputs: { ...inputs } } : node;
+  }
+
+  const taken = new Set(nodeIds);
+  const loadNodeIds = uploadedNames.map((uploadedName, position) => {
+    let counter = position + 1;
+    let nodeId = `ref_image_${counter}`;
+    while (taken.has(nodeId)) {
+      counter += 1;
+      nodeId = `ref_image_${counter}`;
+    }
+    taken.add(nodeId);
+    cloned[nodeId] = { class_type: 'LoadImage', inputs: { image: uploadedName, upload: 'image' } };
+    return nodeId;
+  });
+
+  for (const nodeId of conditioningIds) {
+    const node = cloned[nodeId];
+    const inputs = isRecord(node) ? node['inputs'] : undefined;
+    if (!isRecord(node) || !isRecord(inputs)) continue;
+    loadNodeIds.forEach((loadNodeId, index) => {
+      inputs[`images.image_${index + 1}`] = [loadNodeId, 0];
+    });
+  }
+
+  return cloned;
+}
+
+/**
+ * H3 reads a reference image from a <Picture N> token in the prompt. A plain alteration
+ * instruction names no picture, so the first one is added; a prompt that already names a
+ * picture is left exactly as the user wrote it.
+ */
+export function formatReferencePrompt(
+  prompt: string,
+  template: WorkflowGraph,
+  hasReferences: boolean,
+): string {
+  if (!hasReferences) return prompt;
+  const h3Conditioning = Object.values(template).some(
+    (node) => nodeClassType(node) === 'MiniMaxH3ImageConditioning',
+  );
+  if (!h3Conditioning) return prompt;
+  if (/<Picture\s+\d+>/i.test(prompt)) return prompt;
+  return `Edit <Picture 1>. ${prompt.trim()}`;
+}
+
 function buildReplacements(
   request: GenerationRequest,
   options: Record<string, unknown>,
@@ -691,14 +820,18 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
     request: GenerationRequest,
     slot: number,
     slotSeed: number,
+    uploadedRefs: readonly string[],
     ctx: GenerationContext,
   ): Promise<GeneratedItem> {
     const slotStartedMs = Date.now();
     let promptId: string;
     try {
-      const graph = substituteWorkflow(
-        template,
-        buildReplacements({ ...request, count: 1 }, options, config, slotSeed),
+      const graph = attachReferenceImages(
+        substituteWorkflow(
+          template,
+          buildReplacements({ ...request, count: 1 }, options, config, slotSeed),
+        ),
+        uploadedRefs,
       );
       promptId = await queuePrompt(baseUrl, clientId, graph, ctx.signal);
     } catch (error) {
@@ -745,18 +878,41 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
       finishedAt: new Date().toISOString(),
     });
 
+    // References need the H3 conditioning node, so a graph without one is rejected before
+    // anything is uploaded: a wrong template should not leave files on the server.
+    const referencePaths = request.referenceIds ?? [];
+    let uploadedRefs: string[] = [];
+    if (referencePaths.length > 0) {
+      if (!templateSupportsReferences(template)) {
+        throw new ComfyUIError(
+          'This ComfyUI workflow does not have a reference image conditioning node',
+          'unsupported_references',
+        );
+      }
+      for (const filePath of referencePaths) {
+        uploadedRefs.push(await uploadReferenceImage(baseUrl, filePath, ctx.signal));
+      }
+    }
+    const effectiveRequest =
+      uploadedRefs.length > 0
+        ? { ...request, prompt: formatReferencePrompt(request.prompt, template, true) }
+        : request;
+
     if (request.count > 1 && !templateHasBatchPlaceholder(template)) {
       for (let slot = 0; slot < request.count; slot += 1) {
         throwIfAborted(ctx.signal);
         const slotSeed = seed + slot;
-        const item = await generateSlot(template, request, slot, slotSeed, ctx);
+        const item = await generateSlot(template, effectiveRequest, slot, slotSeed, uploadedRefs, ctx);
         items.push(item);
         ctx.onEvent({ type: 'item', index: slot, item });
       }
       return outcome();
     }
 
-    const graph = substituteWorkflow(template, buildReplacements(request, options, config, seed));
+    const graph = attachReferenceImages(
+      substituteWorkflow(template, buildReplacements(effectiveRequest, options, config, seed)),
+      uploadedRefs,
+    );
     const promptId = await queuePrompt(baseUrl, clientId, graph, ctx.signal);
     const history = await waitForHistory(baseUrl, promptId, pollOptions, ctx, 0);
     if (history.state === 'error') {

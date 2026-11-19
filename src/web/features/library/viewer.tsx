@@ -381,6 +381,19 @@ export function ImageViewer({
             <Button variant="ghost" size="sm" onClick={usePrompt}>
               Use prompt
             </Button>
+            {image === undefined ? null : (
+              <Button
+                variant="ghost"
+                size="sm"
+                title="Open this image on the Generate canvas as an alteration"
+                onClick={() => {
+                  onClose();
+                  studio.alterImage(batch.id, image.id);
+                }}
+              >
+                Alter this image
+              </Button>
+            )}
             <Button variant="ghost" size="sm" onClick={toggleZoom} aria-pressed={zoom === 'actual'}>
               {zoom === 'actual' ? 'Fit' : '1:1'}
             </Button>

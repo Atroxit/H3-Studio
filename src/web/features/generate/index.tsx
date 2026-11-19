@@ -78,6 +78,10 @@ export function GenerateCanvas(): ReactNode {
           void openImage(imageId, trigger);
         }}
         onUseStarter={generation.setPrompt}
+        alterationSourceId={
+          generation.alterationTarget === null ? null : generation.alterationTarget.imageId
+        }
+        onSelectSource={generation.selectSourceImage}
       />
       <PromptComposer
         form={generation.form}
@@ -86,6 +90,11 @@ export function GenerateCanvas(): ReactNode {
         blockedReason={generation.blockedReason}
         snappedWidth={snappedWidth}
         snappedHeight={snappedHeight}
+        alterationSource={generation.alterationTarget}
+        alterationCandidates={generation.alterationCandidates}
+        onSelectAlterationSource={generation.selectSourceImage}
+        onNewImage={generation.startNewImage}
+        focusNonce={generation.promptFocusNonce}
         onChange={generation.setPrompt}
         onGenerate={generation.start}
         onCancel={generation.cancel}

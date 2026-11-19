@@ -270,6 +270,13 @@ button {
   border-right: 1px solid var(--line);
 }
 
+/* The one action that starts a fresh image, so it spans the rail and stays at the top. */
+.rail-new-btn {
+  width: 100%;
+  min-height: 38px;
+  font-size: var(--text-sm);
+}
+
 .rail-section {
   display: flex;
   flex-direction: column;
