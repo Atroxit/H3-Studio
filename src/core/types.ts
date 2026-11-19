@@ -3,6 +3,9 @@
 
 export type ProviderKind = 'mock' | 'comfyui' | 'openai-images' | 'a1111';
 
+/** The diffusion model a request runs: the fast 11.7 GB weights or the 19.5 GB INT8 build. */
+export type H3ModelVariant = 'w4a8' | 'int8_convrot';
+
 export interface SizePreset {
   id: string;
   label: string;
@@ -47,6 +50,8 @@ export interface GenerationRequest {
   referenceIds?: string[];
   /** Runs the graph's prompt enhancer, when the graph has one and no reference image is in play. */
   enhancePrompt?: boolean;
+  /** Picks the H3 diffusion model when the graph loads one of the official variants. */
+  modelVariant?: H3ModelVariant;
   extra?: Record<string, unknown>;
 }
 

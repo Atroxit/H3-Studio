@@ -25,6 +25,20 @@ interface ChipOption {
   detail?: string;
 }
 
+/** The two official H3 diffusion models, fast weights first. */
+const MODEL_PRECISION_OPTIONS: readonly ChipOption[] = [
+  {
+    value: 'w4a8',
+    label: 'Fast (W4A8, 11.7 GB)',
+    detail: 'Fits 100% in 24 GB VRAM with zero offloading',
+  },
+  {
+    value: 'int8_convrot',
+    label: 'Max quality (INT8 ConvRot, 19.5 GB)',
+    detail: '8-bit weights for maximum micro-texture and text fidelity',
+  },
+];
+
 function groupPresetsByRatio(presets: readonly SizePreset[]): AspectGroup[] {
   const groups: AspectGroup[] = [];
   for (const preset of presets) {
@@ -148,9 +162,11 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const advancedHeadingId = useId();
   const advancedPanelId = useId();
   const enhanceId = useId();
+  const precisionName = useId();
   const referencesHeadingId = useId();
   const notesHeadingId = useId();
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  // Open by default, so the model precision switch and the prompt enhancer are on screen.
+  const [advancedOpen, setAdvancedOpen] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [referenceError, setReferenceError] = useState<string | null>(null);
 
@@ -207,7 +223,7 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
     ...(capabilities.negativePrompt ? [] : ['Negative prompt is not supported.']),
   ]);
   const advancedCount =
-    1 +
+    2 +
     (capabilities.adjustableSteps ? 1 : 0) +
     (capabilities.guidance ? 1 : 0) +
     (capabilities.negativePrompt ? 1 : 0);
@@ -401,6 +417,17 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
         )}
 
         <div className="gen-advanced" id={advancedPanelId} hidden={!advancedOpen || advancedCount === 0}>
+          <ChipGroup
+            legend="Model precision"
+            name={precisionName}
+            value={form.modelVariant}
+            options={MODEL_PRECISION_OPTIONS}
+            disabled={controller.running}
+            stacked
+            onChange={(value) =>
+              controller.updateForm({ modelVariant: value === 'int8_convrot' ? 'int8_convrot' : 'w4a8' })
+            }
+          />
           {capabilities.adjustableSteps ? (
             <Slider
               label="Steps"

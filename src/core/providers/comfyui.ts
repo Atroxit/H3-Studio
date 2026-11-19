@@ -5,6 +5,7 @@ import type {
   GenerationContext,
   GenerationOutcome,
   GenerationRequest,
+  H3ModelVariant,
   ProviderAdapter,
   ProviderCapabilities,
   ProviderConfig,
@@ -52,6 +53,11 @@ const REFERENCE_MIME_BY_EXTENSION: Record<string, string> = {
   '.webp': 'image/webp',
 };
 const DEFAULT_REFERENCE_MIME = 'image/png';
+const H3_UNET_BY_VARIANT: Readonly<Record<H3ModelVariant, string>> = {
+  w4a8: 'minimax_h3_image_pruned_w4a8.safetensors',
+  int8_convrot: 'minimax_h3_image_pruned_int8_convrot.safetensors',
+};
+const H3_UNET_NAMES: ReadonlySet<string> = new Set(Object.values(H3_UNET_BY_VARIANT));
 
 /** A standard text to image pipeline. Placeholders are replaced per request. */
 export const defaultWorkflowTemplate: WorkflowGraph = {
@@ -516,6 +522,37 @@ export function applyPromptEnhancer(
     const inputs = node['inputs'];
     if (nodeClassType(node) === 'ComfySwitchNode' && isRecord(inputs) && typeof inputs['switch'] === 'boolean') {
       cloned[nodeId] = { ...node, inputs: { ...inputs, switch: wanted } };
+      changed = true;
+      continue;
+    }
+    cloned[nodeId] = node;
+  }
+  return changed ? cloned : graph;
+}
+
+/**
+ * Picks the diffusion model the graph loads. Only a UNETLoader whose unet_name is one of
+ * the official H3 files is retargeted, so a generic ComfyUI graph keeps its own model.
+ * The graph is cloned: a template from options is shared across requests and runs.
+ */
+export function applyModelVariant(
+  graph: Record<string, unknown>,
+  variant: H3ModelVariant | undefined,
+): Record<string, unknown> {
+  if (variant === undefined) return graph;
+  const target = H3_UNET_BY_VARIANT[variant];
+  const cloned: Record<string, unknown> = {};
+  let changed = false;
+  for (const [nodeId, node] of Object.entries(graph)) {
+    const inputs = isRecord(node) ? node['inputs'] : undefined;
+    if (
+      nodeClassType(node) === 'UNETLoader' &&
+      isRecord(node) &&
+      isRecord(inputs) &&
+      typeof inputs['unet_name'] === 'string' &&
+      H3_UNET_NAMES.has(inputs['unet_name'])
+    ) {
+      cloned[nodeId] = { ...node, inputs: { ...inputs, unet_name: target } };
       changed = true;
       continue;
     }
@@ -1050,16 +1087,19 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
     const slotStartedMs = Date.now();
     let run: PromptRun;
     try {
-      const graph = applyPromptEnhancer(
-        attachReferenceImages(
-          substituteWorkflow(
-            template,
-            buildReplacements({ ...request, count: 1 }, options, config, slotSeed),
+      const graph = applyModelVariant(
+        applyPromptEnhancer(
+          attachReferenceImages(
+            substituteWorkflow(
+              template,
+              buildReplacements({ ...request, count: 1 }, options, config, slotSeed),
+            ),
+            uploadedRefs,
           ),
-          uploadedRefs,
+          request.enhancePrompt,
+          uploadedRefs.length > 0,
         ),
-        request.enhancePrompt,
-        uploadedRefs.length > 0,
+        request.modelVariant,
       );
       run = await runPrompt(baseUrl, progressUrl, clientId, graph, pollOptions, ctx, slot);
     } catch (error) {
@@ -1130,13 +1170,16 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
       return outcome();
     }
 
-    const graph = applyPromptEnhancer(
-      attachReferenceImages(
-        substituteWorkflow(template, buildReplacements(effectiveRequest, options, config, seed)),
-        uploadedRefs,
+    const graph = applyModelVariant(
+      applyPromptEnhancer(
+        attachReferenceImages(
+          substituteWorkflow(template, buildReplacements(effectiveRequest, options, config, seed)),
+          uploadedRefs,
+        ),
+        effectiveRequest.enhancePrompt,
+        uploadedRefs.length > 0,
       ),
-      effectiveRequest.enhancePrompt,
-      uploadedRefs.length > 0,
+      effectiveRequest.modelVariant,
     );
     const run = await runPrompt(baseUrl, progressUrl, clientId, graph, pollOptions, ctx, 0);
     if (run.history.state === 'error') {

@@ -64,6 +64,7 @@ const generationSchema = z.object({
   guidance: z.number().min(0).max(50).optional(),
   referenceIds: z.array(z.string().min(1).max(128)).max(8).optional(),
   enhancePrompt: z.boolean().optional(),
+  modelVariant: z.enum(['w4a8', 'int8_convrot']).optional(),
 });
 
 const referenceSchema = z.object({
@@ -457,6 +458,7 @@ export function createApp(options: { dataDir: string }): StudioApplication {
       guidance: input.guidance,
       referenceIds: referencePaths,
       enhancePrompt: input.enhancePrompt,
+      modelVariant: input.modelVariant,
     };
     // A managed backend may still be loading: waiting here is what makes generating
     // straight after boot, or after switching provider, work on the first try.

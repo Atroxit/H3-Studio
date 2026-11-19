@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { synthImage } from '../../src/core/png';
 import {
   ComfyUIError,
+  applyModelVariant,
   applyPromptEnhancer,
   attachReferenceImages,
   createComfyUIAdapter,
@@ -1059,5 +1060,85 @@ describe('ComfyUI prompt enhancer', () => {
     );
 
     expect(switchOf(postedGraph(stub))).toBe(true);
+  });
+});
+
+/** A graph with one H3 diffusion loader next to a generic checkpoint loader. */
+function variantTemplate(): Record<string, unknown> {
+  return {
+    '1': {
+      class_type: 'UNETLoader',
+      inputs: { unet_name: 'minimax_h3_image_pruned_int8_convrot.safetensors', weight_dtype: 'default' },
+    },
+    '2': {
+      class_type: 'UNETLoader',
+      inputs: { unet_name: 'v1-5-pruned-emaonly.safetensors', weight_dtype: 'default' },
+    },
+    '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'h3-studio', images: ['1', 0] } },
+  };
+}
+
+function unetNameOf(graph: Record<string, unknown>, nodeId: string): unknown {
+  const node = graph[nodeId];
+  if (!isRecord(node)) throw new Error(`missing node ${nodeId}`);
+  return inputsOf(node)['unet_name'];
+}
+
+describe('ComfyUI model variant', () => {
+  it('returns the graph untouched when the request names no variant', () => {
+    const graph = variantTemplate();
+    expect(applyModelVariant(graph, undefined)).toBe(graph);
+  });
+
+  it('switches an H3 UNETLoader between the two official weights', () => {
+    const graph = variantTemplate();
+
+    const fast = applyModelVariant(graph, 'w4a8');
+    expect(unetNameOf(fast, '1')).toBe('minimax_h3_image_pruned_w4a8.safetensors');
+    // The template itself is never mutated.
+    expect(unetNameOf(graph, '1')).toBe('minimax_h3_image_pruned_int8_convrot.safetensors');
+
+    const max = applyModelVariant(fast, 'int8_convrot');
+    expect(unetNameOf(max, '1')).toBe('minimax_h3_image_pruned_int8_convrot.safetensors');
+  });
+
+  it('leaves a non-H3 UNETLoader node untouched', () => {
+    const graph = variantTemplate();
+    expect(unetNameOf(applyModelVariant(graph, 'w4a8'), '2')).toBe('v1-5-pruned-emaonly.safetensors');
+  });
+
+  it('returns the graph unchanged when no H3 UNETLoader is present', () => {
+    const graph: Record<string, unknown> = {
+      '1': { class_type: 'UNETLoader', inputs: { unet_name: 'sd15.safetensors' } },
+      '2': { class_type: 'KSampler', inputs: { seed: 1 } },
+    };
+    expect(applyModelVariant(graph, 'w4a8')).toBe(graph);
+  });
+
+  it('posts the w4a8 UNet filename to ComfyUI', async () => {
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-variant' } },
+      historyResponse: () => ({
+        status: 200,
+        body: { 'prompt-variant': { outputs: { '9': { images: [{ filename: 'variant.png', subfolder: '' }] } } } },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(
+      comfyConfig(stub.baseUrl, {
+        pollIntervalMs: 10,
+        timeoutMs: 2000,
+        workflowTemplate: JSON.stringify(variantTemplate()),
+      }),
+    );
+    const run = context();
+
+    await adapter.generate(
+      { ...BASE_REQUEST, modelVariant: 'w4a8' },
+      { signal: run.signal, onEvent: () => {} },
+    );
+
+    expect(unetNameOf(postedGraph(stub), '1')).toBe('minimax_h3_image_pruned_w4a8.safetensors');
+    expect(unetNameOf(postedGraph(stub), '2')).toBe('v1-5-pruned-emaonly.safetensors');
   });
 });

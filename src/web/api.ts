@@ -4,6 +4,7 @@
 import type {
   BatchRecord,
   GenerationEvent,
+  H3ModelVariant,
   Preset,
   ProviderCapabilities,
   ProviderConfig,
@@ -47,6 +48,7 @@ export interface GenerationBody {
   guidance?: number;
   referenceIds?: string[];
   enhancePrompt?: boolean;
+  modelVariant?: H3ModelVariant;
 }
 
 export interface ReferenceBody {
