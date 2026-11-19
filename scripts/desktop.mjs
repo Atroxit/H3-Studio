@@ -26,15 +26,28 @@ if (typeof electronBinary !== 'string' || !existsSync(electronBinary)) {
 }
 
 const env = { ...process.env };
-delete env.ELECTRON_RUN_AS_NODE;
+for (const key of Object.keys(env)) {
+  if (key.toLowerCase() === 'electron_run_as_node') {
+    delete env[key];
+  }
+}
 
-const child = spawn(electronBinary, [root], { env, stdio: 'inherit', windowsHide: false });
+const child = spawn(electronBinary, [root, ...process.argv.slice(2)], { env, stdio: 'inherit', windowsHide: false });
 
 child.on('error', (error) => {
   console.error(`Could not start Electron: ${error.message}`);
   process.exit(1);
 });
 
-child.on('exit', (code) => {
-  process.exit(code ?? 0);
+child.on('exit', (code, signal) => {
+  if (signal) {
+    console.error(`Electron terminated by signal ${signal}.`);
+    process.exit(1);
+  }
+  if (typeof code === 'number' && code !== 0) {
+    const hex = '0x' + (code >>> 0).toString(16).toUpperCase().padStart(8, '0');
+    console.error(`Electron exited with code ${code} (${hex}).`);
+    process.exit(code);
+  }
+  process.exit(0);
 });
