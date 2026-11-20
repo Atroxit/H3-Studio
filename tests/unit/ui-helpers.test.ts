@@ -18,6 +18,8 @@ import {
 import {
   applyPreviewEvent,
   applyProgressEvent,
+  readCurrentFormSnapshot,
+  readPromptEnhancerPreference,
   resolveAlterationTarget,
   type GenerationBatch,
   type GenerationTile,
@@ -367,6 +369,23 @@ describe('resolveAlterationTarget', () => {
   it('falls back to the first ready image when the selection is stale', () => {
     const target = resolveAlterationTarget(batchOf([readyTile(0, 'img_one')]), 'img_gone', 4);
     expect(target?.imageId).toBe('img_one');
+  });
+});
+
+describe('composer snapshot and enhancer preference', () => {
+  it('reads the active composer with safe defaults', () => {
+    const snapshot = readCurrentFormSnapshot();
+    expect(typeof snapshot.prompt).toBe('string');
+    expect(Number.isInteger(snapshot.width)).toBe(true);
+    expect(snapshot.width).toBeGreaterThan(0);
+    expect(Number.isInteger(snapshot.height)).toBe(true);
+    expect(snapshot.height).toBeGreaterThan(0);
+    expect(Number.isInteger(snapshot.count)).toBe(true);
+    expect(snapshot.count).toBeGreaterThan(0);
+  });
+
+  it('starts on the fast 9B enhancer without a stored preference', () => {
+    expect(readPromptEnhancerPreference()).toBe('qwen3.5_9b');
   });
 });
 

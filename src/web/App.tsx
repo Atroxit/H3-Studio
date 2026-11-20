@@ -17,6 +17,7 @@ import {
 import type { Preset, ProviderCapabilities, ProviderConfig, ProviderKind } from '../core/types';
 import {
   checkProviderHealth,
+  createPreset,
   createProvider,
   getProviderStatus,
   getStats,
@@ -35,6 +36,7 @@ import {
   adoptPromptSettings,
   applyPresetToForm,
   openStoredBatch,
+  readCurrentFormSnapshot,
   startNewImage,
 } from './features/generate/useGeneration';
 import {
@@ -426,6 +428,9 @@ export function App({ slots = {} }: AppProps): ReactNode {
   const [view, setView] = useState<StudioView>(readViewFromLocation);
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [setupOpen, setSetupOpen] = useState(false);
+  const [quickSaveOpen, setQuickSaveOpen] = useState(false);
+  const [quickSaveName, setQuickSaveName] = useState('');
+  const [quickSaving, setQuickSaving] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [railWidth, setRailWidth] = useState<number>(() =>
     readStoredWidth(RAIL_WIDTH_STORAGE_KEY, RAIL_WIDTH_DEFAULT, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX),
@@ -654,6 +659,25 @@ export function App({ slots = {} }: AppProps): ReactNode {
     [enabledProviders, provider, selectView],
   );
 
+  /** Saves the current Generate composer as a preset, straight from the left rail. */
+  const saveQuickPreset = useCallback(async (): Promise<void> => {
+    const name = quickSaveName.trim();
+    if (name.length === 0 || quickSaving) return;
+    setQuickSaving(true);
+    try {
+      const snapshot = readCurrentFormSnapshot();
+      const saved = await createPreset({ name, ...snapshot });
+      await refresh();
+      setQuickSaveOpen(false);
+      setQuickSaveName('');
+      notify(`Saved preset "${saved.name}"`);
+    } catch (error) {
+      notify(describeError(error), 'error');
+    } finally {
+      setQuickSaving(false);
+    }
+  }, [quickSaveName, quickSaving, refresh, notify]);
+
   const contextValue = useMemo<StudioContextValue>(
     () => ({
       providers,
@@ -845,8 +869,59 @@ export function App({ slots = {} }: AppProps): ReactNode {
               <section className="rail-section">
                 <div className="rail-head">
                   <h2 className="section-label">Presets</h2>
-                  <span className="rail-count">{presets.length}</span>
+                  <div className="rail-head-actions">
+                    <span className="rail-count">{presets.length}</span>
+                    <button
+                      type="button"
+                      className="rail-quick-save"
+                      aria-expanded={quickSaveOpen}
+                      title="Save the current composer as a preset"
+                      onClick={() => {
+                        setQuickSaveOpen(!quickSaveOpen);
+                        setQuickSaveName('');
+                      }}
+                    >
+                      + Save
+                    </button>
+                  </div>
                 </div>
+                {quickSaveOpen ? (
+                  <form
+                    className="rail-quick-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      void saveQuickPreset();
+                    }}
+                  >
+                    <input
+                      type="text"
+                      className="rail-quick-input"
+                      value={quickSaveName}
+                      placeholder="Preset name..."
+                      maxLength={120}
+                      aria-label="Preset name"
+                      autoFocus
+                      onChange={(event) => {
+                        setQuickSaveName(event.target.value);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Escape') return;
+                        event.preventDefault();
+                        setQuickSaveOpen(false);
+                        setQuickSaveName('');
+                      }}
+                    />
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      type="submit"
+                      busy={quickSaving}
+                      disabled={quickSaveName.trim().length === 0}
+                    >
+                      Save
+                    </Button>
+                  </form>
+                ) : null}
                 {presets.length === 0 ? (
                   <p className="rail-empty">No presets saved yet.</p>
                 ) : (

@@ -106,7 +106,7 @@ export interface GenerationForm {
   seed: string;
   steps: number;
   guidance: number;
-  /** Which prompt enhancer the provider's graph runs, when it has one. Off by default. */
+  /** Which prompt enhancer the provider's graph runs, when it has one. Fast by default. */
   promptEnhancer: H3PromptEnhancer;
   /** Which H3 diffusion model the graph loads. The fast weights are the default. */
   modelVariant: H3ModelVariant;
@@ -570,6 +570,35 @@ function describeError(error: unknown): string {
   return 'The request failed.';
 }
 
+/** The enhancer a fresh studio starts on: short prompts need it to read well. */
+export const DEFAULT_PROMPT_ENHANCER: H3PromptEnhancer = 'qwen3.5_9b';
+
+const PROMPT_ENHANCER_STORAGE_KEY = 'h3-studio:prompt-enhancer';
+
+function isPromptEnhancer(value: unknown): value is H3PromptEnhancer {
+  return value === 'off' || value === 'qwen3.5_9b' || value === 'qwen3.8_27b';
+}
+
+/** The enhancer the user last chose, or the fast 9B one on a cold start. */
+export function readPromptEnhancerPreference(): H3PromptEnhancer {
+  if (typeof window === 'undefined') return DEFAULT_PROMPT_ENHANCER;
+  try {
+    const stored = window.localStorage.getItem(PROMPT_ENHANCER_STORAGE_KEY);
+    return isPromptEnhancer(stored) ? stored : DEFAULT_PROMPT_ENHANCER;
+  } catch {
+    return DEFAULT_PROMPT_ENHANCER;
+  }
+}
+
+function persistPromptEnhancerPreference(value: H3PromptEnhancer): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(PROMPT_ENHANCER_STORAGE_KEY, value);
+  } catch {
+    // Private mode or a blocked storage area leaves the choice in memory only.
+  }
+}
+
 const EMPTY_FORM: GenerationForm = {
   providerId: null,
   prompt: '',
@@ -581,10 +610,29 @@ const EMPTY_FORM: GenerationForm = {
   seed: '',
   steps: DEFAULT_STEPS,
   guidance: DEFAULT_GUIDANCE,
-  promptEnhancer: 'off',
+  promptEnhancer: readPromptEnhancerPreference(),
   modelVariant: 'w4a8',
   references: [],
 };
+
+/** The composer values a quick saved preset would capture. */
+export interface ComposerSnapshot {
+  prompt: string;
+  width: number;
+  height: number;
+  count: number;
+}
+
+/** The active Generate form values, safe to read from anywhere that saves a preset. */
+export function readCurrentFormSnapshot(): ComposerSnapshot {
+  const form: GenerationForm | undefined = state.form;
+  return {
+    prompt: typeof form?.prompt === 'string' ? form.prompt : '',
+    width: Number.isInteger(form?.width) && (form?.width ?? 0) > 0 ? (form?.width as number) : 2048,
+    height: Number.isInteger(form?.height) && (form?.height ?? 0) > 0 ? (form?.height as number) : 2048,
+    count: Number.isInteger(form?.count) && (form?.count ?? 0) > 0 ? (form?.count as number) : 1,
+  };
+}
 
 const EMPTY_CAPABILITY: CapabilityState = {
   phase: 'idle',
@@ -809,6 +857,7 @@ export function applyPresetToForm(preset: Preset, providerId: string | null): vo
 }
 
 function updateFormState(patch: Partial<Omit<GenerationForm, 'references' | 'providerId'>>): void {
+  if (patch.promptEnhancer !== undefined) persistPromptEnhancerPreference(patch.promptEnhancer);
   update((current) => ({ ...current, form: { ...current.form, ...patch } }));
 }
 

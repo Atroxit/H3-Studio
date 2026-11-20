@@ -575,23 +575,130 @@ export function attachReferenceImages(
 }
 
 /**
+ * The enhancer a request really asks for. The named mode wins; the older boolean is kept
+ * for callers that predate it. References do not bypass the enhancer: the edit expander
+ * is vision aware, so it reads the attached pictures instead of the user's words alone.
+ */
+export function effectivePromptEnhancer(
+  enhancePrompt: boolean | undefined,
+  promptEnhancer?: H3PromptEnhancer,
+): H3PromptEnhancer {
+  return promptEnhancer ?? (enhancePrompt === true ? 'qwen3.5_9b' : 'off');
+}
+
+/**
+ * The task prompt the enhancer runs when the request attaches reference pictures. ComfyUI's
+ * official image edit workflow gives the expander the input images, so this template asks
+ * the vision model to read every <Picture N> and write the finished image instead of only
+ * restating the text. StringReplace still swaps {input text} for the user's instruction.
+ */
+export const H3_EDIT_EXPANSION_PROMPT: string = `You are an image-edit prompt writer for MiniMax H3. You are given one or more input pictures, labeled <Picture 1>, <Picture 2>, and so on, plus a short user instruction.
+
+input_text: {input text}
+
+Read every attached picture carefully, then write the finished image.
+
+Rules:
+1. Inspect each picture: its subject, pose, framing, viewpoint, materials, colors, lighting, environment, and any visible text or graphic content.
+2. Follow the user's instruction literally, then expand it into ONE dense, vivid English description of the intended finished image.
+3. Say explicitly which element comes from which picture. Name <Picture 1>, <Picture 2>, and so on for every subject, identity, style, setting, palette, or lighting you carry over. When the instruction combines pictures, describe the combination: which subject keeps its identity, which picture supplies the background, which supplies the style, and how they are composited into one coherent frame.
+4. Describe the full background and environment, lighting direction and quality, time of day, weather, surface materials, color palette, camera angle and lens, depth of field, and overall mood in concrete visual detail. Never leave a plain or blank background unless the user explicitly asks for one.
+5. Preserve every hard fact from the instruction: named entities, text, counts, colors, style, and layout. Add plausible detail but never contradict the user.
+6. Choose the aspect ratio from this list: 1:1, 5:4, 4:3, 3:2, 16:9, 21:9, 4:5, 3:4, 2:3, 9:16. Keep the source pictures' ratio when the instruction changes content rather than canvas; otherwise pick the ratio the described subject needs.
+
+Reply with exactly one JSON object and nothing else: no markdown fence, no thinking tags, no commentary.
+
+{"expanded_caption":"...","aspect_ratio":"..."}
+
+expanded_caption must be one valid JSON string holding the description from the rules above. Every ASCII double quotation mark inside it must be serialized as the JSON escape sequence \\". Keep aspect_ratio to exactly one allowed ratio string. Do not add or omit keys.`;
+
+/** The 1-based picture number of every reference image link in the conditioning nodes. */
+function referenceImageLinks(graph: Record<string, unknown>): Map<number, string> {
+  const links = new Map<number, string>();
+  for (const node of Object.values(graph)) {
+    const classType = nodeClassType(node);
+    if (classType === null || !REFERENCE_CONDITIONING_CLASSES.includes(classType)) continue;
+    for (const [key, value] of Object.entries(nodeInputs(node))) {
+      const match = /^images\.image_(\d+)$/.exec(key);
+      if (match === null) continue;
+      const source = linkSource(value);
+      if (source === null) continue;
+      const index = Number(match[1]);
+      if (!links.has(index)) links.set(index, source);
+    }
+  }
+  return links;
+}
+
+/**
+ * Makes the prompt enhancer vision aware for reference images and alterations: every
+ * uploaded LoadImage is wired into TextGenerateV2 as images.image1, images.image2, ... (the
+ * field names ComfyUI's nodes_textgen.py declares, without the underscore the conditioning
+ * node uses), and the expander's task prompt becomes the reference & edit expansion prompt.
+ * The graph is cloned: a template from options is shared across requests and runs.
+ */
+export function applyReferenceVision(
+  graph: Record<string, unknown>,
+  referenceCount: number,
+): Record<string, unknown> {
+  const links = referenceImageLinks(graph);
+  const textGenerateIds = nodeIdsOfClassType(graph, 'TextGenerateV2');
+  if (links.size === 0 || textGenerateIds.length === 0) return graph;
+
+  const cloned: Record<string, unknown> = { ...graph };
+  const cloneNode = (nodeId: string): Record<string, unknown> | null => {
+    const node = cloned[nodeId];
+    if (!isRecord(node) || !isRecord(node['inputs'])) return null;
+    const copy = { ...node, inputs: { ...node['inputs'] } };
+    cloned[nodeId] = copy;
+    return copy;
+  };
+
+  for (const nodeId of textGenerateIds) {
+    const node = cloneNode(nodeId);
+    if (node === null) continue;
+    const inputs = node['inputs'] as Record<string, unknown>;
+    const pictures = Math.max(referenceCount, links.size);
+    for (let picture = 1; picture <= pictures; picture += 1) {
+      const source = links.get(picture);
+      if (source === undefined) continue;
+      inputs[`images.image${picture}`] = [source, 0];
+    }
+  }
+
+  // The expander prompt is the PrimitiveStringMultiline StringReplace substitutes into.
+  for (const node of Object.values(graph)) {
+    if (nodeClassType(node) !== 'StringReplace') continue;
+    const taskNodeId = linkSource(nodeInputs(node)['string']);
+    if (taskNodeId === null) continue;
+    const taskNode = cloned[taskNodeId];
+    if (nodeClassType(taskNode) !== 'PrimitiveStringMultiline') continue;
+    const copy = cloneNode(taskNodeId);
+    if (copy === null) continue;
+    (copy['inputs'] as Record<string, unknown>)['value'] = H3_EDIT_EXPANSION_PROMPT;
+  }
+
+  return cloned;
+}
+
+/**
  * Turns the graph's prompt enhancer on or off, and picks which enhancer CLIP it loads.
  * The H3 template routes the prompt through a ComfySwitchNode whose switch picks the raw
  * prompt or the expansion, and two CLIPLoader files back the fast and the dedicated 27B
- * enhancer. An alteration must keep the user's own words, so a reference image always
- * forces the enhancer off. The graph is cloned: a template from options is shared across
- * requests and runs.
+ * enhancer. The graph is cloned: a template from options is shared across requests and
+ * runs.
+ *
+ * `hasReferences` is accepted but no longer bypasses the enhancer: the reference aware
+ * expander inspects the attached pictures, so an alteration can be enhanced too.
  */
 export function applyPromptEnhancer(
   graph: Record<string, unknown>,
   enhancePrompt: boolean | undefined,
-  hasReferences: boolean,
+  _hasReferences: boolean,
   promptEnhancer?: H3PromptEnhancer,
 ): Record<string, unknown> {
   if (promptEnhancer === undefined && enhancePrompt === undefined) return graph;
-  const effective: H3PromptEnhancer = hasReferences
-    ? 'off'
-    : (promptEnhancer ?? (enhancePrompt ? 'qwen3.5_9b' : 'off'));
+  const effective = effectivePromptEnhancer(enhancePrompt, promptEnhancer);
   const wanted = effective !== 'off';
   const enhancerClip = effective === 'off' ? null : H3_ENHANCER_BY_MODE[effective];
   const cloned: Record<string, unknown> = {};
@@ -759,23 +866,39 @@ export function expandMultiSeedGraph(
   return { graph: cloned, samplerSlots, saveNodeIds };
 }
 
+/** `<Picture 1>`, `<Picture 2>`, and so on, joined into one readable list. */
+function pictureList(count: number): string {
+  const pictures = Array.from({ length: Math.max(1, count) }, (_unused, index) => `<Picture ${index + 1}>`);
+  if (pictures.length <= 2) return pictures.join(', ');
+  return `${pictures.slice(0, -1).join(', ')}, and ${pictures[pictures.length - 1]}`;
+}
+
 /**
- * H3 reads a reference image from a <Picture N> token in the prompt. A plain alteration
- * instruction names no picture, so the first one is added; a prompt that already names a
- * picture is left exactly as the user wrote it.
+ * H3 reads a reference image from a <Picture N> token in the prompt. A prompt that already
+ * names a picture is left exactly as the user wrote it. With the enhancer on, the vision
+ * aware expander sees every attached picture, so the raw instruction is passed through
+ * untouched. With it off, a single reference is an edit of that picture, while several
+ * references are named as sources so H3 does not lock onto the first background alone.
  */
 export function formatReferencePrompt(
   prompt: string,
   template: WorkflowGraph,
   hasReferences: boolean,
+  referenceCount = 1,
+  enhancerOn = false,
 ): string {
   if (!hasReferences) return prompt;
   const h3Conditioning = Object.values(template).some(
     (node) => nodeClassType(node) === 'MiniMaxH3ImageConditioning',
   );
   if (!h3Conditioning) return prompt;
+  const trimmed = prompt.trim();
   if (/<Picture\s+\d+>/i.test(prompt)) return prompt;
-  return `Edit <Picture 1>. ${prompt.trim()}`;
+  // The vision aware expander reads every attached picture, so the raw instruction is
+  // passed through exactly as the user wrote it.
+  if (enhancerOn) return prompt;
+  if (referenceCount > 1) return `Using ${pictureList(referenceCount)} as references: ${trimmed}`;
+  return `Edit <Picture 1>. ${trimmed}`;
 }
 
 function buildReplacements(
@@ -810,16 +933,18 @@ function graphForRequest(
   seed: number,
   uploadedRefs: readonly string[],
 ): Record<string, unknown> {
+  const referenced = attachReferenceImages(
+    substituteWorkflow(template, buildReplacements(request, options, config, seed)),
+    uploadedRefs,
+  );
+  // The vision aware expander only makes sense when the enhancer actually runs, so an
+  // off switch keeps the plain graph the user asked for.
+  const enhancerOn = effectivePromptEnhancer(request.enhancePrompt, request.promptEnhancer) !== 'off';
+  const vision = enhancerOn && uploadedRefs.length > 0
+    ? applyReferenceVision(referenced, uploadedRefs.length)
+    : referenced;
   return applyModelVariant(
-    applyPromptEnhancer(
-      attachReferenceImages(
-        substituteWorkflow(template, buildReplacements(request, options, config, seed)),
-        uploadedRefs,
-      ),
-      request.enhancePrompt,
-      uploadedRefs.length > 0,
-      request.promptEnhancer,
-    ),
+    applyPromptEnhancer(vision, request.enhancePrompt, uploadedRefs.length > 0, request.promptEnhancer),
     request.modelVariant,
   );
 }
@@ -905,6 +1030,8 @@ type HistoryState =
       images: ComfyImageRef[];
       /** The same images, keyed by the SaveImage node that produced them. */
       imagesByNode: Record<string, ComfyImageRef[]>;
+      /** PreviewAny style text output, keyed by the node that printed it. */
+      textsByNode: Record<string, string[]>;
     };
 
 interface ExecutionErrorDetails {
@@ -931,6 +1058,31 @@ function imagesFromEntry(entry: unknown): ComfyImageRef[] {
   const images: ComfyImageRef[] = [];
   for (const output of Object.values(outputs)) images.push(...imagesFromOutput(output));
   return images;
+}
+
+/** The text lines one node's output entry carries, in order. */
+function textsFromOutput(output: unknown): string[] {
+  if (!isRecord(output)) return [];
+  const raw = output['text'];
+  if (typeof raw === 'string') return raw.trim().length === 0 ? [] : [raw];
+  if (!Array.isArray(raw)) return [];
+  const texts: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry === 'string' && entry.trim().length > 0) texts.push(entry);
+  }
+  return texts;
+}
+
+/** Every text output of the history entry, keyed by the node that printed it. */
+function textsByNodeFromEntry(entry: unknown): Record<string, string[]> {
+  const outputs = isRecord(entry) ? entry['outputs'] : undefined;
+  if (!isRecord(outputs)) return {};
+  const byNode: Record<string, string[]> = {};
+  for (const [nodeId, output] of Object.entries(outputs)) {
+    const texts = textsFromOutput(output);
+    if (texts.length > 0) byNode[nodeId] = texts;
+  }
+  return byNode;
 }
 
 /** Every image of the history entry, keyed by the node that saved it. */
@@ -995,7 +1147,12 @@ function historyState(history: unknown, promptId: string): HistoryState {
   if (isRecord(status) && status['status_str'] === 'error') {
     return { state: 'error', message: executionErrorMessage(promptId, executionErrorDetails(status)) };
   }
-  return { state: 'done', images: imagesFromEntry(entry), imagesByNode: imagesByNodeFromEntry(entry) };
+  return {
+    state: 'done',
+    images: imagesFromEntry(entry),
+    imagesByNode: imagesByNodeFromEntry(entry),
+    textsByNode: textsByNodeFromEntry(entry),
+  };
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -1342,6 +1499,9 @@ async function waitForHistory(
   for (;;) {
     throwIfAborted(ctx.signal);
     if (polls > 0 && Date.now() >= deadline) {
+      // A timed out prompt must not keep sampling in the background. interruptPrompt never
+      // throws, so a lost interrupt cannot mask the timeout the user needs to see.
+      await interruptPrompt(baseUrl, promptId);
       throw new ComfyUIError(
         `ComfyUI timed out after ${pollOptions.timeoutMs} ms waiting for prompt ${promptId} (${polls} polls)`,
         'timeout',
@@ -1363,6 +1523,7 @@ async function waitForHistory(
     if (state.state !== 'pending') return state;
     const remaining = deadline - Date.now();
     if (remaining <= 0) {
+      await interruptPrompt(baseUrl, promptId);
       throw new ComfyUIError(
         `ComfyUI timed out after ${pollOptions.timeoutMs} ms waiting for prompt ${promptId} (${polls} polls)`,
         'timeout',
@@ -1440,6 +1601,27 @@ async function health(baseUrl: string): Promise<{ ok: boolean; detail?: string }
   }
 }
 
+/**
+ * The expanded prompt ComfyUI actually sent into the conditioning node. Node 18 (PreviewAny)
+ * holds the final text of the graph, so it is what the user sees as the revised prompt.
+ * Only an enhancer run counts: an untouched raw prompt is not a revision.
+ */
+function revisedPromptFrom(
+  graph: Record<string, unknown>,
+  history: HistoryState,
+  request: GenerationRequest,
+): string | undefined {
+  if (effectivePromptEnhancer(request.enhancePrompt, request.promptEnhancer) === 'off') return undefined;
+  if (history.state !== 'done') return undefined;
+  const raw = request.prompt.trim();
+  for (const nodeId of nodeIdsOfClassType(graph, 'PreviewAny')) {
+    const text = history.textsByNode[nodeId]?.[0]?.trim();
+    if (text === undefined || text.length === 0 || text === raw) continue;
+    return text;
+  }
+  return undefined;
+}
+
 export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
   const baseUrl = config.baseUrl.replace(/\/+$/, '');
   const options = config.options ?? {};
@@ -1479,11 +1661,12 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
     slotSeed: number,
     uploadedRefs: readonly string[],
     ctx: GenerationContext,
-  ): Promise<GeneratedItem> {
+  ): Promise<{ item: GeneratedItem; revisedPrompt: string | undefined }> {
     const slotStartedMs = Date.now();
     let run: PromptRun;
+    let graph: Record<string, unknown>;
     try {
-      const graph = graphForRequest(
+      graph = graphForRequest(
         template,
         { ...request, count: 1 },
         options,
@@ -1495,21 +1678,28 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
     } catch (error) {
       throwIfAborted(ctx.signal);
       if (!(error instanceof ComfyUIError)) throw error;
-      return failedItem(slot, error.message, error.code, error.code !== 'invalid_template');
+      return {
+        item: failedItem(slot, error.message, error.code, error.code !== 'invalid_template'),
+        revisedPrompt: undefined,
+      };
     }
+    const revisedPrompt = revisedPromptFrom(graph, run.history, request);
     if (run.history.state === 'error') {
-      return failedItem(slot, run.history.message, 'execution_error', true);
+      return { item: failedItem(slot, run.history.message, 'execution_error', true), revisedPrompt };
     }
     const image = run.history.state === 'done' ? run.history.images[0] : undefined;
     if (image === undefined) {
-      return failedItem(
-        slot,
-        `ComfyUI finished prompt ${run.promptId} without returning an image`,
-        'no_images',
-        true,
-      );
+      return {
+        item: failedItem(
+          slot,
+          `ComfyUI finished prompt ${run.promptId} without returning an image`,
+          'no_images',
+          true,
+        ),
+        revisedPrompt,
+      };
     }
-    return itemFromImage(slot, image, slotSeed, slotStartedMs, ctx);
+    return { item: await itemFromImage(slot, image, slotSeed, slotStartedMs, ctx), revisedPrompt };
   }
 
   async function generate(
@@ -1522,11 +1712,13 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
     const seed = resolveSeed(request.seed);
     const template = templateFromOptions(options);
     const items: GeneratedItem[] = [];
+    let revisedPrompt: string | undefined;
     const outcome = (): GenerationOutcome => ({
       providerId: config.id,
       items,
       startedAt: startedAt.toISOString(),
       finishedAt: new Date().toISOString(),
+      ...(revisedPrompt === undefined ? {} : { revisedPrompt }),
     });
 
     // References need the H3 conditioning node, so a graph without one is rejected before
@@ -1544,9 +1736,19 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
         uploadedRefs.push(await uploadReferenceImage(baseUrl, filePath, ctx.signal));
       }
     }
+    const enhancerOn = effectivePromptEnhancer(request.enhancePrompt, request.promptEnhancer) !== 'off';
     const effectiveRequest =
       uploadedRefs.length > 0
-        ? { ...request, prompt: formatReferencePrompt(request.prompt, template, true) }
+        ? {
+            ...request,
+            prompt: formatReferencePrompt(
+              request.prompt,
+              template,
+              true,
+              uploadedRefs.length,
+              enhancerOn,
+            ),
+          }
         : request;
 
     if (request.count > 1 && !templateHasBatchPlaceholder(template)) {
@@ -1572,6 +1774,7 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
           0,
           expanded.samplerSlots,
         );
+        revisedPrompt = revisedPromptFrom(expanded.graph, run.history, request);
         if (run.history.state === 'error') {
           for (let slot = 0; slot < request.count; slot += 1) {
             const item = failedItem(slot, run.history.message, 'execution_error', true);
@@ -1606,7 +1809,15 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
       for (let slot = 0; slot < request.count; slot += 1) {
         throwIfAborted(ctx.signal);
         const slotSeed = seed + slot;
-        const item = await generateSlot(template, effectiveRequest, slot, slotSeed, uploadedRefs, ctx);
+        const { item, revisedPrompt: slotPrompt } = await generateSlot(
+          template,
+          effectiveRequest,
+          slot,
+          slotSeed,
+          uploadedRefs,
+          ctx,
+        );
+        revisedPrompt = revisedPrompt ?? slotPrompt;
         items.push(item);
         ctx.onEvent({ type: 'item', index: slot, item });
       }
@@ -1615,6 +1826,7 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
 
     const graph = graphForRequest(template, effectiveRequest, options, config, seed, uploadedRefs);
     const run = await runPrompt(baseUrl, progressUrl, clientId, graph, pollOptions, ctx, 0);
+    revisedPrompt = revisedPromptFrom(graph, run.history, request);
     if (run.history.state === 'error') {
       const item = failedItem(0, run.history.message, 'execution_error', true);
       items.push(item);

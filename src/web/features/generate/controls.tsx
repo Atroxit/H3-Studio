@@ -25,7 +25,7 @@ interface ChipOption {
   detail?: string;
 }
 
-/** The prompt enhancer choices, cheapest first, with the bypass rule stated once below. */
+/** The prompt enhancer choices, cheapest first, with the recommendation stated once below. */
 const PROMPT_ENHANCER_OPTIONS: readonly ChipOption[] = [
   { value: 'off', label: 'Off', detail: 'Use your exact prompt as written' },
   { value: 'qwen3.5_9b', label: 'Fast (Qwen3.5 9B)', detail: 'Quick art-direction expansion (+15-20s)' },
@@ -494,7 +494,7 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
               })
             }
           />
-          <QuietLine text="Bypassed automatically during alterations." />
+          <QuietLine text="Recommended for short prompts — expands both new images and reference edits into full scene & lighting detail." />
         </div>
 
         {advancedNotes.map((note) => (

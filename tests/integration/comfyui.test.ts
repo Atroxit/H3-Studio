@@ -7,8 +7,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { synthImage } from '../../src/core/png';
 import {
   ComfyUIError,
+  H3_EDIT_EXPANSION_PROMPT,
   applyModelVariant,
   applyPromptEnhancer,
+  applyReferenceVision,
   attachReferenceImages,
   createComfyUIAdapter,
   createProgressWatch,
@@ -297,6 +299,11 @@ describe('ComfyUI adapter', () => {
     await expect(generation).rejects.toThrow(/timed out after 120 ms waiting for prompt prompt-3/);
     expect(Date.now() - started).toBeGreaterThanOrEqual(90);
     expect(stub.historyPolls()).toBeGreaterThan(1);
+
+    // A timed out prompt is stopped on ComfyUI's side rather than left sampling in the dark.
+    const interrupts = stub.requests.filter((entry) => entry.method === 'POST' && entry.path === '/interrupt');
+    expect(interrupts).toHaveLength(1);
+    expect(record(interrupts[0]?.body ?? {})['prompt_id']).toBe('prompt-3');
   });
 
   it('clears the poll timer and rejects when aborted', async () => {
@@ -908,11 +915,31 @@ describe('ComfyUI reference images', () => {
     expect(formatReferencePrompt('  make it snow  ', REFERENCE_TEMPLATE, true)).toBe(
       'Edit <Picture 1>. make it snow',
     );
+    expect(formatReferencePrompt('make it snow', REFERENCE_TEMPLATE, true, 1)).toBe(
+      'Edit <Picture 1>. make it snow',
+    );
     expect(formatReferencePrompt('Edit <Picture 2>. make it snow', REFERENCE_TEMPLATE, true)).toBe(
       'Edit <Picture 2>. make it snow',
     );
+    expect(formatReferencePrompt('Replace <picture 3>. make it snow', REFERENCE_TEMPLATE, true, 3)).toBe(
+      'Replace <picture 3>. make it snow',
+    );
     expect(formatReferencePrompt('make it snow', REFERENCE_TEMPLATE, false)).toBe('make it snow');
     expect(formatReferencePrompt('make it snow', defaultWorkflowTemplate, true)).toBe('make it snow');
+  });
+
+  it('names every picture as a source when several references are attached', () => {
+    expect(formatReferencePrompt('make it snow', REFERENCE_TEMPLATE, true, 2)).toBe(
+      'Using <Picture 1>, <Picture 2> as references: make it snow',
+    );
+    expect(formatReferencePrompt('  make it snow  ', REFERENCE_TEMPLATE, true, 3)).toBe(
+      'Using <Picture 1>, <Picture 2>, and <Picture 3> as references: make it snow',
+    );
+  });
+
+  it('leaves the prompt alone when the vision aware enhancer is on', () => {
+    expect(formatReferencePrompt('make it snow', REFERENCE_TEMPLATE, true, 1, true)).toBe('make it snow');
+    expect(formatReferencePrompt('  make it snow  ', REFERENCE_TEMPLATE, true, 3, true)).toBe('  make it snow  ');
   });
 
   it('uploads reference paths once and queues a graph with the picture wired in', async () => {
@@ -1027,6 +1054,42 @@ function clipNameOf(graph: Record<string, unknown>): unknown {
   return inputsOf(nodeOf(graph, '16'))['clip_name'];
 }
 
+/** The H3 edit graph: vision expander, switch, PreviewAny and the reference conditioning. */
+const VISION_REFERENCE_TEMPLATE: Record<string, unknown> = {
+  '5': {
+    class_type: 'MiniMaxH3ImageConditioning',
+    inputs: { prompt: ['22', 0], width: '{{width}}', height: '{{height}}' },
+  },
+  '9': { class_type: 'SaveImage', inputs: { filename_prefix: 'h3-studio', images: ['5', 0] } },
+  '15': {
+    class_type: 'TextGenerateV2',
+    inputs: { prompt: ['19', 0], clip: ['16', 0], system_prompt: ['17', 0] },
+  },
+  '16': {
+    class_type: 'CLIPLoader',
+    inputs: { clip_name: 'qwen3.5_9b_w4a8_gptq.safetensors', type: 'minimax', device: 'default' },
+  },
+  '17': { class_type: 'PrimitiveStringMultiline', inputs: { value: 'System contract.' } },
+  '18': { class_type: 'PreviewAny', inputs: { source: ['22', 0] } },
+  '19': {
+    class_type: 'StringReplace',
+    inputs: { string: ['20', 0], find: '{input text}', replace: ['24', 0] },
+  },
+  '20': { class_type: 'PrimitiveStringMultiline', inputs: { value: 'text to image expander {input text}' } },
+  '22': {
+    class_type: 'ComfySwitchNode',
+    inputs: { switch: false, on_false: ['24', 0], on_true: ['26', 0] },
+  },
+  '24': { class_type: 'PrimitiveStringMultiline', inputs: { value: '{{prompt}}' } },
+  '26': { class_type: 'JsonExtractString', inputs: { json_string: ['15', 0], key: 'expanded_caption' } },
+};
+
+function textGenerateOf(graph: Record<string, unknown>): Record<string, unknown> {
+  const node = nodesOfType(graph, 'TextGenerateV2')[0];
+  if (node === undefined) throw new Error('missing the TextGenerateV2 node');
+  return node;
+}
+
 describe('ComfyUI prompt enhancer', () => {
   it('returns the graph untouched when the request says nothing', () => {
     expect(applyPromptEnhancer(ENHANCER_TEMPLATE, undefined, false)).toBe(ENHANCER_TEMPLATE);
@@ -1047,9 +1110,11 @@ describe('ComfyUI prompt enhancer', () => {
     expect(inputsOf(raw)['value']).toBe('{{prompt}}');
   });
 
-  it('forces the enhancer off during an alteration', () => {
-    expect(switchOf(applyPromptEnhancer(ENHANCER_TEMPLATE, true, true))).toBe(false);
+  it('keeps the enhancer on during an alteration', () => {
+    // The expander is vision aware, so a reference no longer bypasses it.
+    expect(switchOf(applyPromptEnhancer(ENHANCER_TEMPLATE, true, true))).toBe(true);
     expect(switchOf(applyPromptEnhancer(ENHANCER_TEMPLATE, false, true))).toBe(false);
+    expect(switchOf(applyPromptEnhancer(ENHANCER_TEMPLATE, undefined, true, 'qwen3.5_9b'))).toBe(true);
   });
 
   it('retargets the enhancer CLIP for each named mode', () => {
@@ -1066,11 +1131,12 @@ describe('ComfyUI prompt enhancer', () => {
     expect(switchOf(ENHANCER_CLIP_TEMPLATE)).toBe(false);
   });
 
-  it('forces the 27B enhancer off during an alteration', () => {
+  it('keeps the 27B enhancer on during an alteration', () => {
     const on = applyPromptEnhancer(ENHANCER_CLIP_TEMPLATE, undefined, false, 'qwen3.8_27b');
     expect(switchOf(on)).toBe(true);
-    const off = applyPromptEnhancer(on, undefined, true, 'qwen3.8_27b');
-    expect(switchOf(off)).toBe(false);
+    const altered = applyPromptEnhancer(on, undefined, true, 'qwen3.8_27b');
+    expect(switchOf(altered)).toBe(true);
+    expect(clipNameOf(altered)).toBe('qwen3.8_27b_minimax_h3_image_pe_w4a8_gptq.safetensors');
   });
 
   it('leaves a CLIPLoader that is not an H3 enhancer alone', () => {
@@ -1142,6 +1208,188 @@ describe('ComfyUI prompt enhancer', () => {
     const graph = postedGraph(stub);
     expect(switchOf(graph)).toBe(true);
     expect(clipNameOf(graph)).toBe('qwen3.8_27b_minimax_h3_image_pe_w4a8_gptq.safetensors');
+  });
+});
+
+describe('ComfyUI vision aware reference expansion', () => {
+  it('wires every reference into TextGenerateV2 and swaps the task prompt', () => {
+    const referenced = attachReferenceImages(VISION_REFERENCE_TEMPLATE, ['a.png', 'b.png', 'c.png']);
+    const graph = applyReferenceVision(referenced, 3);
+
+    const textGenerateInputs = inputsOf(textGenerateOf(graph));
+    expect(textGenerateInputs['images.image1']).toEqual(['ref_image_1', 0]);
+    expect(textGenerateInputs['images.image2']).toEqual(['ref_image_2', 0]);
+    expect(textGenerateInputs['images.image3']).toEqual(['ref_image_3', 0]);
+    expect(textGenerateInputs['images.image_1']).toBeUndefined();
+
+    const conditioningInputs = inputsOf(nodesOfType(graph, 'MiniMaxH3ImageConditioning')[0] ?? {});
+    expect(conditioningInputs['images.image_1']).toEqual(['ref_image_1', 0]);
+    expect(conditioningInputs['images.image_3']).toEqual(['ref_image_3', 0]);
+
+    expect(inputsOf(nodeOf(graph, '20'))['value']).toBe(H3_EDIT_EXPANSION_PROMPT);
+    expect(H3_EDIT_EXPANSION_PROMPT).toContain('{input text}');
+    expect(H3_EDIT_EXPANSION_PROMPT).toContain('<Picture 1>');
+    expect(H3_EDIT_EXPANSION_PROMPT).toContain('"expanded_caption"');
+    expect(H3_EDIT_EXPANSION_PROMPT).toContain('"aspect_ratio"');
+
+    // The template and the raw prompt leg are never mutated.
+    expect(inputsOf(nodeOf(VISION_REFERENCE_TEMPLATE, '20'))['value']).toBe(
+      'text to image expander {input text}',
+    );
+    expect(inputsOf(nodeOf(graph, '24'))['value']).toBe('{{prompt}}');
+    expect(inputsOf(textGenerateOf(VISION_REFERENCE_TEMPLATE))['images.image1']).toBeUndefined();
+  });
+
+  it('leaves a graph without references or without a vision expander alone', () => {
+    expect(applyReferenceVision(VISION_REFERENCE_TEMPLATE, 2)).toBe(VISION_REFERENCE_TEMPLATE);
+    const plain: Record<string, unknown> = {
+      '1': { class_type: 'PrimitiveStringMultiline', inputs: { value: '{{prompt}}' } },
+    };
+    expect(applyReferenceVision(plain, 1)).toBe(plain);
+  });
+
+  it('posts the vision aware graph for a multi reference edit', async () => {
+    const rootDir = await mkdtemp(path.join(tmpdir(), 'h3-comfy-vision-'));
+    const first = path.join(rootDir, 'first.png');
+    const second = path.join(rootDir, 'second.png');
+    await writeFile(first, PNG_BYTES);
+    await writeFile(second, PNG_BYTES);
+    try {
+      const expanded = 'A knight in polished plate armour stands in a pixel-art meadow, <Picture 1> for the knight, <Picture 2> for the meadow.';
+      const stub = await startStub({
+        promptResponse: { status: 200, body: { prompt_id: 'prompt-vision' } },
+        historyResponse: () => ({
+          status: 200,
+          body: {
+            'prompt-vision': {
+              outputs: {
+                '9': { images: [{ filename: 'knight.png', subfolder: '' }] },
+                '18': { text: [expanded] },
+              },
+            },
+          },
+        }),
+        viewBytes: PNG_BYTES,
+      });
+      const adapter = createComfyUIAdapter(
+        comfyConfig(stub.baseUrl, {
+          pollIntervalMs: 10,
+          timeoutMs: 2000,
+          workflowTemplate: JSON.stringify(VISION_REFERENCE_TEMPLATE),
+        }),
+      );
+      const run = context();
+
+      const outcome = await adapter.generate(
+        {
+          ...BASE_REQUEST,
+          prompt: 'A realistic knight in a pixel world',
+          referenceIds: [first, second],
+          promptEnhancer: 'qwen3.5_9b',
+        },
+        { signal: run.signal, onEvent: () => {} },
+      );
+
+      expect(outcome.items[0]?.ok).toBe(true);
+      expect(outcome.revisedPrompt).toBe(expanded);
+
+      const graph = postedGraph(stub);
+      expect(switchOf(graph)).toBe(true);
+      const textGenerateInputs = inputsOf(textGenerateOf(graph));
+      expect(textGenerateInputs['images.image1']).toEqual(['ref_image_1', 0]);
+      expect(textGenerateInputs['images.image2']).toEqual(['ref_image_2', 0]);
+      const conditioningInputs = inputsOf(nodesOfType(graph, 'MiniMaxH3ImageConditioning')[0] ?? {});
+      expect(conditioningInputs['images.image_1']).toEqual(['ref_image_1', 0]);
+      expect(conditioningInputs['images.image_2']).toEqual(['ref_image_2', 0]);
+      expect(inputsOf(nodeOf(graph, '20'))['value']).toBe(H3_EDIT_EXPANSION_PROMPT);
+      expect(inputsOf(nodeOf(graph, '24'))['value']).toBe('A realistic knight in a pixel world');
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the text to image expander and names every picture when the enhancer is off', async () => {
+    const rootDir = await mkdtemp(path.join(tmpdir(), 'h3-comfy-vision-off-'));
+    const first = path.join(rootDir, 'first.png');
+    const second = path.join(rootDir, 'second.png');
+    await writeFile(first, PNG_BYTES);
+    await writeFile(second, PNG_BYTES);
+    try {
+      const stub = await startStub({
+        promptResponse: { status: 200, body: { prompt_id: 'prompt-vision-off' } },
+        historyResponse: () => ({
+          status: 200,
+          body: {
+            'prompt-vision-off': {
+              outputs: { '9': { images: [{ filename: 'raw.png', subfolder: '' }] } },
+            },
+          },
+        }),
+        viewBytes: PNG_BYTES,
+      });
+      const adapter = createComfyUIAdapter(
+        comfyConfig(stub.baseUrl, {
+          pollIntervalMs: 10,
+          timeoutMs: 2000,
+          workflowTemplate: JSON.stringify(VISION_REFERENCE_TEMPLATE),
+        }),
+      );
+      const run = context();
+
+      const outcome = await adapter.generate(
+        {
+          ...BASE_REQUEST,
+          prompt: 'make it snow',
+          referenceIds: [first, second],
+          promptEnhancer: 'off',
+        },
+        { signal: run.signal, onEvent: () => {} },
+      );
+
+      expect(outcome.revisedPrompt).toBeUndefined();
+      const graph = postedGraph(stub);
+      expect(switchOf(graph)).toBe(false);
+      expect(inputsOf(textGenerateOf(graph))['images.image1']).toBeUndefined();
+      expect(inputsOf(nodeOf(graph, '20'))['value']).toBe('text to image expander {input text}');
+      expect(inputsOf(nodeOf(graph, '24'))['value']).toBe(
+        'Using <Picture 1>, <Picture 2> as references: make it snow',
+      );
+    } finally {
+      await rm(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores a PreviewAny text that only repeats the raw prompt', async () => {
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-same' } },
+      historyResponse: () => ({
+        status: 200,
+        body: {
+          'prompt-same': {
+            outputs: {
+              '9': { images: [{ filename: 'same.png', subfolder: '' }] },
+              '18': { text: [BASE_REQUEST.prompt] },
+            },
+          },
+        },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(
+      comfyConfig(stub.baseUrl, {
+        pollIntervalMs: 10,
+        timeoutMs: 2000,
+        workflowTemplate: JSON.stringify(VISION_REFERENCE_TEMPLATE),
+      }),
+    );
+    const run = context();
+
+    const outcome = await adapter.generate(
+      { ...BASE_REQUEST, promptEnhancer: 'qwen3.5_9b' },
+      { signal: run.signal, onEvent: () => {} },
+    );
+
+    expect(outcome.revisedPrompt).toBeUndefined();
   });
 });
 

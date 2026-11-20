@@ -342,6 +342,65 @@ button {
   color: var(--text-faint);
 }
 
+.rail-head-actions {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* The rail's one click preset save. Ghost styling keeps it quiet beside the count. */
+.rail-quick-save {
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.rail-quick-save:hover,
+.rail-quick-save[aria-expanded='true'] {
+  color: var(--accent);
+}
+
+.rail-quick-save:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-control);
+}
+
+/* A narrow rail must never grow a horizontal scrollbar, so the input can shrink. */
+.rail-quick-form {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.rail-quick-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-control);
+  background: var(--panel-sunken);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.rail-quick-input::placeholder {
+  color: var(--text-faint);
+}
+
+.rail-quick-input:focus-visible {
+  outline: none;
+  border-color: var(--accent-line);
+}
+
 .rail-slot {
   display: flex;
   flex-direction: column;
