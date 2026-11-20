@@ -94,6 +94,8 @@ export interface GenerationBatch {
   requested: number;
   status: BatchStatus;
   revisedPrompt: string | null;
+  /** The stored image this batch altered, when it is an alteration, so a comparison exists. */
+  sourceImageId?: string | null;
   tiles: GenerationTile[];
   /** A local problem, such as a lost event stream. Never the provider's failure. */
   streamError: string | null;
@@ -910,6 +912,7 @@ export function batchFromRecord(record: BatchRecord): GenerationBatch {
     requested: record.requested,
     status: record.status,
     revisedPrompt: record.revisedPrompt ?? null,
+    sourceImageId: record.sourceImageId ?? null,
     tiles,
     streamError: null,
     startedAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
@@ -1280,6 +1283,7 @@ async function beginGeneration(onSettled: () => void): Promise<void> {
     requested: body.count,
     status: 'queued',
     revisedPrompt: null,
+    sourceImageId: alterationTarget === null ? null : alterationTarget.imageId,
     tiles: createTiles(body.count),
     streamError: null,
     startedAt: Date.now(),

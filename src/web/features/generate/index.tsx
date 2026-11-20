@@ -17,6 +17,8 @@ interface ViewerState {
   batch: BatchRecord;
   imageId: string;
   trigger: HTMLElement | null;
+  /** Opens the source image first, so an alteration is read against what it changed. */
+  compare: boolean;
 }
 
 export function GenerateCanvas(): ReactNode {
@@ -32,13 +34,13 @@ export function GenerateCanvas(): ReactNode {
   const snappedHeight = snapToMultiple(generation.form.height, multiple);
 
   const openImage = useCallback(
-    async (imageId: string, trigger: HTMLElement | null): Promise<void> => {
+    async (imageId: string, trigger: HTMLElement | null, compare = false): Promise<void> => {
       const batchId = generation.batch === null ? null : generation.batch.batchId;
       try {
         if (batchId !== null) {
           const record = await getBatch(batchId);
           if (record.images.some((image) => image.id === imageId)) {
-            setViewer({ batch: record, imageId, trigger });
+            setViewer({ batch: record, imageId, trigger, compare });
             return;
           }
         }
@@ -50,7 +52,7 @@ export function GenerateCanvas(): ReactNode {
           studio.notify('That image is no longer in the library.', 'error');
           return;
         }
-        setViewer({ batch: owner, imageId, trigger });
+        setViewer({ batch: owner, imageId, trigger, compare });
       } catch {
         studio.notify('The batch could not be opened.', 'error');
       }
@@ -73,9 +75,11 @@ export function GenerateCanvas(): ReactNode {
         onRetry={generation.retry}
         onRetryFailed={generation.retryFailed}
         onReload={generation.reloadBatch}
-        onClear={generation.clearBatch}
         onOpenImage={(imageId, trigger) => {
           void openImage(imageId, trigger);
+        }}
+        onCompareImage={(imageId, trigger) => {
+          void openImage(imageId, trigger, true);
         }}
         onUseStarter={generation.setPrompt}
         alterationSourceId={
@@ -90,6 +94,13 @@ export function GenerateCanvas(): ReactNode {
         blockedReason={generation.blockedReason}
         snappedWidth={snappedWidth}
         snappedHeight={snappedHeight}
+        maxReferenceImages={
+          generation.capability.capabilities === null
+            ? 0
+            : generation.capability.capabilities.maxReferenceImages
+        }
+        onAddReference={generation.addReference}
+        onRemoveReference={generation.removeReference}
         alterationSource={generation.alterationTarget}
         alterationCandidates={generation.alterationCandidates}
         onSelectAlterationSource={generation.selectSourceImage}
@@ -107,6 +118,7 @@ export function GenerateCanvas(): ReactNode {
             studio.providers.find((provider) => provider.id === viewer.batch.providerId)?.label ??
             viewer.batch.providerId
           }
+          initialCompare={viewer.compare}
           onClose={closeViewer}
           returnFocusTo={viewer.trigger}
         />

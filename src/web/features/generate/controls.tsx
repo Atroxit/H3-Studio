@@ -1,10 +1,11 @@
-// The right inspector. Every control here is decided by ProviderCapabilities:
-// a control the provider does not support becomes one quiet line of explanation,
-// never a disabled field with no reason.
+// The right inspector. Every control here is decided by ProviderCapabilities: a control the
+// provider does not support becomes one quiet line of explanation, never a disabled field with
+// no reason. The layout is one compact column of horizontal segmented bars, so the whole
+// inspector fits a 1080p window without scrolling.
 
 import { useEffect, useId, useState, type ChangeEvent, type ReactNode } from 'react';
-import { getSystemProfile, uploadReference } from '../../api';
-import { Button, Field, Slider, Spinner } from '../../components';
+import { getSystemProfile } from '../../api';
+import { Button, Slider, VramLedMeter } from '../../components';
 import type { ProviderCapabilities, SizePreset } from '../../../core/types';
 import { ratioOf, seedProblem, sizeProblem } from './helpers';
 import { MAX_STEPS, MIN_STEPS, type GenerationController } from './useGeneration';
@@ -38,72 +39,69 @@ interface AspectGroup {
   presets: SizePreset[];
 }
 
-interface ChipOption {
+interface SegmentedOption {
   value: string;
   label: string;
+  /** The micro line under the label: Draft, 4MP, Hero, Fast, Max. */
   detail?: string;
+  /** The full explanation a hover or focus reveals. */
+  title?: string;
 }
 
-/** The prompt enhancer choices, cheapest first; each chip explains itself. */
-const PROMPT_ENHANCER_OPTIONS: readonly ChipOption[] = [
-  { value: 'off', label: 'Off', detail: 'Use your exact prompt as written' },
-  { value: 'qwen3.5_9b', label: 'Fast (Qwen3.5 9B)', detail: 'Quick art-direction expansion (+15-20s)' },
+/** The prompt enhancer choices, cheapest first. */
+const PROMPT_ENHANCER_OPTIONS: readonly SegmentedOption[] = [
+  { value: 'off', label: 'Off', title: 'Use your exact prompt as written' },
+  {
+    value: 'qwen3.5_9b',
+    label: '9B',
+    title: 'Fast (Qwen3.5 9B) — Quick art-direction expansion (+15–20s)',
+  },
   {
     value: 'qwen3.8_27b',
-    label: 'Best (Qwen3.8 27B H3 PE)',
-    detail: 'Dedicated 27B H3 enhancer for richest detail (+30-45s)',
+    label: '27B',
+    title: 'Best (Qwen3.8 27B H3 PE) — Dedicated 27B H3 enhancer for richest detail (+30–45s)',
   },
 ];
 
 /** The two official H3 diffusion models, fast weights first. */
-const MODEL_PRECISION_OPTIONS: readonly ChipOption[] = [
+const MODEL_PRECISION_OPTIONS: readonly SegmentedOption[] = [
   {
     value: 'w4a8',
-    label: 'Fast (W4A8, 11.7 GB)',
-    detail: 'Fits 100% in 24 GB VRAM with zero offloading',
+    label: 'W4A8',
+    detail: 'Fast',
+    title: 'Fast (W4A8, 11.7 GB) — Fits 100% in 24 GB VRAM with zero offloading',
   },
   {
     value: 'int8_convrot',
-    label: 'Max quality (INT8 ConvRot, 19.5 GB)',
-    detail: '8-bit weights for maximum micro-texture and text fidelity',
+    label: 'INT8',
+    detail: 'Max',
+    title: 'Max quality (INT8 ConvRot, 19.5 GB) — 8-bit weights for maximum micro-texture and text fidelity',
   },
 ];
 
 /** The two official 32B Qwen3-VL H3 text encoders, the smaller NVFP4 build first. */
-const TEXT_ENCODER_OPTIONS: readonly ChipOption[] = [
+const TEXT_ENCODER_OPTIONS: readonly SegmentedOption[] = [
   {
     value: 'nvfp4',
-    label: 'Fast (NVFP4, 14.6 GB)',
-    detail: 'Fits 100% in 24 GB VRAM with zero CPU offload',
+    label: 'NVFP4',
+    detail: 'Fast',
+    title: 'Fast (NVFP4, 14.6 GB) — Fits 100% in 24 GB VRAM with zero CPU offload',
   },
   {
     value: 'int8',
-    label: 'Max quality (INT8 ConvRot, 25.3 GB)',
-    detail: 'Full 8-bit Qwen3-VL 32B text & vision encoder',
+    label: 'INT8',
+    detail: 'Max',
+    title: 'Max quality (INT8 ConvRot, 25.3 GB) — Full 8-bit Qwen3-VL 32B text & vision encoder',
   },
 ];
 
-/**
- * The note the three H3 canvases deserve. 1024 x 1024 is a draft, 2048 x 2048 is the
- * recommendation, and 4096 x 4096 is the hero size a 30 GB card can carry.
- */
-function sizeNote(width: number, height: number): string | null {
-  if (width === 1024 && height === 1024) return 'Draft · low anatomy';
-  if (width === 2048 && height === 2048) return '4 MP · Recommended';
-  if (width === 4096 && height === 4096) return '16 MP · Hero';
-  return null;
-}
-
-/** A chip detail line that never repeats what its label already says. */
-function sizeDetail(preset: SizePreset): string | undefined {
-  const note = sizeNote(preset.width, preset.height);
-  const labelled = preset.label.includes(String(preset.width));
-  if (labelled) {
-    // The label carries the dimensions; only add a note it does not already spell out.
-    return note === null || preset.label.includes(note) ? undefined : note;
-  }
-  const dimensions = `${preset.width} × ${preset.height}`;
-  return note === null ? dimensions : `${dimensions} · ${note}`;
+/** A preset as a scannable tile: the H3 class on top, the character of it underneath. */
+function presetShort(preset: SizePreset): { label: string; detail?: string } {
+  const longest = Math.max(preset.width, preset.height);
+  if (!Number.isFinite(longest) || longest <= 0) return { label: preset.label };
+  if (longest <= 1280) return { label: '1K', detail: 'Draft' };
+  if (longest <= 2560) return { label: '2K', detail: '4MP' };
+  return { label: '4K', detail: 'Hero' };
 }
 
 function groupPresetsByRatio(presets: readonly SizePreset[]): AspectGroup[] {
@@ -126,65 +124,46 @@ function noteFor(capabilities: ProviderCapabilities, keywords: readonly string[]
   return null;
 }
 
-function describeError(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return 'The request failed.';
-}
-
-function readFileAsBase64(file: File): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (): void => {
-      const result = reader.result;
-      if (typeof result !== 'string') {
-        reject(new Error(`The file ${file.name} could not be read.`));
-        return;
-      }
-      const comma = result.indexOf(',');
-      resolve(comma >= 0 ? result.slice(comma + 1) : result);
-    };
-    reader.onerror = (): void => {
-      reject(new Error(`The file ${file.name} could not be read.`));
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
 function QuietLine({ text }: { text: string }): ReactNode {
   return <p className="gen-quiet">{text}</p>;
 }
 
-function ChipGroup({
+/** One horizontal segmented track: native radios, so arrow keys work as they always did. */
+function SegmentedField({
   legend,
   name,
   value,
   options,
   onChange,
+  onOptionActivate,
   disabled = false,
-  compact = false,
-  stacked = false,
+  fixedColumns = false,
 }: {
   legend: string;
   name: string;
   value: string | null;
-  options: readonly ChipOption[];
+  options: readonly SegmentedOption[];
   onChange: (value: string) => void;
+  /** Runs on any option click, including the one already checked. */
+  onOptionActivate?: () => void;
   disabled?: boolean;
-  /** Short numeric options share one row, so they read as a scale rather than a block grid. */
-  compact?: boolean;
-  /** A named preset with a dimension under it takes the full row. */
-  stacked?: boolean;
+  /** Five equal columns for the aspect row, instead of the wrapping flex fallback. */
+  fixedColumns?: boolean;
 }): ReactNode {
-  const chipsClass = compact ? 'gen-chips is-compact' : stacked ? 'gen-chips is-stacked' : 'gen-chips';
-
   return (
-    <fieldset className="gen-chips-group">
-      <legend className="gen-legend">{legend}</legend>
-      <div className={chipsClass}>
+    // The section title is already on screen, so the fieldset carries its name for
+    // assistive tech instead of printing the same word twice.
+    <fieldset className="gen-field" aria-label={legend}>
+      <div className={fixedColumns ? 'gen-seg is-fixed' : 'gen-seg'}>
         {options.map((option) => (
-          <label key={option.value} className="gen-chip">
+          <label
+            key={option.value}
+            className="gen-seg-option"
+            title={option.title}
+            onClick={onOptionActivate}
+          >
             <input
-              className="gen-chip-input"
+              className="gen-seg-input"
               type="radio"
               name={name}
               value={option.value}
@@ -194,9 +173,11 @@ function ChipGroup({
                 onChange(option.value);
               }}
             />
-            <span className="gen-chip-body">
-              <span className="gen-chip-label">{option.label}</span>
-              {option.detail === undefined ? null : <span className="gen-chip-detail">{option.detail}</span>}
+            <span className="gen-seg-body">
+              <span className="gen-seg-label">{option.label}</span>
+              {option.detail === undefined ? null : (
+                <span className="gen-seg-detail">{option.detail}</span>
+              )}
             </span>
           </label>
         ))}
@@ -224,19 +205,14 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const sizeName = useId();
   const countName = useId();
   const negativeId = useId();
-  const sizeHeadingId = useId();
-  const batchHeadingId = useId();
-  const advancedHeadingId = useId();
-  const advancedPanelId = useId();
+  const widthId = useId();
+  const heightId = useId();
   const enhancerName = useId();
   const precisionName = useId();
   const encoderName = useId();
-  const referencesHeadingId = useId();
-  // Open by default, so the model precision switch and the prompt enhancer are on screen.
-  const [advancedOpen, setAdvancedOpen] = useState(true);
-  const [uploading, setUploading] = useState(false);
-  const [referenceError, setReferenceError] = useState<string | null>(null);
   const [hardware, setHardware] = useState<HardwareSummary | null>(null);
+  // The width and height fields are an explicit choice: a matching preset closes them again.
+  const [customSizeOpen, setCustomSizeOpen] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -275,6 +251,8 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const sizeIssue = sizeProblem(form.width, form.height);
   const sizeInvalid = sizeIssue !== null;
   const seedIssue = seedProblem(form.seed);
+  // A canvas that names no preset is a custom one, so the fields open without a click.
+  const showCustomSize = capabilities.arbitrarySize && (customSizeOpen || activePreset === null);
 
   const vram = estimateVram({
     width: form.width,
@@ -287,36 +265,26 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
     systemRamGb: hardware === null ? null : hardware.systemRamGb,
   });
 
-  const aspectOptions: ChipOption[] = groups.map((group) => ({ value: group.ratio, label: group.ratio }));
-  const sizeOptions: ChipOption[] = visiblePresets.map((preset) => ({
+  const aspectOptions: SegmentedOption[] = groups.map((group) => ({ value: group.ratio, label: group.ratio }));
+  const sizeOptions: SegmentedOption[] = visiblePresets.map((preset) => ({
     value: preset.id,
-    label: preset.label,
-    detail: sizeDetail(preset),
+    ...presetShort(preset),
+    title: `${preset.width} × ${preset.height} — ${preset.label}`,
   }));
-  const countOptions: ChipOption[] = Array.from(
-    { length: Math.max(1, Math.trunc(capabilities.maxBatch)) },
-    (_unused, index) => ({ value: String(index + 1), label: String(index + 1) }),
-  );
+  // Four counts at most, plus whatever larger count the form already holds, so nothing hides.
+  const countLimit = Math.min(4, Math.max(1, Math.trunc(capabilities.maxBatch)));
+  const countValues = Array.from({ length: countLimit }, (_unused, index) => index + 1);
+  if (!countValues.includes(form.count)) countValues.push(form.count);
+  countValues.sort((left, right) => left - right);
 
-  // Unsupported sampling options compress into one muted line inside Advanced.
+  // Unsupported sampling options compress into one muted line under the enhancer.
   const fixedSummary = [
     ...(capabilities.adjustableSteps
       ? []
-      : [
-          capabilities.fixedSteps !== null
-            ? `${capabilities.fixedSteps} steps fixed`
-            : 'Auto steps',
-        ]),
+      : [capabilities.fixedSteps !== null ? `${capabilities.fixedSteps} steps fixed` : 'Auto steps']),
     ...(capabilities.guidance ? [] : ['No guidance']),
     ...(capabilities.negativePrompt ? [] : ['No negative prompt']),
   ].join(' · ');
-  // Precision, text encoder and prompt enhancer are always here, plus the sampling controls
-  // this provider actually supports.
-  const advancedCount =
-    3 +
-    (capabilities.adjustableSteps ? 1 : 0) +
-    (capabilities.guidance ? 1 : 0) +
-    (capabilities.negativePrompt ? 1 : 0);
 
   const sizeEmptyNote =
     capabilities.presets.length === 0
@@ -327,8 +295,7 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
       ? noteFor(capabilities, ['size', 'resolution', 'dimension'])
       : null;
   const seedNote = capabilities.seed ? null : noteFor(capabilities, ['seed']);
-  const referenceNote =
-    capabilities.maxReferenceImages > 0 ? null : noteFor(capabilities, ['reference', 'image input', 'edit']);
+
   const handleAspect = (ratio: string): void => {
     const group = groups.find((candidate) => candidate.ratio === ratio);
     const preset = group === undefined ? undefined : group.presets[0];
@@ -350,301 +317,261 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
     controller.updateForm({ height: Number.isFinite(value) ? value : 0, presetId: null });
   };
 
-  const handleFiles = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
-    const files = Array.from(event.target.files ?? []);
-    event.target.value = '';
-    if (files.length === 0) return;
-    setUploading(true);
-    setReferenceError(null);
-    try {
-      let added = 0;
-      for (const file of files) {
-        if (form.references.length + added >= capabilities.maxReferenceImages) break;
-        if (!file.type.startsWith('image/')) {
-          setReferenceError('Only image files can be used as a reference.');
-          continue;
-        }
-        const dataBase64 = await readFileAsBase64(file);
-        const reference = await uploadReference({ filename: file.name, mimeType: file.type, dataBase64 });
-        controller.addReference(reference);
-        added += 1;
-      }
-    } catch (error) {
-      setReferenceError(describeError(error));
-    } finally {
-      setUploading(false);
-    }
-  };
-
   return (
     <div className="gen-controls">
-      <section className="gen-section" aria-labelledby={sizeHeadingId}>
-        <h3 className="gen-section-title" id={sizeHeadingId}>
-          Size
-        </h3>
-        {capabilities.presets.length === 0 ? (
+      {capabilities.presets.length === 0 ? (
+        <section className="gen-section">
+          <h3 className="gen-section-title">Resolution</h3>
           <QuietLine text={sizeEmptyNote ?? 'This provider lists no size presets.'} />
-        ) : (
-          <>
-            <ChipGroup
+        </section>
+      ) : (
+        <>
+          <section className="gen-section">
+            <h3 className="gen-section-title">Aspect ratio</h3>
+            <SegmentedField
               legend="Aspect ratio"
               name={aspectName}
               value={activeRatio}
               options={aspectOptions}
               onChange={handleAspect}
+              onOptionActivate={() => setCustomSizeOpen(false)}
               disabled={controller.running}
+              fixedColumns={aspectOptions.length === 5}
             />
-            <ChipGroup
-              legend="Resolution"
-              name={sizeName}
-              value={activePreset === null ? null : activePreset.id}
-              options={sizeOptions}
-              onChange={handleSize}
-              disabled={controller.running}
-              stacked
-            />
-          </>
-        )}
+          </section>
 
-        {capabilities.arbitrarySize ? (
-          <>
-            <div className="gen-pair">
-              <Field
-                label="Width"
-                type="number"
-                inputMode="numeric"
-                min={64}
-                max={8192}
-                step={multiple}
-                value={String(form.width)}
-                disabled={controller.running}
-                invalid={sizeInvalid}
-                hint={`Multiples of ${multiple} px, 64 to 8192.`}
-                onChange={handleWidth}
-              />
-              <Field
-                label="Height"
-                type="number"
-                inputMode="numeric"
-                min={64}
-                max={8192}
-                step={multiple}
-                value={String(form.height)}
-                disabled={controller.running}
-                invalid={sizeInvalid}
-                hint={`Multiples of ${multiple} px, 64 to 8192.`}
-                onChange={handleHeight}
-              />
-            </div>
-            {sizeIssue === null ? null : <p className="gen-quiet is-error">{sizeIssue}</p>}
-          </>
-        ) : (
-          <QuietLine text={sizeFixedNote ?? 'This provider takes sizes from its presets only.'} />
-        )}
-      </section>
-
-      <section className="gen-section" aria-labelledby={batchHeadingId}>
-        <h3 className="gen-section-title" id={batchHeadingId}>
-          Batch
-        </h3>
-        <ChipGroup
-          legend="Images"
-          name={countName}
-          value={String(form.count)}
-          options={countOptions}
-          onChange={(value) => controller.updateForm({ count: Number(value) })}
-          disabled={controller.running}
-          compact
-        />
-        {capabilities.seed ? (
-          <Field
-            label="Seed"
-            type="number"
-            inputMode="numeric"
-            min={0}
-            step={1}
-            value={form.seed}
-            disabled={controller.running}
-            invalid={seedIssue !== null}
-            hint={seedIssue ?? 'Leave empty for a fresh seed per image.'}
-            onChange={(event) => controller.updateForm({ seed: event.target.value })}
-          />
-        ) : (
-          <QuietLine text={seedNote ?? 'This provider chooses the seed itself.'} />
-        )}
-      </section>
-
-      <section className="gen-section" aria-labelledby={advancedHeadingId}>
-        {advancedCount === 0 ? (
-          <h3 className="gen-section-title" id={advancedHeadingId}>
-            Advanced
-          </h3>
-        ) : (
-          <button
-            type="button"
-            className="gen-section-toggle"
-            aria-expanded={advancedOpen}
-            aria-controls={advancedPanelId}
-            onClick={() => setAdvancedOpen(!advancedOpen)}
-          >
-            <svg className="icon gen-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-              <path d="M9.5 6.5L15 12l-5.5 5.5" />
-            </svg>
-            <span className="gen-section-title" id={advancedHeadingId}>
-              Advanced
-            </span>
-            <span className="gen-section-count">{advancedCount === 1 ? '1 setting' : `${advancedCount} settings`}</span>
-          </button>
-        )}
-
-        <div className="gen-advanced" id={advancedPanelId} hidden={!advancedOpen || advancedCount === 0}>
-          <ChipGroup
-            legend="Model precision"
-            name={precisionName}
-            value={form.modelVariant}
-            options={MODEL_PRECISION_OPTIONS}
-            disabled={controller.running}
-            stacked
-            onChange={(value) =>
-              controller.updateForm({ modelVariant: value === 'int8_convrot' ? 'int8_convrot' : 'w4a8' })
-            }
-          />
-          <ChipGroup
-            legend="Text encoder"
-            name={encoderName}
-            value={form.textEncoderVariant}
-            options={TEXT_ENCODER_OPTIONS}
-            disabled={controller.running}
-            stacked
-            onChange={(value) =>
-              controller.updateForm({ textEncoderVariant: value === 'nvfp4' ? 'nvfp4' : 'int8' })
-            }
-          />
-          {capabilities.adjustableSteps ? (
-            <Slider
-              label="Steps"
-              min={MIN_STEPS}
-              max={MAX_STEPS}
-              step={1}
-              value={form.steps}
-              disabled={controller.running}
-              hint={`${MIN_STEPS} to ${MAX_STEPS} sampling steps.`}
-              onChange={(value) => controller.updateForm({ steps: value })}
-            />
-          ) : null}
-          {capabilities.guidance ? (
-            <Slider
-              label="Guidance"
-              min={0}
-              max={20}
-              step={0.5}
-              value={form.guidance}
-              disabled={controller.running}
-              hint="How closely the provider follows the prompt."
-              format={(value) => value.toFixed(1)}
-              onChange={(value) => controller.updateForm({ guidance: value })}
-            />
-          ) : null}
-          {capabilities.negativePrompt ? (
-            <div className="field">
-              <label className="gen-label" htmlFor={negativeId}>
-                Negative prompt
-              </label>
-              <textarea
-                id={negativeId}
-                className="field-textarea gen-textarea"
-                rows={2}
-                value={form.negativePrompt}
-                disabled={controller.running}
-                placeholder="What to leave out."
-                onChange={(event) => controller.updateForm({ negativePrompt: event.target.value })}
-              />
-            </div>
-          ) : null}
-          <ChipGroup
-            legend="Prompt enhancer"
-            name={enhancerName}
-            value={form.promptEnhancer}
-            options={PROMPT_ENHANCER_OPTIONS}
-            disabled={controller.running}
-            stacked
-            onChange={(value) =>
-              controller.updateForm({
-                promptEnhancer:
-                  value === 'qwen3.5_9b' || value === 'qwen3.8_27b' ? value : 'off',
-              })
-            }
-          />
-          {fixedSummary.length === 0 ? null : <p className="gen-fixed-meta">{fixedSummary}</p>}
-        </div>
-      </section>
-
-      <section className="gen-section" aria-labelledby={referencesHeadingId}>
-        <div className="gen-section-head">
-          <h3 className="gen-section-title" id={referencesHeadingId}>
-            References
-          </h3>
-          {capabilities.maxReferenceImages > 0 ? (
-            <span className="gen-section-count">
-              {form.references.length} of {capabilities.maxReferenceImages}
-            </span>
-          ) : null}
-        </div>
-        {capabilities.maxReferenceImages > 0 ? (
-          <>
-            <ul className="gen-ref-list">
-              {form.references.map((reference) => (
-                <li key={reference.id} className="gen-ref">
-                  <span className="gen-ref-name" title={reference.filename}>
-                    {reference.filename}
-                  </span>
+          <section className="gen-section">
+            <h3 className="gen-section-title">Resolution</h3>
+            <fieldset className="gen-field" aria-label="Resolution">
+              <div className="gen-seg">
+                {sizeOptions.map((option) => (
+                  <label
+                    key={option.value}
+                    className="gen-seg-option"
+                    title={option.title}
+                    onClick={() => setCustomSizeOpen(false)}
+                  >
+                    <input
+                      className="gen-seg-input"
+                      type="radio"
+                      name={sizeName}
+                      value={option.value}
+                      checked={option.value === (activePreset === null ? '' : activePreset.id)}
+                      disabled={controller.running}
+                      onChange={() => handleSize(option.value)}
+                    />
+                    <span className="gen-seg-body">
+                      <span className="gen-seg-label">{option.label}</span>
+                      {option.detail === undefined ? null : (
+                        <span className="gen-seg-detail">{option.detail}</span>
+                      )}
+                    </span>
+                  </label>
+                ))}
+                {capabilities.arbitrarySize ? (
                   <button
                     type="button"
-                    className="gen-ref-remove"
+                    className={showCustomSize ? 'gen-seg-btn is-active' : 'gen-seg-btn'}
+                    aria-pressed={showCustomSize}
+                    title="Set an exact width and height"
                     disabled={controller.running}
-                    aria-label={`Remove reference ${reference.filename}`}
-                    onClick={() => controller.removeReference(reference.id)}
+                    onClick={() => {
+                      setCustomSizeOpen(true);
+                      // Custom is a mode, so no preset stays marked as the chosen one.
+                      if (form.presetId !== null) controller.updateForm({ presetId: null });
+                    }}
                   >
-                    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                      <path d="M7 7l10 10M17 7L7 17" />
-                    </svg>
+                    <span className="gen-seg-label">Custom</span>
                   </button>
-                </li>
+                ) : null}
+              </div>
+            </fieldset>
+
+            {showCustomSize ? (
+              <div className="gen-size-custom">
+                <div className="gen-pair">
+                  <label className="gen-num-field" htmlFor={widthId}>
+                    <span className="gen-label">Width</span>
+                    <input
+                      id={widthId}
+                      className="field-input gen-num"
+                      type="number"
+                      inputMode="numeric"
+                      min={64}
+                      max={8192}
+                      step={multiple}
+                      value={String(form.width)}
+                      disabled={controller.running}
+                      aria-invalid={sizeInvalid ? true : undefined}
+                      onChange={handleWidth}
+                    />
+                  </label>
+                  <label className="gen-num-field" htmlFor={heightId}>
+                    <span className="gen-label">Height</span>
+                    <input
+                      id={heightId}
+                      className="field-input gen-num"
+                      type="number"
+                      inputMode="numeric"
+                      min={64}
+                      max={8192}
+                      step={multiple}
+                      value={String(form.height)}
+                      disabled={controller.running}
+                      aria-invalid={sizeInvalid ? true : undefined}
+                      onChange={handleHeight}
+                    />
+                  </label>
+                </div>
+                <p className="gen-hint">Multiples of {multiple} px (64–8192)</p>
+                {sizeIssue === null ? null : <p className="gen-hint is-error">{sizeIssue}</p>}
+              </div>
+            ) : null}
+
+            {capabilities.arbitrarySize ? null : (
+              <QuietLine text={sizeFixedNote ?? 'This provider takes sizes from its presets only.'} />
+            )}
+          </section>
+        </>
+      )}
+
+      <section className="gen-section">
+        <h3 className="gen-section-title">Batch &amp; seed</h3>
+        <div className="gen-batch-row">
+          <fieldset className="gen-field is-count" aria-label="Images">
+            <div className="gen-seg">
+              {countValues.map((value) => (
+                <label key={value} className="gen-seg-option" title={`${value} ${value === 1 ? 'image' : 'images'}`}>
+                  <input
+                    className="gen-seg-input"
+                    type="radio"
+                    name={countName}
+                    value={String(value)}
+                    checked={form.count === value}
+                    disabled={controller.running}
+                    onChange={() => controller.updateForm({ count: value })}
+                  />
+                  <span className="gen-seg-body is-single">
+                    <span className="gen-seg-label">{value}</span>
+                  </span>
+                </label>
               ))}
-            </ul>
-            {form.references.length >= capabilities.maxReferenceImages ? null : (
-              <label className="gen-ref-add">
-                <input
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  className="sr-only"
-                  disabled={uploading || controller.running}
-                  aria-label="Add reference images"
-                  onChange={(event) => {
-                    void handleFiles(event);
-                  }}
-                />
-                <span className="gen-ref-add-icon" aria-hidden="true">
-                  {uploading ? (
-                    <Spinner size={12} label="" />
-                  ) : (
-                    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                      <path d="M12 5.5v13M5.5 12h13" />
-                    </svg>
-                  )}
-                </span>
-                <span className="gen-ref-add-text">{uploading ? 'Uploading' : 'Add image'}</span>
+            </div>
+          </fieldset>
+
+          {capabilities.seed ? (
+            <div className="gen-field">
+              <label className="gen-legend" htmlFor={`${countName}-seed`}>
+                Seed
               </label>
-            )}
-            {form.references.length === 0 ? null : (
-              <QuietLine text="Reference in prompt as <Picture 1>, <Picture 2>…" />
-            )}
-            {referenceError === null ? null : <p className="gen-quiet is-error">{referenceError}</p>}
-          </>
-        ) : (
-          <QuietLine text={referenceNote ?? 'This provider does not accept reference images.'} />
-        )}
+              <input
+                id={`${countName}-seed`}
+                className="field-input gen-num"
+                type="number"
+                inputMode="numeric"
+                min={0}
+                step={1}
+                placeholder="Seed"
+                aria-label="Seed"
+                title="Leave empty for a fresh seed per image"
+                value={form.seed}
+                disabled={controller.running}
+                aria-invalid={seedIssue === null ? undefined : true}
+                onChange={(event) => controller.updateForm({ seed: event.target.value })}
+              />
+            </div>
+          ) : (
+            <QuietLine text={seedNote ?? 'This provider chooses the seed itself.'} />
+          )}
+        </div>
+        {seedIssue === null ? null : <p className="gen-hint is-error">{seedIssue}</p>}
+      </section>
+
+      <section className="gen-section">
+        <h3 className="gen-section-title">Model</h3>
+        <SegmentedField
+          legend="Model precision"
+          name={precisionName}
+          value={form.modelVariant}
+          options={MODEL_PRECISION_OPTIONS}
+          disabled={controller.running}
+          onChange={(value) =>
+            controller.updateForm({ modelVariant: value === 'int8_convrot' ? 'int8_convrot' : 'w4a8' })
+          }
+        />
+      </section>
+
+      <section className="gen-section">
+        <h3 className="gen-section-title">Encoder</h3>
+        <SegmentedField
+          legend="Text encoder"
+          name={encoderName}
+          value={form.textEncoderVariant}
+          options={TEXT_ENCODER_OPTIONS}
+          disabled={controller.running}
+          onChange={(value) =>
+            controller.updateForm({ textEncoderVariant: value === 'nvfp4' ? 'nvfp4' : 'int8' })
+          }
+        />
+      </section>
+
+      <section className="gen-section">
+        <h3 className="gen-section-title">Enhancer</h3>
+        <SegmentedField
+          legend="Prompt enhancer"
+          name={enhancerName}
+          value={form.promptEnhancer}
+          options={PROMPT_ENHANCER_OPTIONS}
+          disabled={controller.running}
+          onChange={(value) =>
+            controller.updateForm({
+              promptEnhancer: value === 'qwen3.5_9b' || value === 'qwen3.8_27b' ? value : 'off',
+            })
+          }
+        />
+
+        {capabilities.adjustableSteps ? (
+          <Slider
+            label="Steps"
+            min={MIN_STEPS}
+            max={MAX_STEPS}
+            step={1}
+            value={form.steps}
+            disabled={controller.running}
+            hint={`${MIN_STEPS} to ${MAX_STEPS} sampling steps.`}
+            onChange={(value) => controller.updateForm({ steps: value })}
+          />
+        ) : null}
+        {capabilities.guidance ? (
+          <Slider
+            label="Guidance"
+            min={0}
+            max={20}
+            step={0.5}
+            value={form.guidance}
+            disabled={controller.running}
+            hint="How closely the provider follows the prompt."
+            format={(value) => value.toFixed(1)}
+            onChange={(value) => controller.updateForm({ guidance: value })}
+          />
+        ) : null}
+        {capabilities.negativePrompt ? (
+          <div className="field">
+            <label className="gen-label" htmlFor={negativeId}>
+              Negative prompt
+            </label>
+            <textarea
+              id={negativeId}
+              className="field-textarea gen-textarea"
+              rows={2}
+              value={form.negativePrompt}
+              disabled={controller.running}
+              placeholder="What to leave out."
+              onChange={(event) => controller.updateForm({ negativePrompt: event.target.value })}
+            />
+          </div>
+        ) : null}
+        {fixedSummary.length === 0 ? null : <p className="gen-fixed-meta">{fixedSummary}</p>}
       </section>
 
       <div className="gen-vram" title={vram.breakdownTitle}>
@@ -656,19 +583,14 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
               : `~${vram.peakGb.toFixed(1)} / ${formatVramGb(vram.gpuVramGb)} GB`}
           </span>
         </div>
-        <div
-          className="gen-vram-track"
-          role="meter"
-          aria-label="Estimated peak VRAM"
-          aria-valuemin={0}
-          aria-valuemax={vram.gpuVramGb ?? 24}
-          aria-valuenow={vram.peakGb}
-        >
-          <span
-            className={`gen-vram-fill is-${vram.status}`}
-            style={{ width: `${vram.fillPercent}%` }}
-          />
-        </div>
+        <VramLedMeter
+          fillPercent={vram.fillPercent}
+          status={vram.status}
+          value={vram.peakGb}
+          max={vram.gpuVramGb ?? 24}
+          label="Estimated peak VRAM"
+          size="sm"
+        />
         <div className="gen-vram-foot">
           <span className="gen-vram-peak">Peak: {vram.peakStage.label}</span>
           <span className={`gen-vram-status is-${vram.status}`}>{vram.statusLabel}</span>

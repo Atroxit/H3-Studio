@@ -341,47 +341,181 @@
   pointer-events: none;
 }
 
-/* Rail list */
+/* Rail list: a visual-first contact sheet. The artwork is the item; the metadata is a
+   scrim over its foot, so a batch is recognised by the picture, not by a filename. */
 .lb-rail {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-2);
 }
 
 .lb-rail-item {
   position: relative;
   display: flex;
-  align-items: center;
+  min-width: 0;
 }
 
-.lb-rail-row {
+.lb-rail-card {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--panel-sunken);
+  text-align: left;
+  overflow: hidden;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.lb-rail-card:hover {
+  border-color: var(--accent-line);
+}
+
+.lb-rail-card:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* The selected batch is the one the canvas is showing, so it gets the accent ring. */
+.lb-rail-item.is-active .lb-rail-card {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.lb-rail-frame {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--panel-sunken);
+}
+
+.lb-rail-cover {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 240ms ease;
+}
+
+.lb-rail-card:hover .lb-rail-cover {
+  transform: scale(1.02);
+}
+
+/* The metadata sits in the artwork: one line, plus a count when the batch holds more. */
+.lb-rail-scrim {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
   display: flex;
   align-items: center;
-  gap: 9px;
-  width: 100%;
-  /* Reserved so the hover delete icon never sits on top of the meta line. */
-  padding: 5px 32px 5px 6px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  text-align: left;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-2) 6px;
+  background: linear-gradient(to top, rgba(8, 8, 10, 0.88), rgba(8, 8, 10, 0.35) 55%, transparent);
+  pointer-events: none;
 }
 
+.lb-rail-meta {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lb-rail-multi {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--scrim-strong);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+/* A batch with nothing finished yet is a card, not a hole in the sheet. */
+.lb-rail-blank {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  padding: var(--space-2);
+  background: linear-gradient(160deg, var(--panel-sunken), var(--panel));
+}
+
+.lb-rail-status {
+  align-self: flex-start;
+  padding: 1px var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.lb-rail-status.is-complete {
+  border-color: var(--ok-line);
+  color: var(--ok);
+}
+
+.lb-rail-status.is-partial,
+.lb-rail-status.is-running,
+.lb-rail-status.is-queued {
+  border-color: var(--warn-line);
+  color: var(--warn);
+}
+
+.lb-rail-status.is-failed,
+.lb-rail-status.is-cancelled {
+  border-color: var(--danger-line);
+  color: var(--danger);
+}
+
+.lb-rail-blank-prompt {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: var(--text-sm);
+  line-height: 1.35;
+  color: var(--text-muted);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+
+/* Delete sits over the artwork, hidden until the card is hovered or focused. */
 .lb-rail-delete {
   position: absolute;
-  right: 4px;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
   display: grid;
   place-items: center;
   width: 24px;
   height: 24px;
   padding: 0;
-  border: 1px solid transparent;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-faint);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--scrim-strong);
+  color: var(--text-muted);
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+  transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 
 .lb-rail-item:hover .lb-rail-delete,
@@ -391,8 +525,8 @@
 }
 
 .lb-rail-delete:hover {
-  color: var(--danger, #e5484d);
-  background: var(--panel-sunken);
+  border-color: var(--danger-line);
+  color: var(--danger);
 }
 
 .lb-rail-delete:focus-visible {
@@ -418,74 +552,6 @@
 .lb-rail-delete .icon {
   width: 14px;
   height: 14px;
-}
-
-.lb-rail-row:hover {
-  border-color: var(--line-soft);
-  background: var(--panel-raised);
-}
-
-.lb-rail-row.is-active {
-  border-color: var(--accent-line);
-  background: var(--accent-soft);
-}
-
-.lb-rail-thumb {
-  flex: 0 0 36px;
-  width: 36px;
-  height: 36px;
-  overflow: hidden;
-  border: 1px solid var(--line-soft);
-  border-radius: 5px;
-  background: var(--panel-sunken);
-}
-
-.lb-rail-thumb img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.lb-rail-thumb-empty {
-  display: block;
-  width: 100%;
-  height: 100%;
-  background: repeating-linear-gradient(135deg, var(--panel-sunken) 0, var(--panel-sunken) 5px, var(--panel) 5px, var(--panel) 10px);
-}
-
-.lb-rail-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-
-.lb-rail-name {
-  display: -webkit-box;
-  overflow: hidden;
-  font-size: var(--text-sm);
-  font-weight: 500;
-  line-height: 1.35;
-  color: var(--text);
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.lb-rail-meta,
-.lb-rail-time {
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-  line-height: 1.35;
-  color: var(--text-muted);
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.lb-rail-time {
-  color: var(--text-faint);
 }
 
 .lb-rail-note {

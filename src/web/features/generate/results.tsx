@@ -6,7 +6,7 @@
 // so elapsed time is the only liveness signal this surface can honestly show. There is
 // no percentage and no ETA: the adapter knows neither.
 
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useId, useState, type CSSProperties, type ReactNode } from 'react';
 import { imageUrl } from '../../api';
 import { Button, Spinner } from '../../components';
 import { useStudio } from '../../studio';
@@ -31,8 +31,9 @@ export interface ResultsGridProps {
   onRetry: (indices: number[]) => void;
   onRetryFailed: () => void;
   onReload: () => void;
-  onClear: () => void;
   onOpenImage: (imageId: string, trigger: HTMLElement | null) => void;
+  /** Opens the viewer on the batch's source image, so an alteration can be compared. */
+  onCompareImage: (imageId: string, trigger: HTMLElement | null) => void;
   /** Adds a starter to the prompt, so a first run is one click away. */
   onUseStarter: (prompt: string) => void;
   /** The tile an alteration would start from, or null when alterations are unavailable. */
@@ -101,14 +102,38 @@ function stateClass(tile: GenerationTile): string {
   return tile.phase === 'running' ? 'is-running' : tile.phase === 'done' ? 'is-done' : tile.phase === 'failed' ? 'is-failed' : tile.phase === 'cancelled' ? 'is-cancelled' : 'is-waiting';
 }
 
-function batchStatusLabel(batch: GenerationBatch, running: boolean): string {
-  if (running) return 'Running';
-  if (batch.status === 'queued') return 'Queued';
-  if (batch.status === 'running') return 'Running';
-  if (batch.status === 'complete') return 'Complete';
-  if (batch.status === 'partial') return 'Partial';
-  if (batch.status === 'failed') return 'Failed';
-  return 'Stopped';
+function CompareIcon(): ReactNode {
+  return (
+    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect x="4" y="4" width="11" height="11" rx="2" />
+      <path d="M9 9h11v11H9z" />
+    </svg>
+  );
+}
+
+function DownloadIcon(): ReactNode {
+  return (
+    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 4.5v10M8 11l4 4 4-4M5 19.5h14" />
+    </svg>
+  );
+}
+
+function ExpandIcon(): ReactNode {
+  return (
+    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M14 4.5h5.5V10M10 19.5H4.5V14M19.5 4.5l-6 6M4.5 19.5l6-6" />
+    </svg>
+  );
+}
+
+function SparkleIcon(): ReactNode {
+  return (
+    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 4.5l1.6 4.4 4.4 1.6-4.4 1.6L12 16.5l-1.6-4.4L6 10.5l4.4-1.6z" />
+      <path d="M18 16.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z" />
+    </svg>
+  );
 }
 
 function isGoing(tile: GenerationTile): boolean {
@@ -356,8 +381,11 @@ interface ResultTileProps {
   settled: boolean;
   canRetry: boolean;
   alterationSourceId: string | null;
+  /** True when this batch altered a stored image, so a comparison exists to show. */
+  hasSource: boolean;
   onRetry: (index: number) => void;
   onOpen: (imageId: string, trigger: HTMLElement | null) => void;
+  onCompare: (imageId: string, trigger: HTMLElement | null) => void;
   onSelectSource: (imageId: string) => void;
 }
 
@@ -371,8 +399,10 @@ function ResultTile({
   settled,
   canRetry,
   alterationSourceId,
+  hasSource,
   onRetry,
   onOpen,
+  onCompare,
   onSelectSource,
 }: ResultTileProps): ReactNode {
   const label = `Image ${tile.index + 1} of ${total}`;
@@ -413,6 +443,52 @@ function ResultTile({
         </button>
       ) : null}
 
+      {/* A dark glass pill over the artwork: the three things a finished tile invites,
+          revealed on hover or focus so the picture stays the subject. */}
+      {tile.phase === 'done' && tile.imageId !== null ? (
+        <div className="gen-tile-actions">
+          {hasSource ? (
+            <button
+              type="button"
+              className="gen-tile-action"
+              title="Compare with the source image"
+              onClick={(event) => {
+                event.stopPropagation();
+                onCompare(tile.imageId ?? '', event.currentTarget);
+              }}
+            >
+              <CompareIcon />
+              Compare
+            </button>
+          ) : null}
+          <a
+            className="gen-tile-action"
+            href={imageUrl(tile.imageId, { download: true })}
+            download
+            title={`Download image ${tile.index + 1}`}
+            aria-label={`Download image ${tile.index + 1}`}
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <DownloadIcon />
+            Download
+          </a>
+          <button
+            type="button"
+            className="gen-tile-action"
+            title={`Open image ${tile.index + 1} in the viewer`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpen(tile.imageId ?? '', event.currentTarget);
+            }}
+          >
+            <ExpandIcon />
+            Expand
+          </button>
+        </div>
+      ) : null}
+
       {tile.phase === 'done' && tile.imageId === null ? (
         <div className="gen-tile-body">
           {settled ? <p className="gen-tile-note">Not stored</p> : <Spinner size={16} label="Saving the image" />}
@@ -437,7 +513,9 @@ function ResultTile({
       ) : null}
 
       {going ? null : (
-        <span className="gen-tile-meta">
+        // A ready tile keeps its footer to the left, so the action pill in the opposite
+        // corner never sits on top of it.
+        <span className={ready ? 'gen-tile-meta is-compact' : 'gen-tile-meta'}>
           <span>{tile.width === null || tile.height === null ? `${width} x ${height}` : `${tile.width} x ${tile.height}`}</span>
           {canAlter && tile.imageId !== null ? (
             isAlterSource ? (
@@ -456,23 +534,23 @@ function ResultTile({
               </button>
             )
           ) : null}
-          <span>
-            {tile.phase === 'done'
-              ? tile.imageId === null
-                ? 'not stored'
-                : 'stored'
-              : tile.phase === 'failed' || tile.phase === 'cancelled'
-                ? 'not stored'
-                : 'pending'}
-          </span>
+          {ready ? null : (
+            <span>{tile.phase === 'failed' || tile.phase === 'cancelled' ? 'not stored' : 'pending'}</span>
+          )}
         </span>
       )}
     </article>
   );
 }
 
+/**
+ * The provider rewrite. It is a reference, not the prompt the user wrote, so it stays
+ * collapsed to one quiet disclosure bar directly under the artwork until it is asked for.
+ */
 function RevisedPrompt({ text }: { text: string }): ReactNode {
+  const [open, setOpen] = useState(false);
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const panelId = useId();
 
   useEffect(() => {
     if (copyState === 'idle') return undefined;
@@ -492,16 +570,36 @@ function RevisedPrompt({ text }: { text: string }): ReactNode {
   };
 
   return (
-    <section className="gen-revised" aria-label="Prompt as rewritten by the provider">
-      <div className="gen-revised-head">
-        <h3 className="gen-revised-title">Provider rewrite</h3>
-        <span className="gen-badge">Rewritten</span>
+    <section className="gen-rewrite" aria-label="Prompt as rewritten by the provider">
+      <div className="gen-rewrite-bar">
+        <button
+          type="button"
+          className="gen-rewrite-toggle"
+          aria-expanded={open}
+          aria-controls={panelId}
+          onClick={() => setOpen(!open)}
+        >
+          <SparkleIcon />
+          <span className="gen-rewrite-label">
+            {open ? 'Prompt enhanced — Hide rewrite' : 'Prompt enhanced — Show rewrite'}
+          </span>
+          <svg
+            className={open ? 'icon gen-rewrite-chevron is-open' : 'icon gen-rewrite-chevron'}
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <path d="M9.5 6.5L15 12l-5.5 5.5" />
+          </svg>
+        </button>
         <Button variant="ghost" size="sm" onClick={() => void copy()}>
           {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy'}
         </Button>
       </div>
-      <p className="gen-revised-text">{text}</p>
-      <p className="gen-hint">The provider rewrote the prompt for this batch. Your prompt is unchanged.</p>
+      <div className="gen-rewrite-body" id={panelId} hidden={!open}>
+        <p className="gen-rewrite-text">{text}</p>
+        <p className="gen-hint">Your prompt is unchanged.</p>
+      </div>
     </section>
   );
 }
@@ -515,8 +613,8 @@ export function ResultsGrid({
   onRetry,
   onRetryFailed,
   onReload,
-  onClear,
   onOpenImage,
+  onCompareImage,
   onUseStarter,
   alterationSourceId,
   onSelectSource,
@@ -578,10 +676,15 @@ export function ResultsGrid({
   const settled = summary === null ? 0 : summary.done + summary.failed + summary.cancelled;
   const showPartial = summary !== null && summary.failed > 0;
   const canRetry = !running && batch.batchId !== null;
-  const statusLabel = batchStatusLabel(batch, running);
   const batchDuration = formatDuration(batch.durationMs);
-  const providerLabel =
-    studio.providers.find((provider) => provider.id === batch.providerId)?.label ?? batch.providerId;
+  const hasSource = (batch.sourceImageId ?? null) !== null;
+  // One quiet line of facts under the prompt: the canvas, how many images, how long, the seed.
+  const resultFacts = [
+    `${batch.width} × ${batch.height}`,
+    batch.requested === 1 ? null : `${batch.requested} images`,
+    batchDuration,
+    batch.seed === null ? null : `seed ${batch.seed}`,
+  ].filter((fact): fact is string => fact !== null);
 
   const copyPrompt = async (): Promise<void> => {
     try {
@@ -600,15 +703,9 @@ export function ResultsGrid({
       <header className="gen-results-head">
         <div className="gen-results-copy">
           <h3 className="gen-results-title">{batch.prompt}</h3>
-          <p className="gen-results-detail">
-            {providerLabel} / {batch.width} x {batch.height} /{' '}
-            {batch.requested === 1 ? '1 image' : `${batch.requested} images`}
-            {batch.seed === null ? null : ` / seed ${batch.seed}`}
-            {batchDuration === null ? null : ` / ${batchDuration}`}
-          </p>
+          <p className="gen-results-detail">{resultFacts.join(' · ')}</p>
         </div>
         <div className="gen-results-actions">
-          <span className={running ? 'gen-status is-running' : 'gen-status'}>{statusLabel}</span>
           <Button variant="ghost" size="sm" onClick={() => void copyPrompt()}>
             {copyState === 'copied' ? 'Copied' : copyState === 'failed' ? 'Copy failed' : 'Copy prompt'}
           </Button>
@@ -626,9 +723,6 @@ export function ResultsGrid({
             }}
           >
             Use prompt
-          </Button>
-          <Button variant="secondary" size="sm" disabled={running} onClick={onClear}>
-            New image
           </Button>
         </div>
       </header>
@@ -692,8 +786,10 @@ export function ResultsGrid({
             settled={!running}
             canRetry={canRetry}
             alterationSourceId={alterationSourceId}
+            hasSource={hasSource}
             onRetry={(index) => onRetry([index])}
             onOpen={onOpenImage}
+            onCompare={onCompareImage}
             onSelectSource={onSelectSource}
           />
           );

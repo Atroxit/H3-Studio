@@ -821,33 +821,6 @@
   font-weight: 600;
 }
 
-.sw-vram-track {
-  height: 6px;
-  border-radius: var(--radius-pill);
-  background: var(--panel);
-  overflow: hidden;
-}
-
-.sw-vram-fill {
-  display: block;
-  height: 100%;
-  border-radius: var(--radius-pill);
-  transition: width 180ms ease, background 180ms ease;
-}
-
-.sw-vram-fill.is-ok {
-  background: var(--ok);
-}
-
-.sw-vram-fill.is-tight {
-  background: var(--warn);
-}
-
-.sw-vram-fill.is-offload,
-.sw-vram-fill.is-oom {
-  background: var(--danger);
-}
-
 .sw-vram-stages {
   display: flex;
   align-items: baseline;

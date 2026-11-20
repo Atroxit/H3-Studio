@@ -11,7 +11,6 @@ import { batchDurationMs, formatDuration } from '../generate/helpers';
 import { clearIfShowingBatch } from '../generate/useGeneration';
 import {
   formatCount,
-  formatShortTimestamp,
   formatTimestamp,
   orderedImages,
   promptExcerpt,
@@ -569,15 +568,19 @@ export function LibraryRail(): ReactNode {
   return (
     <ul className="lb-rail">
       {recent.map((batch) => {
-        const cover = orderedImages(batch)[0];
+        const images = orderedImages(batch);
+        const cover = images[0];
         const active = library.activeBatchId === batch.id;
         const deleting = library.deletingBatchId === batch.id;
         const duration = formatDuration(batchDurationMs(batch));
+        // One quiet line of data on the artwork: the width plus how long it took, or the
+        // canvas when the batch has no duration to report yet.
+        const meta = duration === null ? `${batch.width} × ${batch.height}` : `${batch.width}px · ${duration}`;
         return (
-          <li key={batch.id} className="lb-rail-item">
+          <li key={batch.id} className={active ? 'lb-rail-item is-active' : 'lb-rail-item'}>
             <button
               type="button"
-              className={active ? 'lb-rail-row is-active' : 'lb-rail-row'}
+              className="lb-rail-card"
               title={batch.prompt}
               aria-current={active ? 'true' : undefined}
               onClick={() => {
@@ -585,31 +588,40 @@ export function LibraryRail(): ReactNode {
                 if (studio.view === 'generate') studio.openBatch(batch.id);
               }}
             >
-              <span className="lb-rail-thumb">
-                {cover === undefined ? (
-                  <span className="lb-rail-thumb-empty" aria-hidden="true" />
-                ) : (
-                  <img src={imageUrl(cover.id)} alt="" loading="lazy" width={cover.width} height={cover.height} />
-                )}
-              </span>
-              <span className="lb-rail-copy">
-                <span className="lb-rail-name">{batch.prompt}</span>
-                <span className="lb-rail-meta">
-                  {formatCount(batch.images.length, 'image', 'images')} · {batch.width} x {batch.height} ·{' '}
-                  {duration === null ? null : `${duration} · `}
-                  {formatShortTimestamp(batch.createdAt)}
+              <span className="sr-only">{batch.prompt}</span>
+              {cover === undefined ? (
+                <span className="lb-rail-blank">
+                  <span className={`lb-rail-status is-${batch.status}`}>{statusLabel(batch.status)}</span>
+                  <span className="lb-rail-blank-prompt">{promptExcerpt(batch.prompt, 9)}</span>
                 </span>
-              </span>
+              ) : (
+                <span className="lb-rail-frame">
+                  <img
+                    className="lb-rail-cover"
+                    src={imageUrl(cover.id)}
+                    alt=""
+                    loading="lazy"
+                    width={cover.width}
+                    height={cover.height}
+                  />
+                  <span className="lb-rail-scrim">
+                    <span className="lb-rail-meta">{meta}</span>
+                    {images.length > 1 ? (
+                      <span className="lb-rail-multi">{images.length}×</span>
+                    ) : null}
+                  </span>
+                </span>
+              )}
             </button>
             <button
               type="button"
               className="lb-rail-delete"
-              aria-label="Delete batch"
-              title="Delete"
+              aria-label={`Delete batch ${promptExcerpt(batch.prompt, 6)}`}
+              title="Delete batch"
               disabled={library.deletingBatchId !== null}
               aria-busy={deleting}
               onClick={(event) => {
-                // The row behind this icon opens the batch, so never let the click through.
+                // The card behind this icon opens the batch, so never let the click through.
                 event.stopPropagation();
                 void handleDelete(batch);
               }}

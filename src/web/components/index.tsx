@@ -18,6 +18,9 @@ function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter((part): part is string => typeof part === 'string' && part.length > 0).join(' ');
 }
 
+export { VramLedMeter } from './VramLedMeter';
+export type { VramLedMeterProps } from './VramLedMeter';
+
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 

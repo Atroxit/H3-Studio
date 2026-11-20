@@ -5,7 +5,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { ModelCatalogEntry, ProviderConfig, SystemProfile } from '../../../core/types';
 import { applySystemProfile, type ApplySystemProfileResponse } from '../../api';
-import { Button, Spinner } from '../../components';
+import { Button, Spinner, VramLedMeter } from '../../components';
 import { useStudio } from '../../studio';
 import { applyStudioDefaults } from '../generate/useGeneration';
 import { estimateVram, formatVramGb } from '../generate/vram';
@@ -575,19 +575,14 @@ export function SetupWizard({
                   <span className={`sw-vram-status is-${vram.status}`}>{vram.statusLabel}</span>
                 </span>
               </div>
-              <div
-                className="sw-vram-track"
-                role="meter"
-                aria-label="Estimated peak VRAM"
-                aria-valuemin={0}
-                aria-valuemax={vram.gpuVramGb ?? 24}
-                aria-valuenow={vram.peakGb}
-              >
-                <span
-                  className={`sw-vram-fill is-${vram.status}`}
-                  style={{ width: `${vram.fillPercent}%` }}
-                />
-              </div>
+              <VramLedMeter
+                fillPercent={vram.fillPercent}
+                status={vram.status}
+                value={vram.peakGb}
+                max={vram.gpuVramGb ?? 24}
+                label="Estimated peak VRAM"
+                size="md"
+              />
               <div className="sw-vram-stages">
                 <ul className="sw-vram-stage-list">
                   {vram.stages.map((stage) => (

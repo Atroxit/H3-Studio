@@ -52,7 +52,7 @@ if (typeof navigator !== 'undefined' && typeof document !== 'undefined' && navig
 }
 
 export interface StudioSlots {
-  /** Left rail, under the library summary. The library feature lists batches here. */
+  /** Left rail, under the New image action. The library feature lists recent batches here. */
   rail?: ReactNode;
   /** Centre panel in the generate view. The generate feature renders results here. */
   canvas?: ReactNode;
@@ -72,19 +72,6 @@ interface ToastState {
   id: number;
   message: string;
   tone: 'success' | 'error';
-}
-
-const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
-
-function formatBytes(bytes: number): string {
-  let value = Math.max(0, bytes);
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < BYTE_UNITS.length - 1) {
-    value /= 1024;
-    unitIndex += 1;
-  }
-  const unit = BYTE_UNITS[unitIndex] ?? 'B';
-  return unitIndex === 0 ? `${Math.round(value)} ${unit}` : `${value.toFixed(1)} ${unit}`;
 }
 
 function describeError(error: unknown): string {
@@ -114,16 +101,6 @@ function ImageIcon(): ReactNode {
       <rect x="3.5" y="5" width="17" height="14" rx="2" />
       <circle cx="8.5" cy="10" r="1.4" />
       <path d="M4.5 17.5l5-5 4 4 2.5-2.5 3.5 3.5" />
-    </svg>
-  );
-}
-
-function DiskIcon(): ReactNode {
-  return (
-    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <rect x="4" y="5" width="16" height="6" rx="2" />
-      <rect x="4" y="13" width="16" height="6" rx="2" />
-      <path d="M7.5 8h0.01M7.5 16h0.01" />
     </svg>
   );
 }
@@ -516,9 +493,7 @@ export function App({ slots = {} }: AppProps): ReactNode {
     ],
   );
 
-  const imageCount = stats === null ? 0 : stats.imageCount;
   const batchCount = stats === null ? 0 : stats.batchCount;
-  const totalBytes = stats === null ? 0 : stats.bytes;
 
   const centreSlot = view === 'generate' ? slots.canvas : slots.library;
   const centreTitle = view === 'generate' ? 'Generate' : 'Library';
@@ -611,14 +586,6 @@ export function App({ slots = {} }: AppProps): ReactNode {
                   )}
                 </div>
               )}
-              <span className="stat">
-                <ImageIcon />
-                <strong>{imageCount.toLocaleString('en-GB')}</strong> images
-              </span>
-              <span className="stat">
-                <DiskIcon />
-                <strong>{formatBytes(totalBytes)}</strong> on disk
-              </span>
               <Button
                 variant="ghost"
                 size="sm"
@@ -644,8 +611,8 @@ export function App({ slots = {} }: AppProps): ReactNode {
             }
             style={{ '--rail-width': `${railWidth}px`, '--inspector-width': `${inspectorWidth}px` } as CSSProperties}
           >
-            <aside className="rail" aria-label="Library history">
-              <Button variant="primary" className="rail-new-btn" onClick={newImage}>
+            <aside className="rail" aria-label="Recent batches">
+              <Button variant="secondary" className="rail-new-btn" onClick={newImage}>
                 <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                   <path d="M12 5.5v13M5.5 12h13" />
                 </svg>
@@ -654,22 +621,11 @@ export function App({ slots = {} }: AppProps): ReactNode {
 
               <section className="rail-section is-history">
                 <div className="rail-head">
-                  <h2 className="section-label">Library</h2>
+                  <h2 className="section-label">Recent</h2>
+                  {batchCount > 0 ? (
+                    <span className="rail-count">{batchCount.toLocaleString('en-GB')}</span>
+                  ) : null}
                 </div>
-                <dl className="summary">
-                  <div className="summary-row">
-                    <dt>Images</dt>
-                    <dd>{imageCount.toLocaleString('en-GB')}</dd>
-                  </div>
-                  <div className="summary-row">
-                    <dt>Batches</dt>
-                    <dd>{batchCount.toLocaleString('en-GB')}</dd>
-                  </div>
-                  <div className="summary-row">
-                    <dt>On disk</dt>
-                    <dd>{formatBytes(totalBytes)}</dd>
-                  </div>
-                </dl>
                 {slots.rail === undefined ? null : <div className="rail-slot">{slots.rail}</div>}
               </section>
             </aside>

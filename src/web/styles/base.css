@@ -247,21 +247,6 @@ button {
   border-radius: var(--radius-pill);
 }
 
-.stat {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
-.stat strong {
-  color: var(--text);
-  font-weight: 500;
-}
-
 /* Left rail */
 .rail {
   position: relative;
@@ -316,11 +301,22 @@ button {
   outline: none;
 }
 
-/* The one action that starts a fresh image, so it spans the rail and stays at the top. */
+/* The rail action starts a fresh image without competing with the composer's white
+   Generate button, which stays the one bright primary anchor on screen. */
 .rail-new-btn {
   width: 100%;
   min-height: 38px;
+  border-color: var(--line);
+  background: var(--panel-sunken);
   font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.rail-new-btn:hover:not(:disabled) {
+  border-color: var(--accent-line);
+  background: var(--panel-raised);
+  color: var(--text);
 }
 
 .rail-section {
@@ -342,6 +338,14 @@ button {
   gap: var(--space-2);
 }
 
+/* A quiet tabular count beside the section label, never a stats block. */
+.rail-count {
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
 .rail-slot {
   display: flex;
   flex: 1 1 auto;
@@ -355,30 +359,6 @@ button {
   font-size: var(--text-sm);
   line-height: 1.5;
   color: var(--text-muted);
-}
-
-.summary {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.summary-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.summary-row dt {
-  font-size: var(--text-sm);
-  color: var(--text-muted);
-}
-
-.summary-row dd {
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  color: var(--text);
 }
 
 /* Centre column */
@@ -912,6 +892,45 @@ button {
 .slider.is-disabled .field-label,
 .slider.is-disabled .slider-value {
   color: var(--text-faint);
+}
+
+/* Hardware LED meter: twenty discrete ticks, lit from the left of the budget. */
+.vram-led-meter {
+  display: grid;
+  grid-template-columns: repeat(20, minmax(0, 1fr));
+  gap: 3px;
+  width: 100%;
+}
+
+.vram-led-tick {
+  display: block;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--panel-raised);
+  transition: background 140ms ease, opacity 140ms ease;
+}
+
+.vram-led-meter.is-md .vram-led-tick {
+  height: 16px;
+}
+
+.vram-led-tick.is-lit.is-ok {
+  background: var(--ok);
+}
+
+.vram-led-tick.is-lit.is-tight {
+  background: var(--warn);
+}
+
+.vram-led-tick.is-lit.is-offload,
+.vram-led-tick.is-lit.is-oom {
+  background: var(--danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vram-led-tick {
+    transition: none;
+  }
 }
 
 /* Dialog */

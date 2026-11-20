@@ -136,6 +136,8 @@ export interface ImageViewerProps {
   onClose: () => void;
   /** The tile button, so focus can go back to it when the viewer closes. */
   returnFocusTo: HTMLElement | null;
+  /** Opens on the source image, for the Compare action on an alteration tile. */
+  initialCompare?: boolean;
 }
 
 function ChevronIcon({ pointsLeft }: { pointsLeft: boolean }): ReactNode {
@@ -152,6 +154,7 @@ export function ImageViewer({
   providerLabel,
   onClose,
   returnFocusTo,
+  initialCompare = false,
 }: ImageViewerProps): ReactNode {
   const studio = useStudio();
   const images = useMemo(() => orderedImages(batch), [batch]);
@@ -166,7 +169,11 @@ export function ImageViewer({
   });
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   /** True while the source image is shown in place of the alteration. */
-  const [showOriginal, setShowOriginal] = useState(false);
+  const [showOriginal, setShowOriginal] = useState(
+    initialCompare && (batch.sourceImageId ?? null) !== null,
+  );
+  /** The image the compare view was last reset for, so the first render keeps its intent. */
+  const compareKeyRef = useRef<string | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -207,7 +214,12 @@ export function ImageViewer({
     image === undefined ? null : formatDuration(imageDurationMs(image, batch));
 
   // A different image always opens showing the alteration, never the hold to compare view.
+  // The first render is exempt: that is where a Compare click asked for the source image.
   useEffect(() => {
+    const key = `${batch.id}:${image?.id ?? ''}`;
+    const previous = compareKeyRef.current;
+    compareKeyRef.current = key;
+    if (previous === null || previous === key) return;
     setShowOriginal(false);
   }, [image?.id, batch.id]);
 
