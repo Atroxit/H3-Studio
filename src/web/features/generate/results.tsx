@@ -782,35 +782,37 @@ export function ResultsGrid({
         </div>
       )}
 
-      <div
-        className={`gen-grid is-cols-${columns}`}
-        style={gridScaleStyle(batch.width, batch.height, batch.tiles.length, columns)}
-      >
-        {batch.tiles.map((tile) => {
-          const clock = tickClocks.get(tile.index);
-          // A stored duration is the honest one for a finished image: it survives a reopen,
-          // while the live clock below only exists for the run this page started.
-          const storedDuration = tile.phase === 'done' ? formatDuration(tile.durationMs) : null;
-          return (
-          <ResultTile
-            key={tile.index}
-            tile={tile}
-            total={batch.tiles.length}
-            width={batch.width}
-            height={batch.height}
-            elapsed={storedDuration ?? elapsedLabel(clock, now)}
-            elapsedMs={clock === undefined ? null : (clock.settledAt ?? now) - clock.startedAt}
-            settled={!running}
-            canRetry={canRetry}
-            alterationSourceId={alterationSourceId}
-            hasSource={hasSource}
-            onRetry={(index) => onRetry([index])}
-            onOpen={onOpenImage}
-            onCompare={onCompareImage}
-            onSelectSource={onSelectSource}
-          />
-          );
-        })}
+      <div className="gen-grid-stage">
+        <div
+          className={`gen-grid is-cols-${columns}`}
+          style={gridScaleStyle(batch.width, batch.height, batch.tiles.length, columns)}
+        >
+          {batch.tiles.map((tile) => {
+            const clock = tickClocks.get(tile.index);
+            // A stored duration is the honest one for a finished image: it survives a reopen,
+            // while the live clock below only exists for the run this page started.
+            const storedDuration = tile.phase === 'done' ? formatDuration(tile.durationMs) : null;
+            return (
+              <ResultTile
+                key={tile.index}
+                tile={tile}
+                total={batch.tiles.length}
+                width={batch.width}
+                height={batch.height}
+                elapsed={storedDuration ?? elapsedLabel(clock, now)}
+                elapsedMs={clock === undefined ? null : (clock.settledAt ?? now) - clock.startedAt}
+                settled={!running}
+                canRetry={canRetry}
+                alterationSourceId={alterationSourceId}
+                hasSource={hasSource}
+                onRetry={(index) => onRetry([index])}
+                onOpen={onOpenImage}
+                onCompare={onCompareImage}
+                onSelectSource={onSelectSource}
+              />
+            );
+          })}
+        </div>
       </div>
 
       {batch.revisedPrompt === null ? null : <RevisedPrompt text={batch.revisedPrompt} />}

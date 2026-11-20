@@ -1820,6 +1820,31 @@
   }
 }
 
+/* Stage wrapper owns container-type: size so .gen-grid's 100cqw/100cqh query the
+   exact remaining stage height instead of falling back to the outer viewport. */
+.gen-grid-stage {
+  flex: 1 1 0;
+  min-height: 200px;
+  width: 100%;
+  container-type: size;
+  overflow: hidden;
+}
+
+.gen-grid {
+  --tile-max-w: calc((100cqw - (var(--grid-cols, 1) - 1) * var(--space-2) - 8px) / var(--grid-cols, 1));
+  --tile-max-h: calc((100cqh - (var(--grid-rows, 1) - 1) * var(--space-2) - 8px) / var(--grid-rows, 1));
+  --tile-col-w: min(var(--tile-max-w), calc(var(--tile-max-h) * var(--tile-ratio, 1)));
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  container-type: normal;
+  display: grid;
+  gap: var(--space-2);
+  place-content: center;
+  align-items: center;
+  overflow: hidden;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .gen-skeleton {
     animation: none;
