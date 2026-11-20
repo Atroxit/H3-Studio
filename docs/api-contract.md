@@ -65,6 +65,23 @@ export function createId(prefix: string): string;
 
 Layout under `rootDir`: `index.json`, `images/<imageId>.png`, `references/<refId>.<ext>`. Writes are atomic: write to `<file>.tmp` then rename. Corrupt `index.json` must be detected and reported, never silently reset.
 
+### `src/server/system.ts` (owner: system)
+
+Hardware detection and auto-tune. Pure and unit tested, so the wizard never depends on the machine it runs on.
+
+```ts
+export function tierFor(vramGb: number | null): HardwareTier;
+export function vendorFromGpuName(name: string, deviceType?: string): GpuVendor;
+export function cleanGpuName(raw: string): string;
+export function buildLaunchArgs(settings: LaunchArgSettings): string[];
+export function mergeLaunchArgs(current: readonly string[], next: readonly string[]): string[];
+export function recommendForHardware(input: HardwareInput): { recommended: RecommendedSettings; models: ModelCatalogEntry[] };
+export function applyProfileOverrides(recommended: RecommendedSettings, overrides: ProfileOverrides): RecommendedSettings;
+export function detectSystemProfile(settings: { list(): ProviderConfig[] }): Promise<SystemProfile>;
+```
+
+`detectSystemProfile` probes in this order, every step time bounded (2500 ms at most) and never throwing: ComfyUI `/system_stats` for the exact device name, VRAM, ComfyUI and PyTorch versions; `nvidia-smi`; on Windows the driver class registry key, whose `HardwareInformation.qwMemorySize` is the real 64-bit VRAM (WMI `AdapterRAM` caps at 4 GB); on macOS `system_profiler`. Installed models come from `/object_info/{UNETLoader,CLIPLoader,VAELoader}` when ComfyUI answers, and always from `models/{diffusion_models,text_encoders,vae}` plus `extra_model_paths.yaml` under the provider's `launch.cwd`.
+
 ### `src/core/zip.ts` (owner: store)
 
 ```ts
@@ -87,7 +104,7 @@ JSON in and out. Errors are `{ error: { message, code } }` with a matching HTTP 
 | GET | `/api/providers/:id/health` | none | `{ ok: boolean, detail?: string }` |
 | GET | `/api/providers/:id/capabilities` | none | `ProviderCapabilities` |
 | POST | `/api/references` | JSON `{ filename, mimeType, dataBase64 }` | `ReferenceImage` |
-| POST | `/api/generations` | `{ providerId, prompt, negativePrompt?, width, height, count, seed?, steps?, guidance?, referenceIds? }` | `{ batchId }` (202) |
+| POST | `/api/generations` | `{ providerId, prompt, negativePrompt?, width, height, count, seed?, steps?, guidance?, referenceIds?, enhancePrompt?, promptEnhancer?, modelVariant?, textEncoderVariant? }` | `{ batchId }` (202) |
 | GET | `/api/generations/:batchId/events` | none | SSE stream |
 | GET | `/api/batches` | query `limit` | `BatchRecord[]` |
 | GET | `/api/batches/:id` | none | `BatchRecord` |
@@ -99,6 +116,12 @@ JSON in and out. Errors are `{ error: { message, code } }` with a matching HTTP 
 | POST | `/api/presets` | `Omit<Preset, "id" \| "createdAt">` | `Preset` |
 | DELETE | `/api/presets/:id` | none | `{ ok: true }` |
 | GET | `/api/stats` | none | `{ batchCount, imageCount, bytes, providerCount }` |
+| GET | `/api/system/profile` | none | `SystemProfile` |
+| POST | `/api/system/apply-profile` | `{ providerId?, reserveVramGb?, previewMethod?, disablePinnedMemory?, rocmFlashAttention? }` | `{ ok: true, profile: SystemProfile, provider: ProviderConfig, applied: { width, height, modelVariant, textEncoderVariant, promptEnhancer } }` |
+
+`GET /api/system/profile` measures the machine (CPU, RAM, GPU, VRAM), asks ComfyUI for its version and the model files it can see, and returns the recommended `RecommendedSettings` plus the seven file `ModelCatalogEntry` list. It never throws on a machine with no GPU: the tier falls back to `entry`.
+
+`POST /api/system/apply-profile` re-measures, applies the optional overrides, then writes the recommended `launch.args` and `launch.env` into the ComfyUI provider in `providers.json`. A custom `--port` or `--listen` and any flag the plan does not manage are preserved; flags the plan owns are replaced.
 
 ### SSE event shapes on `/api/generations/:batchId/events`
 

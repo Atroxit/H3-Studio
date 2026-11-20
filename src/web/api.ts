@@ -6,6 +6,7 @@ import type {
   GenerationEvent,
   H3ModelVariant,
   H3PromptEnhancer,
+  H3TextEncoderVariant,
   Preset,
   ProviderCapabilities,
   ProviderConfig,
@@ -59,6 +60,7 @@ export interface GenerationBody {
   enhancePrompt?: boolean;
   promptEnhancer?: H3PromptEnhancer;
   modelVariant?: H3ModelVariant;
+  textEncoderVariant?: H3TextEncoderVariant;
 }
 
 export interface ReferenceBody {

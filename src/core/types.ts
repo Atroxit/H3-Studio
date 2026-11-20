@@ -9,6 +9,9 @@ export type H3ModelVariant = 'w4a8' | 'int8_convrot';
 /** Which prompt enhancer the graph runs, when its template offers one. */
 export type H3PromptEnhancer = 'off' | 'qwen3.5_9b' | 'qwen3.8_27b';
 
+/** Which quantisation of the 32B Qwen3-VL H3 text encoder the graph loads. */
+export type H3TextEncoderVariant = 'nvfp4' | 'int8';
+
 export interface SizePreset {
   id: string;
   label: string;
@@ -57,6 +60,8 @@ export interface GenerationRequest {
   promptEnhancer?: H3PromptEnhancer;
   /** Picks the H3 diffusion model when the graph loads one of the official variants. */
   modelVariant?: H3ModelVariant;
+  /** Picks the H3 32B text encoder build: the NVFP4 AWQ file or the INT8 ConvRot file. */
+  textEncoderVariant?: H3TextEncoderVariant;
   extra?: Record<string, unknown>;
 }
 
@@ -126,6 +131,12 @@ export interface ProviderLaunchConfig {
   cwd?: string;
   /** How long to wait for the backend to answer its health check. Defaults to 60 s. */
   waitForHealthMs?: number;
+  /**
+   * Extra environment variables for the spawned process, merged over the studio's own
+   * environment. This is how runtime switches reach the backend, for example
+   * TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1 on an AMD card.
+   */
+  env?: Record<string, string>;
 }
 
 export interface ProviderConfig {
@@ -187,6 +198,8 @@ export interface BatchRecord {
   enhancePrompt?: boolean;
   /** Which enhancer CLIP the graph loaded for this batch. */
   promptEnhancer?: H3PromptEnhancer;
+  /** The H3 32B text encoder build this batch ran, when the provider picks one. */
+  textEncoderVariant?: H3TextEncoderVariant;
   /** The library image this batch altered, when it is an alteration. */
   sourceImageId?: string;
   images: StoredImage[];
@@ -207,4 +220,82 @@ export interface LibraryIndex {
   version: 1;
   batches: BatchRecord[];
   presets: Preset[];
+}
+
+/**
+ * Hardware detection and auto-tuning. The Setup Wizard reads one SystemProfile and can apply
+ * the recommended launch configuration to the ComfyUI provider, so nothing here assumes a
+ * particular GPU vendor or model file is present.
+ */
+export type GpuVendor = 'amd' | 'nvidia' | 'apple' | 'intel' | 'unknown';
+
+/** How much the machine can hold: the tiers the recommender picks between. */
+export type HardwareTier = 'extreme' | 'high' | 'mid' | 'entry';
+
+/** One graphics adapter, as far as it can be trusted. vramGb is null when nothing knew it. */
+export interface DetectedGpu {
+  name: string;
+  vendor: GpuVendor;
+  vramGb: number | null;
+  source: 'comfyui' | 'nvidia-smi' | 'windows' | 'macos' | 'unknown';
+}
+
+/** One downloadable H3 file, with what the wizard needs to say about it. */
+export interface ModelCatalogEntry {
+  id: string;
+  role: 'diffusion' | 'text_encoder' | 'prompt_enhancer' | 'vae';
+  filename: string;
+  label: string;
+  sizeGb: number;
+  /** fast loads quickly, max is the highest quality build, required is a fixed dependency. */
+  tier: 'fast' | 'max' | 'required';
+  installed: boolean;
+  recommended: boolean;
+  fitsVram: boolean;
+  downloadUrl: string;
+  targetSubdir: string;
+  note: string;
+}
+
+/** What the wizard would write into the provider, plus the settings the UI applies. */
+export interface RecommendedSettings {
+  tier: HardwareTier;
+  tierLabel: string;
+  summary: string;
+  width: number;
+  height: number;
+  modelVariant: H3ModelVariant;
+  textEncoderVariant: H3TextEncoderVariant;
+  promptEnhancer: H3PromptEnhancer;
+  reserveVramGb: number;
+  previewMethod: 'latent2rgb' | 'none';
+  disablePinnedMemory: boolean;
+  disableSmartMemory: boolean;
+  cacheNone: boolean;
+  lowvram: boolean;
+  launchArgs: string[];
+  launchEnv: Record<string, string>;
+  notes: string[];
+}
+
+/** Everything one hardware detection run learned, in the shape the Setup Wizard renders. */
+export interface SystemProfile {
+  detectedAt: string;
+  os: string;
+  arch: string;
+  cpuModel: string;
+  cpuCores: number;
+  ramTotalGb: number;
+  ramFreeGb: number;
+  gpu: DetectedGpu;
+  comfyui: {
+    reachable: boolean;
+    baseUrl: string | null;
+    version: string | null;
+    pytorchVersion: string | null;
+    detectedModels: { diffusion: string[]; textEncoders: string[]; vaes: string[] };
+  };
+  models: ModelCatalogEntry[];
+  recommended: RecommendedSettings;
+  currentLaunch: { args: string[]; env: Record<string, string> } | null;
 }

@@ -7,6 +7,7 @@ import type {
   GenerationRequest,
   H3ModelVariant,
   H3PromptEnhancer,
+  H3TextEncoderVariant,
   ProviderAdapter,
   ProviderCapabilities,
   ProviderConfig,
@@ -135,15 +136,24 @@ const H3_ENHANCER_BY_MODE: Readonly<Record<Exclude<H3PromptEnhancer, 'off'>, str
 };
 const H3_ENHANCER_NAMES: ReadonlySet<string> = new Set(Object.values(H3_ENHANCER_BY_MODE));
 /**
- * A tight token budget per enhancer. The fast 9B model answers without private reasoning, so
- * 1024 tokens cover the JSON caption; the 27B model keeps a small private thinking budget
- * instead of the template's 8192 tokens, which was minutes of runaway thinking.
+ * The two official 32B text encoder builds, by the mode a request names. Only a CLIPLoader
+ * that already loads one of these is retargeted, so the enhancer CLIPs (9B and 27B) stay.
+ */
+const H3_TEXT_ENCODER_BY_VARIANT: Readonly<Record<H3TextEncoderVariant, string>> = {
+  nvfp4: 'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors',
+  int8: 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors',
+};
+const H3_TEXT_ENCODER_NAMES: ReadonlySet<string> = new Set(Object.values(H3_TEXT_ENCODER_BY_VARIANT));
+/**
+ * A tight token budget per enhancer. Both models answer with the JSON caption directly, so
+ * neither spends 25-35 s in a private thinking section: 1024 tokens cover the caption, where
+ * the template's 8192 was sometimes minutes of runaway thinking.
  */
 const H3_ENHANCER_TOKEN_BUDGET: Readonly<
   Record<Exclude<H3PromptEnhancer, 'off'>, { readonly thinking: boolean; readonly maxLength: number }>
 > = {
   'qwen3.5_9b': { thinking: false, maxLength: 1024 },
-  'qwen3.8_27b': { thinking: true, maxLength: 2048 },
+  'qwen3.8_27b': { thinking: false, maxLength: 1024 },
 };
 /** The template sentence that asks the enhancer to reason before answering. */
 const THINKING_FIRST_SENTENCE = 'Reason in the thinking section first.';
@@ -727,10 +737,10 @@ export function applyPromptEnhancer(
   const effective = effectivePromptEnhancer(enhancePrompt, promptEnhancer);
   const wanted = effective !== 'off';
   const enhancerClip = effective === 'off' ? null : H3_ENHANCER_BY_MODE[effective];
-  // A running fast enhancer must not spend minutes in a private thinking section, so its
-  // system prompt loses the sentence that asks for one.
-  const systemPromptIds =
-    effective === 'qwen3.5_9b' ? enhancerSystemPromptIds(graph) : new Set<string>();
+  // An enhancer that runs without a thinking section must not be asked for one, so its
+  // system prompt loses the sentence that requests private reasoning.
+  const stripThinking = effective !== 'off' && !H3_ENHANCER_TOKEN_BUDGET[effective].thinking;
+  const systemPromptIds = stripThinking ? enhancerSystemPromptIds(graph) : new Set<string>();
   const cloned: Record<string, unknown> = {};
   let changed = false;
   for (const [nodeId, node] of Object.entries(graph)) {
@@ -823,6 +833,37 @@ export function applyModelVariant(
     ) {
       cloned[nodeId] = { ...node, inputs: { ...inputs, unet_name: target } };
       changed = true;
+      continue;
+    }
+    cloned[nodeId] = node;
+  }
+  return changed ? cloned : graph;
+}
+
+/**
+ * Picks the 32B H3 text encoder build the graph loads. Only a CLIPLoader whose clip_name is
+ * one of the two official H3 32B files is retargeted, so the 9B and 27B prompt enhancer
+ * loaders keep their own weights. The graph is cloned when it actually changes.
+ */
+export function applyTextEncoderVariant(
+  graph: Record<string, unknown>,
+  variant: H3TextEncoderVariant | undefined,
+): Record<string, unknown> {
+  if (variant === undefined) return graph;
+  const target = H3_TEXT_ENCODER_BY_VARIANT[variant];
+  const cloned: Record<string, unknown> = {};
+  let changed = false;
+  for (const [nodeId, node] of Object.entries(graph)) {
+    const inputs = isRecord(node) ? node['inputs'] : undefined;
+    if (
+      nodeClassType(node) === 'CLIPLoader' &&
+      isRecord(node) &&
+      isRecord(inputs) &&
+      typeof inputs['clip_name'] === 'string' &&
+      H3_TEXT_ENCODER_NAMES.has(inputs['clip_name'])
+    ) {
+      if (inputs['clip_name'] !== target) changed = true;
+      cloned[nodeId] = { ...node, inputs: { ...inputs, clip_name: target } };
       continue;
     }
     cloned[nodeId] = node;
@@ -1110,9 +1151,12 @@ function graphForRequest(
   const vision = enhancerOn && uploadedRefs.length > 0
     ? applyReferenceVision(referenced, uploadedRefs.length)
     : referenced;
-  return applyModelVariant(
-    applyPromptEnhancer(vision, request.enhancePrompt, uploadedRefs.length > 0, request.promptEnhancer),
-    request.modelVariant,
+  return applyTextEncoderVariant(
+    applyModelVariant(
+      applyPromptEnhancer(vision, request.enhancePrompt, uploadedRefs.length > 0, request.promptEnhancer),
+      request.modelVariant,
+    ),
+    request.textEncoderVariant,
   );
 }
 

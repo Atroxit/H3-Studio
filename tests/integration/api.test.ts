@@ -17,6 +17,7 @@ import type {
   ProviderCapabilities,
   ProviderConfig,
   ReferenceImage,
+  SystemProfile,
 } from '../../src/core/types';
 import { createApp } from '../../src/server/app';
 import { GenerationHub, type BatchStreamEvent } from '../../src/server/jobs';
@@ -317,6 +318,52 @@ describe('health and the provider surface', () => {
       launch: { enabled: 'yes', command: 'python' },
     });
     expect(badEnabled.status).toBe(400);
+
+    await api('DELETE', `/api/providers/${provider.id}`);
+  });
+
+  it('accepts and validates a launch env map of string keys and values', async () => {
+    const created = await api<ProviderConfig>('POST', '/api/providers', {
+      kind: 'comfyui',
+      label: 'ROCm ComfyUI',
+      baseUrl: 'http://127.0.0.1:8189',
+      enabled: false,
+      launch: {
+        enabled: false,
+        command: 'python',
+        args: ['-u', 'main.py'],
+        env: { TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: '1', HSA_OVERRIDE_GFX_VERSION: '11.0.0' },
+      },
+    });
+    expect(created.status).toBe(201);
+    const provider = bodyOf(created);
+    expect(provider.launch?.env).toEqual({
+      TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: '1',
+      HSA_OVERRIDE_GFX_VERSION: '11.0.0',
+    });
+
+    // The map survives a reload from providers.json.
+    const listed = bodyOf(await api<ProviderConfig[]>('GET', '/api/providers')).find(
+      (config) => config.id === provider.id,
+    );
+    expect(listed?.launch?.env).toEqual(provider.launch?.env);
+
+    const badValue = await api('POST', '/api/providers', {
+      kind: 'comfyui',
+      label: 'Bad env value',
+      baseUrl: 'http://127.0.0.1:8190',
+      launch: { enabled: false, command: 'python', env: { TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: 1 } },
+    });
+    expect(badValue.status).toBe(400);
+    expect(errorOf(badValue.body).code).toBe('invalid_body');
+
+    const badShape = await api('POST', '/api/providers', {
+      kind: 'comfyui',
+      label: 'Bad env shape',
+      baseUrl: 'http://127.0.0.1:8191',
+      launch: { enabled: false, command: 'python', env: ['A=1'] },
+    });
+    expect(badShape.status).toBe(400);
 
     await api('DELETE', `/api/providers/${provider.id}`);
   });
@@ -869,12 +916,14 @@ describe('the library surface', () => {
       seed: 32,
       referenceIds: [sourceImage.id],
       modelVariant: 'int8_convrot',
+      textEncoderVariant: 'nvfp4',
       enhancePrompt: true,
       promptEnhancer: 'qwen3.8_27b',
     });
     const altered = await waitForSettled(alteredId);
     expect(altered.sourceImageId).toBe(sourceImage.id);
     expect(altered.modelVariant).toBe('int8_convrot');
+    expect(altered.textEncoderVariant).toBe('nvfp4');
     expect(altered.enhancePrompt).toBe(true);
     expect(altered.promptEnhancer).toBe('qwen3.8_27b');
 
@@ -884,6 +933,7 @@ describe('the library surface', () => {
     expect(retryBatch.status).toBe('complete');
     expect(retryBatch.sourceImageId).toBe(sourceImage.id);
     expect(retryBatch.modelVariant).toBe('int8_convrot');
+    expect(retryBatch.textEncoderVariant).toBe('nvfp4');
     expect(retryBatch.enhancePrompt).toBe(true);
     expect(retryBatch.promptEnhancer).toBe('qwen3.8_27b');
   });
@@ -1006,6 +1056,136 @@ describe('the library surface', () => {
     expect(stats.bytes).toBe(bytes);
     expect(stats.providerCount).toBe(providers.length);
     expect(stats.imageCount).toBeGreaterThan(0);
+  });
+});
+
+interface ApplyProfileBody {
+  ok: boolean;
+  profile: SystemProfile;
+  provider: ProviderConfig;
+  applied: {
+    width: number;
+    height: number;
+    modelVariant: string;
+    textEncoderVariant: string;
+    promptEnhancer: string;
+  };
+}
+
+describe('the system profile surface', () => {
+  it('reports the measured hardware and the official H3 catalog', async () => {
+    const result = await api<SystemProfile>('GET', '/api/system/profile');
+    expect(result.status).toBe(200);
+    const profile = bodyOf(result);
+
+    expect(profile.detectedAt.length).toBeGreaterThan(0);
+    expect(profile.os.length).toBeGreaterThan(0);
+    expect(profile.arch.length).toBeGreaterThan(0);
+    expect(profile.cpuModel.length).toBeGreaterThan(0);
+    expect(profile.cpuCores).toBeGreaterThan(0);
+    expect(profile.ramTotalGb).toBeGreaterThan(0);
+    expect(profile.ramFreeGb).toBeGreaterThanOrEqual(0);
+
+    expect(['extreme', 'high', 'mid', 'entry']).toContain(profile.recommended.tier);
+    expect(['amd', 'nvidia', 'apple', 'intel', 'unknown']).toContain(profile.gpu.vendor);
+    expect(['comfyui', 'nvidia-smi', 'windows', 'macos', 'unknown']).toContain(profile.gpu.source);
+
+    expect(profile.models).toHaveLength(7);
+    expect(profile.models.filter((entry) => entry.tier === 'required')).toHaveLength(1);
+    expect(profile.models.map((entry) => entry.role).sort()).toEqual([
+      'diffusion',
+      'diffusion',
+      'prompt_enhancer',
+      'prompt_enhancer',
+      'text_encoder',
+      'text_encoder',
+      'vae',
+    ]);
+    for (const entry of profile.models) {
+      expect(entry.downloadUrl).toContain('https://huggingface.co/Comfy-Org/MiniMax-H3-Image/resolve/main/');
+      expect(entry.targetSubdir.startsWith('models/')).toBe(true);
+    }
+
+    expect(profile.recommended.launchArgs).toContain('main.py');
+    expect(profile.recommended.launchArgs).toContain('--reserve-vram');
+    expect(typeof profile.comfyui.reachable).toBe('boolean');
+    expect(Array.isArray(profile.comfyui.detectedModels.diffusion)).toBe(true);
+    expect(Array.isArray(profile.comfyui.detectedModels.textEncoders)).toBe(true);
+    expect(Array.isArray(profile.comfyui.detectedModels.vaes)).toBe(true);
+  });
+
+  it('applies the recommendation to a ComfyUI provider and preserves its port', async () => {
+    const created = await api<ProviderConfig>('POST', '/api/providers', {
+      kind: 'comfyui',
+      label: 'Tuned ComfyUI',
+      baseUrl: 'http://127.0.0.1:9',
+      enabled: false,
+      launch: {
+        enabled: false,
+        command: 'python',
+        args: ['-u', 'main.py', '--listen', '0.0.0.0', '--port', '9123'],
+        cwd: 'C:/tools/ComfyUI',
+      },
+    });
+    expect(created.status).toBe(201);
+    const provider = bodyOf(created);
+
+    const applied = await api<ApplyProfileBody>('POST', '/api/system/apply-profile', {
+      providerId: provider.id,
+      reserveVramGb: 6,
+      previewMethod: 'none',
+      rocmFlashAttention: false,
+    });
+    expect(applied.status).toBe(200);
+    const body = bodyOf(applied);
+    expect(body.ok).toBe(true);
+
+    const args = body.provider.launch?.args ?? [];
+    // The user's own bind address and port survive the auto-tune.
+    expect(args[args.indexOf('--port') + 1]).toBe('9123');
+    expect(args[args.indexOf('--listen') + 1]).toBe('0.0.0.0');
+    expect(args.filter((arg) => arg === '--port')).toHaveLength(1);
+    // The explicit overrides win over what detection chose.
+    expect(args[args.indexOf('--reserve-vram') + 1]).toBe('6');
+    expect(args[args.indexOf('--preview-method') + 1]).toBe('none');
+    expect(body.provider.launch?.env).toEqual({});
+    expect(body.provider.launch?.enabled).toBe(false);
+    expect(body.provider.launch?.cwd).toBe('C:/tools/ComfyUI');
+
+    expect(body.profile.recommended.reserveVramGb).toBe(6);
+    expect(body.profile.recommended.previewMethod).toBe('none');
+    expect(body.profile.currentLaunch?.args).toEqual(args);
+    expect(['w4a8', 'int8_convrot']).toContain(body.applied.modelVariant);
+    expect(['nvfp4', 'int8']).toContain(body.applied.textEncoderVariant);
+    expect(['off', 'qwen3.5_9b', 'qwen3.8_27b']).toContain(body.applied.promptEnhancer);
+    expect(body.applied.width).toBeGreaterThanOrEqual(1024);
+    expect(body.applied.height).toBeGreaterThanOrEqual(1024);
+
+    // The write reached providers.json, not just the response.
+    const listed = bodyOf(await api<ProviderConfig[]>('GET', '/api/providers')).find(
+      (config) => config.id === provider.id,
+    );
+    expect(listed?.launch?.args).toEqual(args);
+    expect(listed?.launch?.env).toEqual({});
+
+    await api('DELETE', `/api/providers/${provider.id}`);
+  });
+
+  it('refuses a profile apply that cannot be tuned', async () => {
+    const notComfy = await api('POST', '/api/system/apply-profile', { providerId: 'mock' });
+    expect(notComfy.status).toBe(400);
+    expect(errorOf(notComfy.body).code).toBe('invalid_provider_kind');
+
+    const missing = await api('POST', '/api/system/apply-profile', { providerId: 'provider_missing' });
+    expect(missing.status).toBe(404);
+    expect(errorOf(missing.body).code).toBe('unknown_provider');
+
+    const badReserve = await api('POST', '/api/system/apply-profile', { reserveVramGb: -2 });
+    expect(badReserve.status).toBe(400);
+    expect(errorOf(badReserve.body).code).toBe('invalid_body');
+
+    const badPreview = await api('POST', '/api/system/apply-profile', { previewMethod: 'taesd' });
+    expect(badPreview.status).toBe(400);
   });
 });
 

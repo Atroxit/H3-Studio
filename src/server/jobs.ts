@@ -113,6 +113,7 @@ export class GenerationHub {
       status: 'running',
       seed: request.seed,
       modelVariant: request.modelVariant,
+      textEncoderVariant: request.textEncoderVariant,
       enhancePrompt: request.enhancePrompt,
       promptEnhancer: request.promptEnhancer,
       sourceImageId,

@@ -17,12 +17,14 @@ import type {
   ProviderConfig,
   ReferenceImage,
   StoredImage,
+  SystemProfile,
 } from '../core/types';
 import { buildZip, type ZipEntry } from '../core/zip';
 import type { BatchStreamEvent, Subscription } from './jobs';
 import { GenerationHub, HEARTBEAT_MS } from './jobs';
 import { createProviderLauncher, type ProviderLauncher } from './launcher';
 import { ProviderSettings, providerInputSchema, providerPatchSchema } from './settings';
+import { applyProfileOverrides, detectSystemProfile, mergeLaunchArgs } from './system';
 
 const API_VERSION = '0.1.0';
 const MAX_REFERENCE_BYTES = 25 * 1024 * 1024;
@@ -66,6 +68,16 @@ const generationSchema = z.object({
   enhancePrompt: z.boolean().optional(),
   promptEnhancer: z.enum(['off', 'qwen3.5_9b', 'qwen3.8_27b']).optional(),
   modelVariant: z.enum(['w4a8', 'int8_convrot']).optional(),
+  textEncoderVariant: z.enum(['nvfp4', 'int8']).optional(),
+});
+
+/** POST /api/system/apply-profile: every field is an override of what detection chose. */
+const applyProfileSchema = z.object({
+  providerId: z.string().min(1).max(128).optional(),
+  reserveVramGb: z.number().min(0).max(128).optional(),
+  previewMethod: z.enum(['latent2rgb', 'none']).optional(),
+  disablePinnedMemory: z.boolean().optional(),
+  rocmFlashAttention: z.boolean().optional(),
 });
 
 const referenceSchema = z.object({
@@ -495,6 +507,7 @@ export function createApp(options: { dataDir: string }): StudioApplication {
       enhancePrompt: input.enhancePrompt,
       promptEnhancer: input.promptEnhancer,
       modelVariant: input.modelVariant,
+      textEncoderVariant: input.textEncoderVariant,
     };
     // A managed backend may still be loading: waiting here is what makes generating
     // straight after boot, or after switching provider, work on the first try.
@@ -648,6 +661,7 @@ export function createApp(options: { dataDir: string }): StudioApplication {
         count: input.indices.length,
         seed: batch.seed,
         modelVariant: batch.modelVariant,
+        textEncoderVariant: batch.textEncoderVariant,
         enhancePrompt: batch.enhancePrompt,
         promptEnhancer: batch.promptEnhancer,
         referenceIds: usableSource === null ? undefined : [usableSource.path],
@@ -733,6 +747,89 @@ export function createApp(options: { dataDir: string }): StudioApplication {
   app.get('/api/stats', async (_req: Request, res: Response) => {
     const stats = await store.stats();
     res.json({ ...stats, providerCount: settings.list().length });
+  });
+
+  /**
+   * What this machine can run: the measured hardware, the model catalog with what is
+   * already on disk, and the plan the Setup Wizard offers. Detection never throws, so a
+   * machine with no GPU, no driver and no ComfyUI still gets an entry tier answer.
+   */
+  app.get('/api/system/profile', async (_req: Request, res: Response) => {
+    try {
+      res.json(await detectSystemProfile(settings));
+    } catch (error) {
+      fail(res, 500, 'profile_failed', messageOf(error));
+    }
+  });
+
+  /**
+   * Writes the recommended launch config into providers.json. The measurement is redone
+   * here so the answer is never a stale snapshot, and only the argv and env are replaced:
+   * a custom --port or --listen is preserved, because the user's ComfyUI listens there.
+   */
+  app.post('/api/system/apply-profile', async (req: Request, res: Response) => {
+    const input = parseBody(applyProfileSchema, req.body ?? {}, res);
+    if (input === null) return;
+
+    let target: ProviderConfig | null;
+    if (input.providerId !== undefined) {
+      target = settings.get(input.providerId);
+      if (target === null) {
+        fail(res, 404, 'unknown_provider', `No provider with id "${input.providerId}".`);
+        return;
+      }
+      if (target.kind !== 'comfyui') {
+        fail(
+          res,
+          400,
+          'invalid_provider_kind',
+          `Provider "${target.id}" is a ${target.kind} provider; launch tuning applies to comfyui.`,
+        );
+        return;
+      }
+    } else {
+      const comfy = settings.list().filter((config) => config.kind === 'comfyui');
+      target = comfy.find((config) => config.enabled !== false) ?? comfy[0] ?? null;
+      if (target === null) {
+        fail(res, 404, 'no_comfyui_provider', 'No comfyui provider is configured to tune.');
+        return;
+      }
+    }
+
+    const profile = await detectSystemProfile(settings);
+    const recommended = applyProfileOverrides(profile.recommended, input);
+    const current = target.launch;
+    const nextLaunch = {
+      enabled: current?.enabled ?? false,
+      command: current?.command ?? '',
+      ...(current?.cwd === undefined ? {} : { cwd: current.cwd }),
+      ...(current?.waitForHealthMs === undefined ? {} : { waitForHealthMs: current.waitForHealthMs }),
+      args: mergeLaunchArgs(current?.args ?? [], recommended.launchArgs),
+      env: { ...recommended.launchEnv },
+    };
+    const updated = await settings.update(target.id, { launch: nextLaunch });
+    if (updated === null) {
+      fail(res, 404, 'unknown_provider', `No provider with id "${target.id}".`);
+      return;
+    }
+
+    const appliedProfile: SystemProfile = {
+      ...profile,
+      recommended,
+      currentLaunch: { args: [...nextLaunch.args], env: { ...nextLaunch.env } },
+    };
+    res.json({
+      ok: true,
+      profile: appliedProfile,
+      provider: updated,
+      applied: {
+        width: recommended.width,
+        height: recommended.height,
+        modelVariant: recommended.modelVariant,
+        textEncoderVariant: recommended.textEncoderVariant,
+        promptEnhancer: recommended.promptEnhancer,
+      },
+    });
   });
 
   app.use('/api', (req: Request, res: Response) => {

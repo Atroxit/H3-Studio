@@ -11,6 +11,7 @@ import {
   applyModelVariant,
   applyPromptEnhancer,
   applyReferenceVision,
+  applyTextEncoderVariant,
   attachReferenceImages,
   createComfyUIAdapter,
   createProgressWatch,
@@ -1477,10 +1478,13 @@ describe('ComfyUI enhancer isolation', () => {
 
     const best = applyPromptEnhancer(graph, undefined, false, 'qwen3.8_27b');
     const bestInputs = inputsOf(textGenerateOf(best));
-    expect(bestInputs['thinking']).toBe(true);
-    expect(bestInputs['max_length']).toBe(2048);
-    // A thinking enhancer keeps the sentence that asks for private reasoning.
-    expect(inputsOf(nodeOf(best, '17'))['value']).toContain('Reason in the thinking section first.');
+    // The 27B enhancer answers directly too: a private thinking section was 25-35 s of
+    // hidden rambling, so its budget matches the fast model's.
+    expect(bestInputs['thinking']).toBe(false);
+    expect(bestInputs['max_length']).toBe(1024);
+    expect(inputsOf(nodeOf(best, '17'))['value']).toBe(
+      'The visible final content must be exactly one JSON object with exactly two keys: expanded_caption and aspect_ratio.',
+    );
 
     // The template itself is never mutated.
     expect(inputsOf(textGenerateOf(graph))['thinking']).toBeUndefined();
@@ -1621,8 +1625,8 @@ describe('ComfyUI enhancer isolation', () => {
     const enhancerGraph = graphs[0];
     const imageGraph = graphs[1];
     if (enhancerGraph === undefined || imageGraph === undefined) throw new Error('expected two phases');
-    expect(inputsOf(textGenerateOf(enhancerGraph))['thinking']).toBe(true);
-    expect(inputsOf(textGenerateOf(enhancerGraph))['max_length']).toBe(2048);
+    expect(inputsOf(textGenerateOf(enhancerGraph))['thinking']).toBe(false);
+    expect(inputsOf(textGenerateOf(enhancerGraph))['max_length']).toBe(1024);
     expect(switchOf(imageGraph)).toBe(false);
     expect(inputsOf(nodeOf(imageGraph, '24'))['value']).toBe(BASE_REQUEST.prompt);
   });
@@ -1705,6 +1709,99 @@ describe('ComfyUI model variant', () => {
 
     expect(unetNameOf(postedGraph(stub), '1')).toBe('minimax_h3_image_pruned_w4a8.safetensors');
     expect(unetNameOf(postedGraph(stub), '2')).toBe('v1-5-pruned-emaonly.safetensors');
+  });
+});
+
+/**
+ * The H3 graph with the 32B text encoder on node 2 and the 9B prompt enhancer on node 16:
+ * the two CLIPLoader nodes a text encoder switch must tell apart.
+ */
+function textEncoderTemplate(): Record<string, unknown> {
+  return {
+    ...ENHANCER_CLIP_TEMPLATE,
+    '2': {
+      class_type: 'CLIPLoader',
+      inputs: {
+        clip_name: 'qwen3vl_32b_minimax_h3_int8_convrot.safetensors',
+        type: 'minimax',
+        device: 'default',
+      },
+    },
+  };
+}
+
+function clipNameAt(graph: Record<string, unknown>, nodeId: string): unknown {
+  return inputsOf(nodeOf(graph, nodeId))['clip_name'];
+}
+
+describe('ComfyUI text encoder variant', () => {
+  it('returns the graph untouched when the request names no variant', () => {
+    const graph = textEncoderTemplate();
+    expect(applyTextEncoderVariant(graph, undefined)).toBe(graph);
+  });
+
+  it('switches the 32B encoder between the NVFP4 and INT8 builds', () => {
+    const graph = textEncoderTemplate();
+
+    const nvfp4 = applyTextEncoderVariant(graph, 'nvfp4');
+    expect(clipNameAt(nvfp4, '2')).toBe('qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors');
+    // The template itself is never mutated.
+    expect(clipNameAt(graph, '2')).toBe('qwen3vl_32b_minimax_h3_int8_convrot.safetensors');
+    // The 9B prompt enhancer loader is a different model and keeps its weights.
+    expect(clipNameAt(nvfp4, '16')).toBe('qwen3.5_9b_w4a8_gptq.safetensors');
+
+    const int8 = applyTextEncoderVariant(nvfp4, 'int8');
+    expect(clipNameAt(int8, '2')).toBe('qwen3vl_32b_minimax_h3_int8_convrot.safetensors');
+    expect(clipNameAt(int8, '16')).toBe('qwen3.5_9b_w4a8_gptq.safetensors');
+  });
+
+  it('leaves the 27B enhancer loader and unknown CLIPs alone', () => {
+    const enhancer27b = applyTextEncoderVariant(
+      {
+        ...textEncoderTemplate(),
+        '16': {
+          class_type: 'CLIPLoader',
+          inputs: { clip_name: 'qwen3.8_27b_minimax_h3_image_pe_w4a8_gptq.safetensors' },
+        },
+      },
+      'nvfp4',
+    );
+    expect(clipNameAt(enhancer27b, '16')).toBe('qwen3.8_27b_minimax_h3_image_pe_w4a8_gptq.safetensors');
+
+    const generic: Record<string, unknown> = {
+      '16': { class_type: 'CLIPLoader', inputs: { clip_name: 'sd15-clip.safetensors' } },
+    };
+    expect(applyTextEncoderVariant(generic, 'nvfp4')).toBe(generic);
+  });
+
+  it('posts the requested 32B encoder file to ComfyUI', async () => {
+    const stub = await startStub({
+      promptResponse: { status: 200, body: { prompt_id: 'prompt-encoder' } },
+      historyResponse: () => ({
+        status: 200,
+        body: {
+          'prompt-encoder': { outputs: { '9': { images: [{ filename: 'encoder.png', subfolder: '' }] } } },
+        },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(
+      comfyConfig(stub.baseUrl, {
+        pollIntervalMs: 10,
+        timeoutMs: 2000,
+        workflowTemplate: JSON.stringify(textEncoderTemplate()),
+      }),
+    );
+    const run = context();
+
+    await adapter.generate(
+      { ...BASE_REQUEST, textEncoderVariant: 'nvfp4' },
+      { signal: run.signal, onEvent: () => {} },
+    );
+
+    const graph = postedGraph(stub);
+    expect(clipNameAt(graph, '2')).toBe('qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors');
+    expect(clipNameAt(graph, '16')).toBe('qwen3.5_9b_w4a8_gptq.safetensors');
   });
 });
 

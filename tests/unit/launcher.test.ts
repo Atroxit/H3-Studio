@@ -152,6 +152,59 @@ describe('provider launcher', () => {
     await expect(launcher.stopAll()).resolves.toBeUndefined();
   });
 
+  it('merges the launch env into the spawned environment instead of replacing it', async () => {
+    const rootDir = await tempDir();
+    const scriptPath = path.join(rootDir, 'env.cjs');
+    const outPath = path.join(rootDir, 'env.txt');
+    await writeFile(
+      scriptPath,
+      [
+        "const fs = require('node:fs');",
+        "const inherited = (process.env.PATH ?? '').length > 0 ? 'yes' : 'no';",
+        "fs.writeFileSync(process.argv[2], String(process.env.H3_TEST_SWITCH) + '|' + inherited);",
+        'setInterval(() => {}, 1000);',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const config: ProviderConfig = {
+      id: 'comfy-env',
+      kind: 'comfyui',
+      label: 'ComfyUI with env',
+      baseUrl: 'http://127.0.0.1:1',
+      launch: {
+        enabled: true,
+        command: process.execPath,
+        args: [scriptPath, outPath],
+        waitForHealthMs: 120,
+        env: { H3_TEST_SWITCH: 'on' },
+      },
+    };
+    const launcher = createProviderLauncher(
+      async () => [config],
+      async () => false,
+    );
+
+    await expect(launcher.ensureStarted(config)).resolves.toEqual({ started: true, alreadyRunning: false });
+
+    const deadline = Date.now() + 5000;
+    let written = '';
+    while (Date.now() < deadline) {
+      try {
+        written = await readFile(outPath, 'utf8');
+        break;
+      } catch {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 25);
+        });
+      }
+    }
+    // The provider's own variable is set, and the studio's environment is still there.
+    expect(written).toBe('on|yes');
+
+    await launcher.stopAll();
+  });
+
   it('reports idle, starting, running and idle again around one start', async () => {
     const rootDir = await tempDir();
     const child = await writeIdleChild(rootDir);

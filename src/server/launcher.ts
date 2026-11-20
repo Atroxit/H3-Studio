@@ -141,11 +141,15 @@ export function createProviderLauncher(
     if (await isHealthy(config)) return { started: false, alreadyRunning: true };
 
     const cwd = launch.cwd !== undefined && launch.cwd.trim().length > 0 ? launch.cwd : undefined;
+    // A launch env is how a runtime switch reaches the backend, so it is merged over the
+    // studio's own environment instead of replacing it: PATH and friends must survive.
+    const env = { ...process.env, ...(launch.env ?? {}) };
     errors.delete(config.id);
     let child: ChildProcess;
     try {
       child = spawn(launch.command, launch.args ?? [], {
         cwd,
+        env,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       });

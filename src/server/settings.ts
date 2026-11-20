@@ -153,6 +153,9 @@ const providerLaunchSchema = z.object({
   args: z.array(z.string().max(4096)).max(64).optional(),
   cwd: z.string().max(4096).optional(),
   waitForHealthMs: z.number().int().positive().max(3_600_000).optional(),
+  // A plain name to value map, checked at the primitive level: this is handed straight to
+  // child_process.spawn, so a non string value would become '[object Object]' in the env.
+  env: z.record(z.string().min(1).max(256), z.string().max(4096)).optional(),
 });
 
 /** The persisted shape of one provider. Also the validation for a request body. */
