@@ -42,7 +42,7 @@
 }
 
 .settings-inner.is-head {
-  padding-bottom: 0;
+  padding-bottom: var(--space-4);
 }
 
 .is-desktop .settings-inner.is-head {
@@ -166,12 +166,12 @@
 
 .settings-tabs {
   display: inline-flex;
+  align-items: center;
   gap: 2px;
   margin-top: var(--space-5);
   padding: 3px;
   border: 1px solid var(--line-soft);
-  border-radius: var(--radius-pill) var(--radius-pill) 0 0;
-  border-bottom: 0;
+  border-radius: var(--radius-pill);
   background: var(--panel-sunken);
   align-self: flex-start;
 }
