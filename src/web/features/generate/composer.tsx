@@ -510,7 +510,7 @@ export function PromptComposer({
           className={themesOpen ? 'gen-theme-label is-open' : 'gen-theme-label'}
           aria-expanded={themesOpen}
           aria-haspopup="dialog"
-          title="Browse every prompt theme"
+          title="Preset prompt chunks appended automatically on generate. Click to browse or create custom tags."
           onClick={() => {
             setThemesOpen((open) => !open);
           }}

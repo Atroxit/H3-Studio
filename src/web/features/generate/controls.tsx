@@ -135,6 +135,29 @@ function QuietLine({ text }: { text: string }): ReactNode {
   return <p className="gen-quiet">{text}</p>;
 }
 
+/** Section heading with an instant darkroom hover/focus tooltip explaining what the control does. */
+function SectionTitle({
+  label,
+  tip,
+  above = false,
+}: {
+  label: string;
+  tip: string;
+  above?: boolean;
+}): ReactNode {
+  const tipId = useId();
+  return (
+    <div className="gen-section-head">
+      <h3 className="gen-section-title" tabIndex={0} aria-describedby={tipId}>
+        <span className="gen-section-title-text">{label}</span>
+        <span id={tipId} role="tooltip" className={above ? 'gen-tip is-above' : 'gen-tip'}>
+          {tip}
+        </span>
+      </h3>
+    </div>
+  );
+}
+
 /** One horizontal segmented track: native radios, so arrow keys work as they always did. */
 function SegmentedField({
   legend,
@@ -343,13 +366,19 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
     <div className="gen-controls">
       {capabilities.presets.length === 0 ? (
         <section className="gen-section">
-          <h3 className="gen-section-title">Resolution</h3>
+          <SectionTitle
+            label="Resolution"
+            tip="Output pixel size. Higher resolutions add fine detail but use more VRAM and take longer."
+          />
           <QuietLine text={sizeEmptyNote ?? 'This provider lists no size presets.'} />
         </section>
       ) : (
         <>
           <section className="gen-section">
-            <h3 className="gen-section-title">Aspect ratio</h3>
+            <SectionTitle
+              label="Aspect ratio"
+              tip="Frame shape (width vs. height). Switching keeps your current resolution tier."
+            />
             <SegmentedField
               legend="Aspect ratio"
               name={aspectName}
@@ -363,7 +392,10 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
           </section>
 
           <section className="gen-section">
-            <h3 className="gen-section-title">Resolution</h3>
+            <SectionTitle
+              label="Resolution"
+              tip="Output pixel size. 2K (4 MP) is H3's sweet spot; 4K (16 MP) adds micro-detail at higher VRAM and time cost."
+            />
             <fieldset className="gen-field" aria-label="Resolution">
               <div className="gen-seg">
                 {sizeOptions.map((option) => (
@@ -458,7 +490,10 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
       )}
 
       <section className="gen-section">
-        <h3 className="gen-section-title">Batch &amp; seed</h3>
+        <SectionTitle
+          label="Batch & seed"
+          tip="How many images to generate per click, plus an optional seed number to reproduce the exact same result."
+        />
         <div className="gen-field">
           <p className="gen-legend" aria-hidden="true">
             Images
@@ -514,7 +549,10 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
       </section>
 
       <section className="gen-section">
-        <h3 className="gen-section-title">Model</h3>
+        <SectionTitle
+          label="Model"
+          tip="The diffusion model that draws the image. W4A8 is faster and lighter; INT8 keeps finer texture and text."
+        />
         <SegmentedField
           legend="Model precision"
           name={precisionName}
@@ -528,7 +566,11 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
       </section>
 
       <section className="gen-section">
-        <h3 className="gen-section-title">Encoder</h3>
+        <SectionTitle
+          label="Encoder"
+          tip="Reads your prompt and reference images and translates them into guidance for the model. NVFP4 fits in 24 GB VRAM; INT8 is larger and offloads to RAM."
+          above
+        />
         <SegmentedField
           legend="Text encoder"
           name={encoderName}
@@ -542,7 +584,11 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
       </section>
 
       <section className="gen-section">
-        <h3 className="gen-section-title">Enhancer</h3>
+        <SectionTitle
+          label="Enhancer"
+          tip="Optional language model that rewrites and expands your prompt before generation. Turn Off to send your exact wording."
+          above
+        />
         <SegmentedField
           legend="Prompt enhancer"
           name={enhancerName}
@@ -600,9 +646,14 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
         {fixedSummary.length === 0 ? null : <p className="gen-fixed-meta">{fixedSummary}</p>}
       </section>
 
-      <div className="gen-vram" title={vram.breakdownTitle}>
+      <div className="gen-vram">
         <div className="gen-vram-head">
-          <span className="gen-vram-label">Est. VRAM</span>
+          <span className="gen-vram-label" tabIndex={0}>
+            <span className="gen-section-title-text">Est. VRAM</span>
+            <span role="tooltip" className="gen-tip is-above">
+              Estimated peak GPU memory across H3&apos;s sequential stages (enhancer, encoder, then diffusion — never all at once). {vram.breakdownTitle}
+            </span>
+          </span>
           <span className="gen-vram-value">
             {vram.gpuVramGb === null
               ? `~${vram.peakGb.toFixed(1)} GB`
