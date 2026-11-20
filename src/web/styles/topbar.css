@@ -44,7 +44,7 @@
   font-weight: 600;
 }
 
-/* Right: provider, totals, then the setup entry point. */
+/* Right: provider, totals, then the Settings entry point. */
 .studio .topbar .topbar-meta {
   gap: var(--space-3);
 }
@@ -71,7 +71,7 @@
 }
 
 /* Live backend state: one dot and one word, sitting next to the provider choice.
-   It is a button because clicking it opens the setup screen that can fix the state. */
+   It is a button because clicking it opens the Settings screen that can fix the state. */
 .studio .topbar .topbar-backend-status {
   display: inline-flex;
   align-items: center;
@@ -152,20 +152,3 @@
   -webkit-app-region: no-drag;
 }
 
-/* The setup screen replaces the studio, so it carries its own drag strip in the same
-   44 px band. Outside the desktop shell it is not in the layout at all. */
-.setup-drag {
-  display: none;
-}
-
-.is-desktop .setup-drag {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 1;
-  display: block;
-  height: 40px;
-  background: var(--canvas-top);
-  -webkit-app-region: drag;
-}

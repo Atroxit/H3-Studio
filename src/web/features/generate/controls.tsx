@@ -50,6 +50,43 @@ const MODEL_PRECISION_OPTIONS: readonly ChipOption[] = [
   },
 ];
 
+/** The two official 32B Qwen3-VL H3 text encoders, the smaller NVFP4 build first. */
+const TEXT_ENCODER_OPTIONS: readonly ChipOption[] = [
+  {
+    value: 'nvfp4',
+    label: 'Fast (NVFP4, 14.6 GB)',
+    detail: 'Fits 100% in 24 GB VRAM with zero CPU offload',
+  },
+  {
+    value: 'int8',
+    label: 'Max quality (INT8 ConvRot, 25.3 GB)',
+    detail: 'Full 8-bit Qwen3-VL 32B text & vision encoder',
+  },
+];
+
+/**
+ * The note the three H3 canvases deserve. 1024 x 1024 is a draft, 2048 x 2048 is the
+ * recommendation, and 4096 x 4096 is the hero size a 30 GB card can carry.
+ */
+function sizeNote(width: number, height: number): string | null {
+  if (width === 1024 && height === 1024) return 'Draft · low anatomy';
+  if (width === 2048 && height === 2048) return '4 MP · Recommended';
+  if (width === 4096 && height === 4096) return '16 MP · Hero';
+  return null;
+}
+
+/** A chip detail line that never repeats what its label already says. */
+function sizeDetail(preset: SizePreset): string | undefined {
+  const note = sizeNote(preset.width, preset.height);
+  const labelled = preset.label.includes(String(preset.width));
+  if (labelled) {
+    // The label carries the dimensions; only add a note it does not already spell out.
+    return note === null || preset.label.includes(note) ? undefined : note;
+  }
+  const dimensions = `${preset.width} × ${preset.height}`;
+  return note === null ? dimensions : `${dimensions} · ${note}`;
+}
+
 function groupPresetsByRatio(presets: readonly SizePreset[]): AspectGroup[] {
   const groups: AspectGroup[] = [];
   for (const preset of presets) {
@@ -174,6 +211,7 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const advancedPanelId = useId();
   const enhancerName = useId();
   const precisionName = useId();
+  const encoderName = useId();
   const referencesHeadingId = useId();
   const notesHeadingId = useId();
   // Open by default, so the model precision switch and the prompt enhancer are on screen.
@@ -213,7 +251,7 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const sizeOptions: ChipOption[] = visiblePresets.map((preset) => ({
     value: preset.id,
     label: preset.label,
-    detail: `${preset.width} x ${preset.height}`,
+    detail: sizeDetail(preset),
   }));
   const countOptions: ChipOption[] = Array.from(
     { length: Math.max(1, Math.trunc(capabilities.maxBatch)) },
@@ -233,8 +271,10 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
     ...(capabilities.guidance ? [] : ['Guidance is disabled.']),
     ...(capabilities.negativePrompt ? [] : ['Negative prompt is not supported.']),
   ]);
+  // Precision, text encoder and prompt enhancer are always here, plus the sampling controls
+  // this provider actually supports.
   const advancedCount =
-    2 +
+    3 +
     (capabilities.adjustableSteps ? 1 : 0) +
     (capabilities.guidance ? 1 : 0) +
     (capabilities.negativePrompt ? 1 : 0);
@@ -437,6 +477,17 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
             stacked
             onChange={(value) =>
               controller.updateForm({ modelVariant: value === 'int8_convrot' ? 'int8_convrot' : 'w4a8' })
+            }
+          />
+          <ChipGroup
+            legend="Text encoder"
+            name={encoderName}
+            value={form.textEncoderVariant}
+            options={TEXT_ENCODER_OPTIONS}
+            disabled={controller.running}
+            stacked
+            onChange={(value) =>
+              controller.updateForm({ textEncoderVariant: value === 'nvfp4' ? 'nvfp4' : 'int8' })
             }
           />
           {capabilities.adjustableSteps ? (

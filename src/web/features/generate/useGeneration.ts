@@ -13,6 +13,7 @@ import type {
   GenerationEvent,
   H3ModelVariant,
   H3PromptEnhancer,
+  H3TextEncoderVariant,
   ItemFailure,
   Preset,
   ProviderCapabilities,
@@ -121,6 +122,8 @@ export interface GenerationForm {
   promptEnhancer: H3PromptEnhancer;
   /** Which H3 diffusion model the graph loads. The fast weights are the default. */
   modelVariant: H3ModelVariant;
+  /** Which 32B H3 text encoder build the graph loads. INT8 works on every vendor. */
+  textEncoderVariant: H3TextEncoderVariant;
   references: ReferenceImage[];
 }
 
@@ -477,19 +480,29 @@ export function adoptCapabilities(
   form: GenerationForm,
   capabilities: ProviderCapabilities,
   providerId: string,
+  preferredResolution: ResolutionPreference | null = null,
 ): GenerationForm {
   const multiple = Math.max(1, Math.trunc(Number.isFinite(capabilities.sizeMultiple) ? capabilities.sizeMultiple : 1));
   const firstPreset = capabilities.presets[0];
   const isNewProvider = form.providerId !== providerId;
+  // A tuned studio opens on the canvas Settings picked, when this provider offers it.
+  const preferredPreset =
+    preferredResolution === null
+      ? undefined
+      : capabilities.presets.find(
+          (preset) =>
+            preset.width === preferredResolution.width && preset.height === preferredResolution.height,
+        );
+  const startPreset = preferredPreset ?? firstPreset;
 
   let width = form.width;
   let height = form.height;
   let presetId = form.presetId;
 
   if (isNewProvider) {
-    presetId = firstPreset === undefined ? null : firstPreset.id;
-    width = firstPreset === undefined ? multiple * FALLBACK_SIDE_UNITS : firstPreset.width;
-    height = firstPreset === undefined ? multiple * FALLBACK_SIDE_UNITS : firstPreset.height;
+    presetId = startPreset === undefined ? null : startPreset.id;
+    width = startPreset === undefined ? multiple * FALLBACK_SIDE_UNITS : startPreset.width;
+    height = startPreset === undefined ? multiple * FALLBACK_SIDE_UNITS : startPreset.height;
   } else if (presetId !== null) {
     const match = capabilities.presets.find((preset) => preset.id === presetId);
     if (match === undefined) {
@@ -553,6 +566,7 @@ export function toGenerationBody(
     promptEnhancer: form.promptEnhancer,
     enhancePrompt: form.promptEnhancer !== 'off',
     modelVariant: form.modelVariant,
+    textEncoderVariant: form.textEncoderVariant,
   };
 
   if (capabilities.negativePrompt && form.negativePrompt.trim().length > 0) {
@@ -575,6 +589,10 @@ export function toGenerationBody(
   return { body, problem: null };
 }
 
+/** A server size limit mirror, so a stored default can never make a request invalid. */
+const MIN_IMAGE_SIZE = 64;
+const MAX_IMAGE_SIZE = 8192;
+
 function isFinalStatus(status: BatchStatus): boolean {
   return status === 'complete' || status === 'partial' || status === 'failed' || status === 'cancelled';
 }
@@ -586,48 +604,204 @@ function describeError(error: unknown): string {
 
 /** The enhancer a fresh studio starts on: short prompts need it to read well. */
 export const DEFAULT_PROMPT_ENHANCER: H3PromptEnhancer = 'qwen3.5_9b';
+/** The diffusion build a fresh studio starts on: the 11.7 GB W4A8 weights. */
+export const DEFAULT_MODEL_VARIANT: H3ModelVariant = 'w4a8';
+/** INT8 is the vendor neutral encoder, so it is the safe cold start value. */
+export const DEFAULT_TEXT_ENCODER_VARIANT: H3TextEncoderVariant = 'int8';
+/** The canvas an untuned studio opens on: 4 megapixels, the H3 sweet spot. */
+export const DEFAULT_RESOLUTION_WIDTH = 2048;
+export const DEFAULT_RESOLUTION_HEIGHT = 2048;
 
-const PROMPT_ENHANCER_STORAGE_KEY = 'h3-studio:prompt-enhancer';
+export const PROMPT_ENHANCER_STORAGE_KEY = 'h3-studio:prompt-enhancer';
+export const MODEL_VARIANT_STORAGE_KEY = 'h3-studio:model-variant';
+export const TEXT_ENCODER_STORAGE_KEY = 'h3-studio:text-encoder-variant';
+export const DEFAULT_RESOLUTION_STORAGE_KEY = 'h3-studio:default-resolution';
 
 function isPromptEnhancer(value: unknown): value is H3PromptEnhancer {
   return value === 'off' || value === 'qwen3.5_9b' || value === 'qwen3.8_27b';
 }
 
-/** The enhancer the user last chose, or the fast 9B one on a cold start. */
-export function readPromptEnhancerPreference(): H3PromptEnhancer {
-  if (typeof window === 'undefined') return DEFAULT_PROMPT_ENHANCER;
+export function isModelVariant(value: unknown): value is H3ModelVariant {
+  return value === 'w4a8' || value === 'int8_convrot';
+}
+
+export function isTextEncoderVariant(value: unknown): value is H3TextEncoderVariant {
+  return value === 'nvfp4' || value === 'int8';
+}
+
+/** Reads a preference, or returns null when storage is blocked or the value is unknown. */
+function readPreference(key: string): string | null {
+  if (typeof window === 'undefined') return null;
   try {
-    const stored = window.localStorage.getItem(PROMPT_ENHANCER_STORAGE_KEY);
-    return isPromptEnhancer(stored) ? stored : DEFAULT_PROMPT_ENHANCER;
+    return window.localStorage.getItem(key);
   } catch {
-    return DEFAULT_PROMPT_ENHANCER;
+    return null;
   }
 }
 
-function persistPromptEnhancerPreference(value: H3PromptEnhancer): void {
+function writePreference(key: string, value: string): void {
   if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(PROMPT_ENHANCER_STORAGE_KEY, value);
+    window.localStorage.setItem(key, value);
   } catch {
     // Private mode or a blocked storage area leaves the choice in memory only.
   }
 }
 
+/** The enhancer the user last chose, or the fast 9B one on a cold start. */
+export function readPromptEnhancerPreference(): H3PromptEnhancer {
+  const stored = readPreference(PROMPT_ENHANCER_STORAGE_KEY);
+  return isPromptEnhancer(stored) ? stored : DEFAULT_PROMPT_ENHANCER;
+}
+
+function persistPromptEnhancerPreference(value: H3PromptEnhancer): void {
+  writePreference(PROMPT_ENHANCER_STORAGE_KEY, value);
+}
+
+/** The diffusion build the user last chose, or W4A8 on a cold start. */
+export function readModelVariantPreference(): H3ModelVariant {
+  const stored = readPreference(MODEL_VARIANT_STORAGE_KEY);
+  return isModelVariant(stored) ? stored : DEFAULT_MODEL_VARIANT;
+}
+
+export function persistModelVariantPreference(value: H3ModelVariant): void {
+  writePreference(MODEL_VARIANT_STORAGE_KEY, value);
+}
+
+/**
+ * The text encoder the user last chose. The wizard writes this when it tunes the studio,
+ * so NVFP4 survives a restart on a machine that was set up for it.
+ */
+export function readTextEncoderPreference(): H3TextEncoderVariant {
+  const stored = readPreference(TEXT_ENCODER_STORAGE_KEY);
+  return isTextEncoderVariant(stored) ? stored : DEFAULT_TEXT_ENCODER_VARIANT;
+}
+
+export function persistTextEncoderPreference(value: H3TextEncoderVariant): void {
+  writePreference(TEXT_ENCODER_STORAGE_KEY, value);
+}
+
+export interface ResolutionPreference {
+  width: number;
+  height: number;
+}
+
+function validImageSize(value: number | undefined): number | null {
+  if (value === undefined || !Number.isFinite(value)) return null;
+  const rounded = Math.round(value);
+  if (rounded < MIN_IMAGE_SIZE || rounded > MAX_IMAGE_SIZE) return null;
+  return rounded;
+}
+
+/** "2048x2048" or "2048×2048" as a size, or null when it does not parse. */
+export function parseResolutionPreference(value: string | null): ResolutionPreference | null {
+  if (value === null) return null;
+  const match = /^(\d{2,5})\s*[x×]\s*(\d{2,5})$/iu.exec(value.trim());
+  if (match === null) return null;
+  const width = validImageSize(Number(match[1]));
+  const height = validImageSize(Number(match[2]));
+  return width === null || height === null ? null : { width, height };
+}
+
+/**
+ * The canvas a fresh studio opens on, and the one the wizard offers as the default. A
+ * tuned studio persists what auto-tune chose, so a restart keeps the same canvas.
+ */
+export function readDefaultResolutionPreference(): ResolutionPreference {
+  return (
+    parseResolutionPreference(readPreference(DEFAULT_RESOLUTION_STORAGE_KEY)) ?? {
+      width: DEFAULT_RESOLUTION_WIDTH,
+      height: DEFAULT_RESOLUTION_HEIGHT,
+    }
+  );
+}
+
+export function persistDefaultResolutionPreference(value: ResolutionPreference): void {
+  const width = validImageSize(value.width);
+  const height = validImageSize(value.height);
+  if (width === null || height === null) return;
+  writePreference(DEFAULT_RESOLUTION_STORAGE_KEY, `${width}x${height}`);
+}
+
+/** The preset that exactly matches a size, so a tuned canvas shows as a selected chip. */
+function presetIdForSize(
+  capabilities: ProviderCapabilities | null,
+  width: number,
+  height: number,
+): string | null {
+  if (capabilities === null) return null;
+  const match = capabilities.presets.find((preset) => preset.width === width && preset.height === height);
+  return match === undefined ? null : match.id;
+}
+
+const initialResolution = readDefaultResolutionPreference();
+
 const EMPTY_FORM: GenerationForm = {
   providerId: null,
   prompt: '',
   negativePrompt: '',
-  width: 1024,
-  height: 1024,
+  width: initialResolution.width,
+  height: initialResolution.height,
   presetId: null,
   count: 1,
   seed: '',
   steps: DEFAULT_STEPS,
   guidance: DEFAULT_GUIDANCE,
   promptEnhancer: readPromptEnhancerPreference(),
-  modelVariant: 'w4a8',
+  modelVariant: readModelVariantPreference(),
+  textEncoderVariant: readTextEncoderPreference(),
   references: [],
 };
+
+/** The studio defaults a Settings screen, or the Setup Wizard, hands to the composer. */
+export interface StudioDefaults {
+  width?: number;
+  height?: number;
+  modelVariant?: H3ModelVariant;
+  textEncoderVariant?: H3TextEncoderVariant;
+  promptEnhancer?: H3PromptEnhancer;
+}
+
+/**
+ * Applies tuned defaults to the live Generate composer and persists them, so the canvas, the
+ * inspector chips and the next app start all agree with what Settings just applied.
+ */
+export function applyStudioDefaults(defaults: StudioDefaults): void {
+  const width = validImageSize(defaults.width) ?? state.form.width;
+  const height = validImageSize(defaults.height) ?? state.form.height;
+  const modelVariant = defaults.modelVariant ?? state.form.modelVariant;
+  const textEncoderVariant = defaults.textEncoderVariant ?? state.form.textEncoderVariant;
+  const promptEnhancer = defaults.promptEnhancer ?? state.form.promptEnhancer;
+
+  persistDefaultResolutionPreference({ width, height });
+  persistModelVariantPreference(modelVariant);
+  persistTextEncoderPreference(textEncoderVariant);
+  persistPromptEnhancerPreference(promptEnhancer);
+
+  update((current) => ({
+    ...current,
+    form: {
+      ...current.form,
+      width,
+      height,
+      modelVariant,
+      textEncoderVariant,
+      promptEnhancer,
+      presetId: presetIdForSize(current.capability.capabilities, width, height),
+    },
+  }));
+}
+
+/** The composer's current defaults. Settings reads it, and the unit suite pins it. */
+export function readStudioDefaults(): Required<StudioDefaults> {
+  return {
+    width: state.form.width,
+    height: state.form.height,
+    modelVariant: state.form.modelVariant,
+    textEncoderVariant: state.form.textEncoderVariant,
+    promptEnhancer: state.form.promptEnhancer,
+  };
+}
 
 /** The composer values a quick saved preset would capture. */
 export interface ComposerSnapshot {
@@ -792,6 +966,16 @@ export async function loadBatchById(batchId: string, sourceImageId: string | nul
             running: false,
             selectedSourceImageId: sourceImageId,
             promptFocusNonce: current.promptFocusNonce + 1,
+            // A stored batch remembers the models it ran, so the inspector shows what
+            // produced it instead of the studio's current defaults.
+            form: {
+              ...current.form,
+              ...(record.modelVariant === undefined ? {} : { modelVariant: record.modelVariant }),
+              ...(record.textEncoderVariant === undefined
+                ? {}
+                : { textEncoderVariant: record.textEncoderVariant }),
+              ...(record.promptEnhancer === undefined ? {} : { promptEnhancer: record.promptEnhancer }),
+            },
           },
     );
   } catch {
@@ -850,6 +1034,11 @@ function selectSourceImageState(imageId: string): void {
 
 /** Fills the composer from a preset or batch, clamped to the active provider. */
 export function adoptPromptSettings(settings: PromptSettings, providerId: string | null): void {
+  // The model settings of the batch are user visible choices, so reusing them also makes
+  // them the studio's remembered defaults.
+  if (settings.modelVariant !== undefined) persistModelVariantPreference(settings.modelVariant);
+  if (settings.textEncoderVariant !== undefined) persistTextEncoderPreference(settings.textEncoderVariant);
+  if (settings.promptEnhancer !== undefined) persistPromptEnhancerPreference(settings.promptEnhancer);
   update((current) => {
     const activeCapabilities =
       providerId !== null && current.capability.providerId === providerId ? current.capability.capabilities : null;
@@ -874,6 +1063,11 @@ export function adoptPromptSettings(settings: PromptSettings, providerId: string
         height,
         count,
         presetId: null,
+        ...(settings.modelVariant === undefined ? {} : { modelVariant: settings.modelVariant }),
+        ...(settings.textEncoderVariant === undefined
+          ? {}
+          : { textEncoderVariant: settings.textEncoderVariant }),
+        ...(settings.promptEnhancer === undefined ? {} : { promptEnhancer: settings.promptEnhancer }),
       },
     };
   });
@@ -887,7 +1081,10 @@ export function applyPresetToForm(preset: Preset, providerId: string | null): vo
 }
 
 function updateFormState(patch: Partial<Omit<GenerationForm, 'references' | 'providerId'>>): void {
+  // The three model choices are preferences: a reload keeps whichever the user picked.
   if (patch.promptEnhancer !== undefined) persistPromptEnhancerPreference(patch.promptEnhancer);
+  if (patch.modelVariant !== undefined) persistModelVariantPreference(patch.modelVariant);
+  if (patch.textEncoderVariant !== undefined) persistTextEncoderPreference(patch.textEncoderVariant);
   update((current) => ({ ...current, form: { ...current.form, ...patch } }));
 }
 
@@ -926,7 +1123,7 @@ function ensureCapabilities(providerId: string): void {
       update((snapshot) => ({
         ...snapshot,
         capability: { phase: 'ready', providerId, capabilities, error: null },
-        form: adoptCapabilities(snapshot.form, capabilities, providerId),
+        form: adoptCapabilities(snapshot.form, capabilities, providerId, readDefaultResolutionPreference()),
       }));
     })
     .catch((error: unknown) => {

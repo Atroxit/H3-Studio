@@ -11,6 +11,7 @@ import type {
   ProviderCapabilities,
   ProviderConfig,
   ReferenceImage,
+  SystemProfile,
 } from '../core/types';
 
 export interface StudioStats {
@@ -61,6 +62,36 @@ export interface GenerationBody {
   promptEnhancer?: H3PromptEnhancer;
   modelVariant?: H3ModelVariant;
   textEncoderVariant?: H3TextEncoderVariant;
+}
+
+/** The body POST /api/providers accepts: a whole config minus the id the server assigns. */
+export type ProviderCreateBody = Omit<ProviderConfig, 'id'>;
+/** The body PATCH /api/providers/:id accepts: the id travels in the path. */
+export type ProviderUpdateBody = Partial<Omit<ProviderConfig, 'id'>>;
+
+/** The studio defaults an applied profile hands to the Generate composer. */
+export interface AppliedProfileSummary {
+  width: number;
+  height: number;
+  modelVariant: H3ModelVariant;
+  textEncoderVariant: H3TextEncoderVariant;
+  promptEnhancer: H3PromptEnhancer;
+}
+
+/** Every field is optional: an absent one means "keep what detection chose". */
+export interface ApplySystemProfileBody {
+  providerId?: string;
+  reserveVramGb?: number;
+  previewMethod?: 'latent2rgb' | 'none';
+  disablePinnedMemory?: boolean;
+  rocmFlashAttention?: boolean;
+}
+
+export interface ApplySystemProfileResponse {
+  ok: boolean;
+  profile: SystemProfile;
+  provider: ProviderConfig;
+  applied: AppliedProfileSummary;
 }
 
 export interface ReferenceBody {
@@ -148,12 +179,12 @@ export async function listProviders(): Promise<ProviderConfig[]> {
   return (await send('GET', '/api/providers')) as ProviderConfig[];
 }
 
-export async function createProvider(input: Omit<ProviderConfig, 'id'>): Promise<ProviderConfig> {
+export async function createProvider(input: ProviderCreateBody): Promise<ProviderConfig> {
   return (await send('POST', '/api/providers', input)) as ProviderConfig;
 }
 
 /** The id travels in the path, so the body is a partial config without one. */
-export async function updateProvider(id: string, patch: Partial<Omit<ProviderConfig, 'id'>>): Promise<ProviderConfig> {
+export async function updateProvider(id: string, patch: ProviderUpdateBody): Promise<ProviderConfig> {
   return (await send('PATCH', `/api/providers/${encodeURIComponent(id)}`, patch)) as ProviderConfig;
 }
 
@@ -233,6 +264,16 @@ export async function deletePreset(id: string): Promise<OkResponse> {
 
 export async function getStats(): Promise<StudioStats> {
   return (await send('GET', '/api/stats')) as StudioStats;
+}
+
+/** What this machine can run: measured hardware, the model catalog and the tuned plan. */
+export async function getSystemProfile(): Promise<SystemProfile> {
+  return (await send('GET', '/api/system/profile')) as SystemProfile;
+}
+
+/** Writes the recommended (or overridden) launch config into providers.json. */
+export async function applySystemProfile(body: ApplySystemProfileBody = {}): Promise<ApplySystemProfileResponse> {
+  return (await send('POST', '/api/system/apply-profile', body)) as ApplySystemProfileResponse;
 }
 
 type ProgressEvent = Extract<GenerationEvent, { type: 'progress' }>;

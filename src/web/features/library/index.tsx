@@ -317,6 +317,9 @@ export function LibraryCanvas(): ReactNode {
         count: batch.requested,
         negativePrompt: batch.negativePrompt,
         providerId: batch.providerId,
+        modelVariant: batch.modelVariant,
+        textEncoderVariant: batch.textEncoderVariant,
+        promptEnhancer: batch.promptEnhancer,
       });
     },
     [studio],

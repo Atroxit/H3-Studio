@@ -2,7 +2,13 @@
 // frame can share it without an import cycle.
 
 import { createContext, useContext } from 'react';
-import type { Preset, ProviderConfig } from '../core/types';
+import type {
+  H3ModelVariant,
+  H3PromptEnhancer,
+  H3TextEncoderVariant,
+  Preset,
+  ProviderConfig,
+} from '../core/types';
 import type { StudioStats } from './api';
 
 export type StudioView = 'generate' | 'library';
@@ -16,6 +22,10 @@ export interface PromptSettings {
   negativePrompt?: string;
   /** Selects the provider that made the batch, when it is still enabled. */
   providerId?: string;
+  /** The H3 models the batch ran, so reusing it also restores the encoder and precision. */
+  modelVariant?: H3ModelVariant;
+  textEncoderVariant?: H3TextEncoderVariant;
+  promptEnhancer?: H3PromptEnhancer;
 }
 
 export interface StudioContextValue {

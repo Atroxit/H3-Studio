@@ -5,7 +5,6 @@
 import {
   useCallback,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
@@ -14,29 +13,24 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react';
-import type { Preset, ProviderCapabilities, ProviderConfig, ProviderKind } from '../core/types';
+import type { Preset, ProviderConfig } from '../core/types';
 import {
-  checkProviderHealth,
-  createProvider,
   getProviderStatus,
   getStats,
   listPresets,
   listProviders,
-  updateProvider,
-  type ProviderHealth,
   type ProviderStatus,
   type ProviderStatusState,
   type StudioStats,
 } from './api';
-import { Button, EmptyState, Field, SegmentedControl, Select, Spinner, Toast } from './components';
-import { H3_IMAGE_TEMPLATE_JSON } from './data/h3ImageTemplate';
-import { readH3ExpanderState, setH3ExpanderState } from './features/generate/helpers';
+import { Button, EmptyState, SegmentedControl, Select, Spinner, Toast } from './components';
 import {
   adoptPromptSettings,
   applyPresetToForm,
   openStoredBatch,
   startNewImage,
 } from './features/generate/useGeneration';
+import { SettingsView, type SettingsTab } from './features/settings/SettingsView';
 import {
   StudioProvider,
   isProviderEnabled,
@@ -80,89 +74,7 @@ interface ToastState {
   tone: 'success' | 'error';
 }
 
-interface ProviderKindMeta {
-  kind: ProviderKind;
-  label: string;
-  defaultBaseUrl: string;
-  summary: string;
-}
-
-// Mirrors defaultProviderConfigs in docs/api-contract.md. The browser cannot
-// import src/core/providers/registry.ts, which pulls in Node only adapter code.
-const PROVIDER_KINDS: ReadonlyArray<ProviderKindMeta> = [
-  {
-    kind: 'mock',
-    label: 'Mock (offline)',
-    defaultBaseUrl: 'mock://local',
-    summary: 'An offline stand-in. No model and no network, so it is the quickest way to check the studio works.',
-  },
-  {
-    kind: 'comfyui',
-    label: 'ComfyUI',
-    defaultBaseUrl: 'http://127.0.0.1:8188',
-    summary: 'A local ComfyUI server, addressed by its HTTP port.',
-  },
-  {
-    kind: 'openai-images',
-    label: 'SGLang or vLLM image server',
-    defaultBaseUrl: 'http://127.0.0.1:30000',
-    summary: 'A server that accepts the OpenAI image generation request shape.',
-  },
-  {
-    kind: 'a1111',
-    label: 'Automatic1111 or Forge',
-    defaultBaseUrl: 'http://127.0.0.1:7860',
-    summary: 'The Automatic1111 or Forge web UI, addressed by its HTTP port.',
-  },
-];
-
 const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB'] as const;
-
-/** The names the ComfyUI adapter substitutes inside string values of a workflow graph. */
-const WORKFLOW_PLACEHOLDERS = [
-  'prompt',
-  'negativePrompt',
-  'width',
-  'height',
-  'seed',
-  'steps',
-  'cfg',
-  'ckpt',
-  'batch',
-] as const;
-
-/**
- * MiniMax H3 image generation is fixed: six sampling steps, guidance at 1, and a
- * negative prompt is rejected. Nothing here is guessed by the adapter, so the card
- * can state it once and save it as an override.
- */
-const H3_IMAGE_CAPABILITIES: ProviderCapabilities = {
-  seed: true,
-  negativePrompt: false,
-  adjustableSteps: false,
-  fixedSteps: 6,
-  guidance: false,
-  maxReferenceImages: 4,
-  maxBatch: 4,
-  arbitrarySize: true,
-  sizeMultiple: 32,
-  presets: [
-    { id: '1024x1024', label: '1024x1024 (1 MP Fast)', width: 1024, height: 1024 },
-    { id: '2048x2048', label: '2048x2048 (4 MP)', width: 2048, height: 2048 },
-    { id: '4096x4096', label: '4096x4096', width: 4096, height: 4096 },
-    { id: '4736x3552', label: '4736x3552', width: 4736, height: 3552 },
-    { id: '3552x4736', label: '3552x4736', width: 3552, height: 4736 },
-    { id: '5472x3072', label: '5472x3072', width: 5472, height: 3072 },
-    { id: '3072x5472', label: '3072x5472', width: 3072, height: 5472 },
-  ],
-  outputFormats: ['png'],
-  streamingProgress: true,
-  notes: [
-    'H3 fixes 6 steps and guidance 1, and it rejects a negative prompt.',
-    'H3 alters an existing image from up to 4 reference images, named in the prompt as <Picture 1> and so on.',
-    'Batches above one run as sequential single image prompts.',
-  ],
-};
 
 function formatBytes(bytes: number): string {
   let value = Math.max(0, bytes);
@@ -179,117 +91,6 @@ function describeError(error: unknown): string {
   if (error instanceof TypeError) return 'The studio server did not answer.';
   if (error instanceof Error) return error.message;
   return 'The request failed.';
-}
-
-function findProvider(providers: ProviderConfig[], kind: ProviderKind): ProviderConfig | null {
-  return providers.find((candidate) => candidate.kind === kind) ?? null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** The saved graph, or an empty string: the adapter falls back to its own graph. */
-function savedWorkflowTemplate(existing: ProviderConfig | null): string {
-  const raw = existing?.options?.['workflowTemplate'];
-  return typeof raw === 'string' ? raw : '';
-}
-
-function savedCapabilityOverride(existing: ProviderConfig | null): Record<string, unknown> | null {
-  const raw = existing?.options?.['capabilities'];
-  return isRecord(raw) ? raw : null;
-}
-
-/** The saved ComfyUI timeout in seconds, with the adapter default of 900 s. */
-function savedTimeoutSeconds(existing: ProviderConfig | null): string {
-  const raw = existing?.options?.['timeoutMs'];
-  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? String(raw / 1000) : '900';
-}
-
-function sameJson(left: Record<string, unknown> | null, right: Record<string, unknown> | null): boolean {
-  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
-}
-
-/** Arguments are edited as text: space separated, one per line, or a JSON array. */
-function savedLaunchArguments(existing: ProviderConfig | null): string {
-  const args = existing?.launch?.args ?? [];
-  if (args.length === 0) return '';
-  return args.some((arg) => /\s/.test(arg)) ? JSON.stringify(args) : args.join(' ');
-}
-
-/** Null when a JSON array is malformed, so the field can say so instead of guessing. */
-function parseLaunchArguments(text: string): string[] | null {
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return [];
-  if (trimmed.startsWith('[')) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed) as unknown;
-    } catch {
-      return null;
-    }
-    if (!Array.isArray(parsed)) return null;
-    const args: string[] = [];
-    for (const entry of parsed) {
-      if (typeof entry !== 'string') return null;
-      args.push(entry);
-    }
-    return args;
-  }
-  if (trimmed.includes('\n')) {
-    return trimmed
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-  }
-  return trimmed.split(/\s+/);
-}
-
-/**
- * Checks the text against the ComfyUI API format the adapter reads: an object of
- * node id to node, and every node carries a string class_type and an object inputs.
- * Empty is allowed, and nothing here ever throws: the first problem is returned.
- */
-function workflowTemplateProblem(text: string): string | null {
-  const trimmed = text.trim();
-  if (trimmed.length === 0) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(trimmed) as unknown;
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : 'the text does not parse';
-    return `This is not valid JSON yet. ${detail}`;
-  }
-  if (!isRecord(parsed)) {
-    return 'The graph must be a JSON object of node id to node, not a list or a single value.';
-  }
-  for (const [nodeId, node] of Object.entries(parsed)) {
-    if (!isRecord(node)) return `Node ${nodeId} must be an object with class_type and inputs.`;
-    const classType = node['class_type'];
-    if (typeof classType !== 'string' || classType.length === 0) {
-      return `Node ${nodeId} needs a class_type string, like "KSampler".`;
-    }
-    if (!isRecord(node['inputs'])) return `Node ${nodeId} needs an inputs object.`;
-  }
-  return null;
-}
-
-/** A short description of a saved override, read from the fields the studio can name. */
-function describeCapabilityOverride(override: Record<string, unknown>): string {
-  const parts: string[] = [];
-  const fixedSteps = override['fixedSteps'];
-  if (typeof fixedSteps === 'number') parts.push(`${fixedSteps} fixed steps`);
-  if (override['negativePrompt'] === false) parts.push('negative prompt off');
-  if (override['guidance'] === false) parts.push('guidance off');
-  const presets = override['presets'];
-  if (Array.isArray(presets)) {
-    parts.push(presets.length === 1 ? '1 size preset' : `${presets.length} size presets`);
-  }
-  if (parts.length === 0) {
-    const count = Object.keys(override).length;
-    return `Capability override active: ${count === 1 ? '1 field' : `${count} fields`} set.`;
-  }
-  return `Capability override active: ${parts.join(', ')}.`;
 }
 
 /** ?view=library or ?view=generate, so a screenshot or a bookmark opens where it points. */
@@ -425,7 +226,8 @@ export function App({ slots = {} }: AppProps): ReactNode {
   const [selectedId, setSelectedId] = useState<string | null>(readSelectedProvider);
   const [view, setView] = useState<StudioView>(readViewFromLocation);
   const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [setupOpen, setSetupOpen] = useState(false);
+  /** The Settings tab to open, or null while the studio is on screen. */
+  const [settingsRequest, setSettingsRequest] = useState<SettingsTab | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [railWidth, setRailWidth] = useState<number>(() =>
     readStoredWidth(RAIL_WIDTH_STORAGE_KEY, RAIL_WIDTH_DEFAULT, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX),
@@ -549,10 +351,14 @@ export function App({ slots = {} }: AppProps): ReactNode {
     writeViewToLocation(next);
   }, []);
 
+  // Enabling a provider keeps Settings open: the user may still be tuning it. The studio
+  // just selects it, so leaving Settings lands on a working Generate screen. On a first run
+  // the screen was shown because nothing was enabled, so it records a real tab now and the
+  // back button appears instead of the view being pulled away mid setup.
   const handleProviderEnabled = useCallback(
     (saved: ProviderConfig) => {
       setSelectedId(saved.id);
-      setSetupOpen(false);
+      setSettingsRequest((current) => current ?? 'wizard');
       setToast({ id: Date.now(), message: `${saved.label} is enabled.`, tone: 'success' });
       void refresh();
     },
@@ -608,6 +414,28 @@ export function App({ slots = {} }: AppProps): ReactNode {
   useEffect(() => {
     persistSelectedProvider(provider === null ? null : provider.id);
   }, [provider]);
+
+  /**
+   * Opens Settings. With nothing enabled the wizard is the only useful tab; with a backend
+   * that is down the provider form is, because that is where the address is fixed. Every
+   * other visit starts on the wizard, which is also what the top bar button says.
+   */
+  const openSettings = useCallback(
+    (preferred?: SettingsTab): void => {
+      if (preferred !== undefined) {
+        setSettingsRequest(preferred);
+        return;
+      }
+      if (enabledProviders.length === 0) {
+        setSettingsRequest('wizard');
+        return;
+      }
+      const unreachable =
+        backendStatus !== null && (backendStatus.state === 'offline' || backendStatus.state === 'error');
+      setSettingsRequest(unreachable ? 'providers' : 'wizard');
+    },
+    [backendStatus, enabledProviders.length],
+  );
 
   const notify = useCallback((message: string, tone: 'success' | 'error' = 'success'): void => {
     setToast({ id: Date.now(), message, tone });
@@ -729,17 +557,14 @@ export function App({ slots = {} }: AppProps): ReactNode {
 
   return (
     <StudioProvider.Provider value={contextValue}>
-      {enabledProviders.length === 0 || setupOpen ? (
-        <SetupScreen
-          providers={providers}
-          onEnabled={handleProviderEnabled}
-          onDismiss={
-            enabledProviders.length === 0
-              ? undefined
-              : () => {
-                  setSetupOpen(false);
-                }
-          }
+      {enabledProviders.length === 0 || settingsRequest !== null ? (
+        <SettingsView
+          initialTab={settingsRequest ?? 'wizard'}
+          canClose={enabledProviders.length > 0}
+          onClose={() => {
+            setSettingsRequest(null);
+          }}
+          onProviderEnabled={handleProviderEnabled}
         />
       ) : (
         <div className="studio">
@@ -777,7 +602,7 @@ export function App({ slots = {} }: AppProps): ReactNode {
                       className={`topbar-backend-status is-${backendStatus.state}`}
                       title={backendStatus.detail ?? backendStatus.state}
                       onClick={() => {
-                        setSetupOpen(true);
+                        openSettings('providers');
                       }}
                     >
                       <span className="topbar-backend-dot" aria-hidden="true" />
@@ -797,12 +622,18 @@ export function App({ slots = {} }: AppProps): ReactNode {
               <Button
                 variant="ghost"
                 size="sm"
-                title="Provider setup"
+                title="Settings"
+                aria-label="Settings"
                 onClick={() => {
-                  setSetupOpen(true);
+                  openSettings();
                 }}
               >
-                Providers
+                <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M5 8h9M18 8h1M5 16h3M12 16h7" />
+                  <circle cx="16" cy="8" r="2" />
+                  <circle cx="10" cy="16" r="2" />
+                </svg>
+                Settings
               </Button>
             </div>
           </header>
@@ -943,515 +774,5 @@ export function App({ slots = {} }: AppProps): ReactNode {
 
       {toast === null ? null : <Toast key={toast.id} message={toast.message} tone={toast.tone} onClose={dismissToast} />}
     </StudioProvider.Provider>
-  );
-}
-
-interface SetupScreenProps {
-  providers: ProviderConfig[];
-  onEnabled: (saved: ProviderConfig) => void;
-  /** Absent when no provider is enabled: there is no studio to go back to. */
-  onDismiss?: () => void;
-}
-
-function SetupScreen({ providers, onEnabled, onDismiss }: SetupScreenProps): ReactNode {
-  const titleRef = useRef<HTMLHeadingElement | null>(null);
-
-  // The setup screen replaces the studio, so the button that opened it is gone:
-  // move focus to the heading instead of dropping the user back to the document.
-  useEffect(() => {
-    titleRef.current?.focus();
-  }, []);
-
-  return (
-    <div className="setup">
-      {/* The setup screen replaces the studio, and with it the top bar. In the desktop
-          shell the window still needs somewhere to be grabbed, so this keeps a strip
-          the height of the bar as the drag surface. The browser renders nothing here. */}
-      <div className="setup-drag" aria-hidden="true" />
-      <div className="setup-inner">
-        <header className="setup-head">
-          <div className="brand">
-            <span className="brand-mark" aria-hidden="true">
-              <ApertureIcon />
-            </span>
-            <h1 className="brand-name">H3 Studio</h1>
-          </div>
-          <h2 className="setup-title" ref={titleRef} tabIndex={-1}>
-            Connect a provider
-          </h2>
-          <p className="setup-lead">
-            H3 Studio renders through a provider that runs on this machine. Everything stays local unless you point a
-            provider at a remote address. Check the address, test the connection, then enable one.
-          </p>
-          {onDismiss === undefined ? null : (
-            <div className="setup-card-actions">
-              <Button variant="ghost" onClick={onDismiss}>
-                Back to studio
-              </Button>
-            </div>
-          )}
-        </header>
-        <div className="setup-grid">
-          {PROVIDER_KINDS.map((meta) => (
-            <SetupCard key={meta.kind} meta={meta} existing={findProvider(providers, meta.kind)} onEnabled={onEnabled} />
-          ))}
-        </div>
-        <p className="setup-foot">
-          The mock provider needs no model and no network. Switch providers from the top bar at any time.
-        </p>
-      </div>
-    </div>
-  );
-}
-
-interface SetupCardProps {
-  meta: ProviderKindMeta;
-  existing: ProviderConfig | null;
-  onEnabled: (saved: ProviderConfig) => void;
-}
-
-function SetupCard({ meta, existing, onEnabled }: SetupCardProps): ReactNode {
-  const { refresh } = useStudio();
-  const graphId = useId();
-  const workflowId = `${graphId}-workflow`;
-  const workflowHintId = `${graphId}-workflow-hint`;
-  const expanderId = `${graphId}-expander`;
-  // Only ComfyUI reads a graph, so only its card grows the advanced section.
-  const isComfy = meta.kind === 'comfyui';
-  // The mock runs inside the server, so there is nothing for the studio to start.
-  const supportsLaunch = meta.kind !== 'mock';
-  const displayLabel = existing === null ? meta.label : existing.label;
-  const enabled = existing !== null && existing.enabled !== false;
-
-  const [baseUrl, setBaseUrl] = useState(existing === null ? meta.defaultBaseUrl : existing.baseUrl);
-  const [configId, setConfigId] = useState<string | null>(existing === null ? null : existing.id);
-  const [busy, setBusy] = useState<'none' | 'testing' | 'enabling' | 'saving' | 'disabling'>('none');
-  const [status, setStatus] = useState<{ tone: 'ok' | 'error'; message: string } | null>(null);
-  const [graphOpen, setGraphOpen] = useState(false);
-  const [workflow, setWorkflow] = useState<string>(() => savedWorkflowTemplate(existing));
-  const [capabilities, setCapabilities] = useState<Record<string, unknown> | null>(() =>
-    savedCapabilityOverride(existing),
-  );
-  const [timeoutSeconds, setTimeoutSeconds] = useState<string>(() => savedTimeoutSeconds(existing));
-  const [launchEnabled, setLaunchEnabled] = useState<boolean>(() => existing?.launch?.enabled === true);
-  const [launchCommand, setLaunchCommand] = useState<string>(() => existing?.launch?.command ?? '');
-  const [launchArgs, setLaunchArgs] = useState<string>(() => savedLaunchArguments(existing));
-  const [launchCwd, setLaunchCwd] = useState<string>(() => existing?.launch?.cwd ?? '');
-
-  const workflowProblem = workflowTemplateProblem(workflow);
-  const trimmedUrl = baseUrl.trim();
-  const idle = busy === 'none';
-  const timeoutValue = Number(timeoutSeconds);
-  const timeoutValid =
-    isComfy && timeoutSeconds.trim().length > 0 && Number.isInteger(timeoutValue) && timeoutValue > 0;
-  const timeoutProblem = isComfy && !timeoutValid ? 'Timeout must be a whole number of seconds above zero.' : null;
-  const parsedLaunchArgs = parseLaunchArguments(launchArgs);
-  const launchProblem =
-    supportsLaunch && launchEnabled && launchCommand.trim().length === 0
-      ? 'A command is needed before the studio can start this provider.'
-      : supportsLaunch && parsedLaunchArgs === null
-        ? 'Arguments must be space separated, one per line, or a JSON array of strings.'
-        : null;
-  const canSave =
-    idle &&
-    trimmedUrl.length > 0 &&
-    workflowProblem === null &&
-    launchProblem === null &&
-    (!isComfy || timeoutValid);
-  const expanderState = isComfy ? readH3ExpanderState(workflow) : null;
-  const launchDirty =
-    supportsLaunch &&
-    (launchEnabled !== (existing?.launch?.enabled === true) ||
-      launchCommand.trim() !== (existing?.launch?.command ?? '').trim() ||
-      JSON.stringify(parsedLaunchArgs) !== JSON.stringify(existing?.launch?.args ?? []) ||
-      launchCwd.trim() !== (existing?.launch?.cwd ?? '').trim());
-  const dirty =
-    existing === null ||
-    trimmedUrl !== existing.baseUrl ||
-    workflow !== savedWorkflowTemplate(existing) ||
-    !sameJson(capabilities, savedCapabilityOverride(existing)) ||
-    launchDirty ||
-    (isComfy && timeoutSeconds !== savedTimeoutSeconds(existing));
-
-  /**
-   * The options the server stores. Other keys a saved config carries are kept, and
-   * the graph keys are always present, so clearing the last one clears it on disk.
-   */
-  const optionsDraft = useCallback((): Record<string, unknown> | undefined => {
-    if (!isComfy) return undefined;
-    const next: Record<string, unknown> = { ...(existing?.options ?? {}) };
-    delete next['workflowTemplate'];
-    delete next['capabilities'];
-    const template = workflow.trim();
-    if (template.length > 0) next['workflowTemplate'] = template;
-    if (capabilities !== null) next['capabilities'] = capabilities;
-    if (timeoutValid) next['timeoutMs'] = Math.round(timeoutValue * 1000);
-    return next;
-  }, [capabilities, existing, isComfy, timeoutValid, timeoutValue, workflow]);
-
-  const draft = useCallback((): Omit<ProviderConfig, 'id'> => {
-    const base: Omit<ProviderConfig, 'id'> = {
-      kind: meta.kind,
-      label: existing === null ? meta.label : existing.label,
-      baseUrl: trimmedUrl,
-    };
-    // Autostart is saved even when it is off, so turning it off is a real edit rather
-    // than a field that silently keeps the old command.
-    if (supportsLaunch && parsedLaunchArgs !== null) {
-      base.launch = {
-        enabled: launchEnabled,
-        command: launchCommand.trim(),
-        args: parsedLaunchArgs,
-        cwd: launchCwd.trim().length > 0 ? launchCwd.trim() : undefined,
-      };
-    }
-    const options = optionsDraft();
-    return options === undefined ? base : { ...base, options };
-  }, [
-    existing,
-    launchArgs,
-    launchCommand,
-    launchCwd,
-    launchEnabled,
-    meta.kind,
-    meta.label,
-    optionsDraft,
-    parsedLaunchArgs,
-    supportsLaunch,
-    trimmedUrl,
-  ]);
-
-  const persist = useCallback(async (): Promise<ProviderConfig> => {
-    if (configId === null) {
-      const created = await createProvider({ ...draft(), enabled: false });
-      setConfigId(created.id);
-      return created;
-    }
-    return updateProvider(configId, draft());
-  }, [configId, draft]);
-
-  const testConnection = useCallback(async (): Promise<void> => {
-    setBusy('testing');
-    setStatus(null);
-    try {
-      // A clean saved config is tested in place. Unsaved edits are written first, and the
-      // message says so, because testing must use the values in the fields.
-      const saved =
-        existing !== null && !dirty && configId !== null ? existing : await persist();
-      const health: ProviderHealth = await checkProviderHealth(saved.id);
-      const prefix = saved === existing ? '' : 'Saved the changes, then tested. ';
-      setStatus(
-        health.ok
-          ? { tone: 'ok', message: `${prefix}${health.detail ?? 'The provider answered.'}` }
-          : { tone: 'error', message: `${prefix}${health.detail ?? 'The provider did not answer.'}` },
-      );
-      if (saved !== existing) void refresh();
-    } catch (error) {
-      setStatus({ tone: 'error', message: describeError(error) });
-    } finally {
-      setBusy('none');
-    }
-  }, [configId, dirty, existing, persist, refresh]);
-
-  const saveGraph = useCallback(async (): Promise<void> => {
-    setBusy('saving');
-    setStatus(null);
-    try {
-      await persist();
-      setStatus({ tone: 'ok', message: 'The settings are saved. This provider uses them on the next run.' });
-      void refresh();
-    } catch (error) {
-      setStatus({ tone: 'error', message: describeError(error) });
-    } finally {
-      setBusy('none');
-    }
-  }, [persist, refresh]);
-
-  const enable = useCallback(async (): Promise<void> => {
-    setBusy('enabling');
-    setStatus(null);
-    try {
-      const saved =
-        configId === null
-          ? await createProvider({ ...draft(), enabled: true })
-          : await updateProvider(configId, { ...draft(), enabled: true });
-      setConfigId(saved.id);
-      setBusy('none');
-      onEnabled(saved);
-    } catch (error) {
-      setStatus({ tone: 'error', message: describeError(error) });
-      setBusy('none');
-    }
-  }, [configId, draft, onEnabled]);
-
-  const disable = useCallback(async (): Promise<void> => {
-    if (existing === null) return;
-    setBusy('disabling');
-    setStatus(null);
-    try {
-      await updateProvider(existing.id, { enabled: false });
-      await refresh();
-      setStatus({ tone: 'ok', message: `${existing.label} is disabled.` });
-    } catch (error) {
-      setStatus({ tone: 'error', message: describeError(error) });
-    } finally {
-      setBusy('none');
-    }
-  }, [existing, refresh]);
-
-  return (
-    <section className="setup-card" aria-labelledby={`setup-${meta.kind}`}>
-      <div className="setup-card-head">
-        <h3 className="setup-card-title" id={`setup-${meta.kind}`}>
-          {displayLabel}
-        </h3>
-        <span className="setup-card-meta">
-          <span className={enabled ? 'setup-state is-enabled' : 'setup-state'}>{enabled ? 'Enabled' : 'Disabled'}</span>
-          <span className="data">{meta.kind}</span>
-        </span>
-      </div>
-      <p className="setup-card-summary">{meta.summary}</p>
-      <Field
-        label={`${displayLabel} base URL`}
-        value={baseUrl}
-        spellCheck={false}
-        autoComplete="off"
-        disabled={!idle}
-        hint={`Default: ${meta.defaultBaseUrl}`}
-        onChange={(event) => {
-          setBaseUrl(event.target.value);
-        }}
-      />
-      {isComfy ? (
-        <Field
-          label="Timeout (s)"
-          type="number"
-          inputMode="numeric"
-          min={1}
-          step={1}
-          value={timeoutSeconds}
-          disabled={!idle}
-          invalid={!timeoutValid}
-          hint={timeoutProblem ?? 'The H3 default is 900 s (15 minutes).'}
-          onChange={(event) => {
-            setTimeoutSeconds(event.target.value);
-          }}
-        />
-      ) : null}
-      {supportsLaunch ? (
-        <section className="setup-launch" aria-labelledby={`${graphId}-launch`}>
-          <label className="setup-check" htmlFor={`${graphId}-launch-enabled`}>
-            <input
-              id={`${graphId}-launch-enabled`}
-              type="checkbox"
-              checked={launchEnabled}
-              disabled={!idle}
-              onChange={(event) => {
-                setLaunchEnabled(event.target.checked);
-              }}
-            />
-            <span className="setup-check-copy">
-              <span className="setup-check-title" id={`${graphId}-launch`}>
-                Auto-start with H3 Studio
-              </span>
-              <span className="field-hint">
-                Runs this command when the studio starts, and stops it again when the studio quits.
-              </span>
-            </span>
-          </label>
-          {launchEnabled ? (
-            <div className="setup-launch-fields">
-              <Field
-                label="Command"
-                value={launchCommand}
-                spellCheck={false}
-                autoComplete="off"
-                disabled={!idle}
-                placeholder="python"
-                hint="The program to run. A bare name is looked up on PATH."
-                onChange={(event) => {
-                  setLaunchCommand(event.target.value);
-                }}
-              />
-              <Field
-                label="Arguments"
-                value={launchArgs}
-                spellCheck={false}
-                autoComplete="off"
-                disabled={!idle}
-                invalid={parsedLaunchArgs === null}
-                placeholder="main.py --listen 127.0.0.1"
-                hint={launchProblem ?? 'Space separated, one per line, or a JSON array of strings.'}
-                onChange={(event) => {
-                  setLaunchArgs(event.target.value);
-                }}
-              />
-              <Field
-                label="Working folder"
-                value={launchCwd}
-                spellCheck={false}
-                autoComplete="off"
-                disabled={!idle}
-                placeholder="Optional, for example the ComfyUI folder"
-                hint="Optional. The command runs from here."
-                onChange={(event) => {
-                  setLaunchCwd(event.target.value);
-                }}
-              />
-            </div>
-          ) : null}
-          {launchProblem === null ? null : (
-            <p className="field-error" role="alert">
-              {launchProblem}
-            </p>
-          )}
-        </section>
-      ) : null}
-      <div className="setup-card-actions">
-        <Button variant="secondary" busy={busy === 'testing'} disabled={!canSave} onClick={() => void testConnection()}>
-          {dirty ? 'Save and test' : 'Test connection'}
-        </Button>
-        <Button variant="primary" busy={busy === 'enabling'} disabled={!canSave} onClick={() => void enable()}>
-          Enable
-        </Button>
-        {enabled ? (
-          <Button variant="ghost" busy={busy === 'disabling'} disabled={!idle} onClick={() => void disable()}>
-            Disable
-          </Button>
-        ) : null}
-        {dirty ? <span className="setup-dirty">Unsaved changes</span> : null}
-      </div>
-      {status === null ? null : (
-        <p className={status.tone === 'ok' ? 'setup-status is-ok' : 'setup-status is-error'} role="status">
-          {status.message}
-        </p>
-      )}
-      {isComfy ? (
-        <section className="setup-advanced" aria-labelledby={`${graphId}-title`}>
-          <button
-            type="button"
-            className="setup-advanced-toggle"
-            aria-expanded={graphOpen}
-            aria-controls={`${graphId}-panel`}
-            onClick={() => {
-              setGraphOpen(!graphOpen);
-            }}
-          >
-            <svg className="icon setup-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-              <path d="M9.5 6.5L15 12l-5.5 5.5" />
-            </svg>
-            <span className="setup-advanced-title" id={`${graphId}-title`}>
-              Advanced graph
-            </span>
-            <span className="setup-advanced-count">
-              {workflow.trim().length === 0 ? 'Default graph' : 'Custom graph'}
-            </span>
-          </button>
-          {expanderState === null ? null : (
-            <label className="setup-check" htmlFor={expanderId}>
-              <input
-                id={expanderId}
-                type="checkbox"
-                checked={expanderState}
-                disabled={!idle}
-                onChange={(event) => {
-                  const next = setH3ExpanderState(workflow, event.target.checked);
-                  if (next !== null) setWorkflow(next);
-                }}
-              />
-              <span className="setup-check-copy">
-                <span className="setup-check-title">H3 Prompt Expander (Qwen3.5 9B)</span>
-                <span className="field-hint">Enabling runs the 9B caption expander before the image model.</span>
-              </span>
-            </label>
-          )}
-          <div className="setup-advanced-panel" id={`${graphId}-panel`} hidden={!graphOpen}>
-            <div className="field">
-              <label className="field-label" htmlFor={workflowId}>
-                Workflow template
-              </label>
-              <textarea
-                id={workflowId}
-                className="field-textarea setup-code"
-                rows={10}
-                spellCheck={false}
-                autoComplete="off"
-                value={workflow}
-                disabled={!idle}
-                aria-invalid={workflowProblem === null ? undefined : true}
-                aria-describedby={workflowProblem === null ? workflowHintId : `${workflowHintId} ${workflowId}-error`}
-                placeholder={`{\n  "3": {\n    "class_type": "KSampler",\n    "inputs": { "seed": "{{seed}}", "steps": "{{steps}}" }\n  }\n}`}
-                onChange={(event) => {
-                  setWorkflow(event.target.value);
-                }}
-              />
-              <p className="field-hint" id={workflowHintId}>
-                Available placeholders:{' '}
-                {WORKFLOW_PLACEHOLDERS.map((name, index) => (
-                  <span key={name}>
-                    {index === 0 ? null : ', '}
-                    <code className="setup-token">{`{{${name}}}`}</code>
-                  </span>
-                ))}
-                . The value must be in ComfyUI API format (Workflow menu, Export (API)), not the normal saved
-                workflow. An empty value keeps the adapter's built in graph.
-              </p>
-              {workflowProblem === null ? null : (
-                <p className="field-error" id={`${workflowId}-error`} role="alert">
-                  {workflowProblem}
-                </p>
-              )}
-            </div>
-            <div className="setup-advanced-actions">
-              <Button
-                variant="secondary"
-                size="sm"
-                busy={busy === 'saving'}
-                disabled={!canSave}
-                onClick={() => void saveGraph()}
-              >
-                Save settings
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={!idle}
-                onClick={() => {
-                  setWorkflow(H3_IMAGE_TEMPLATE_JSON);
-                }}
-              >
-                Load H3 Image graph
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                disabled={!idle}
-                onClick={() => {
-                  setCapabilities({ ...H3_IMAGE_CAPABILITIES });
-                  if (!timeoutValid) setTimeoutSeconds('900');
-                }}
-              >
-                H3 Image capabilities
-              </Button>
-            </div>
-            {capabilities === null ? null : (
-              <div className="setup-override">
-                <p className="setup-override-summary">{describeCapabilityOverride(capabilities)}</p>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={!idle}
-                  onClick={() => {
-                    setCapabilities(null);
-                  }}
-                >
-                  Clear override
-                </Button>
-              </div>
-            )}
-          </div>
-        </section>
-      ) : null}
-    </section>
   );
 }

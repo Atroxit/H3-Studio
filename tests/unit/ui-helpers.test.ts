@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import type { BatchRecord, StoredImage } from '../../src/core/types';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BatchRecord, ProviderCapabilities, StoredImage } from '../../src/core/types';
 import {
   batchDurationMs,
   formatClock,
@@ -23,19 +23,33 @@ import {
   applyItemEvent,
   applyPreviewEvent,
   applyProgressEvent,
+  applyStudioDefaults,
   batchFromRecord,
   clearIfShowingBatch,
   createTiles,
   mergeBatchRecord,
   openStoredBatch,
+  parseResolutionPreference,
   readCurrentFormSnapshot,
+  readDefaultResolutionPreference,
   readGenerationBatch,
+  readModelVariantPreference,
   readPromptEnhancerPreference,
+  readStudioDefaults,
+  readTextEncoderPreference,
   resolveAlterationTarget,
   startNewImage,
+  toGenerationBody,
   type GenerationBatch,
+  type GenerationForm,
   type GenerationTile,
 } from '../../src/web/features/generate/useGeneration';
+import {
+  formatEnvLines,
+  formatLaunchArguments,
+  parseEnvLines,
+  parseLaunchArguments,
+} from '../../src/web/features/settings/helpers';
 
 // The stored batch fetch is the only thing openStoredBatch needs from the network.
 vi.mock('../../src/web/api', async (importOriginal) => {
@@ -615,5 +629,204 @@ describe('client validation helpers', () => {
     expect(seedProblem('4294967296')).not.toBeNull();
     expect(seedProblem('abc')).not.toBeNull();
     expect(seedProblem('-1')).not.toBeNull();
+  });
+});
+
+/** A localStorage stand in, so the preference helpers can be exercised in Node. */
+function installFakeStorage(store: Map<string, string>): void {
+  (globalThis as { window?: unknown }).window = {
+    localStorage: {
+      getItem: (key: string): string | null => store.get(key) ?? null,
+      setItem: (key: string, value: string): void => {
+        store.set(key, value);
+      },
+      removeItem: (key: string): void => {
+        store.delete(key);
+      },
+    },
+  };
+}
+
+function uninstallFakeStorage(): void {
+  delete (globalThis as { window?: unknown }).window;
+}
+
+const H3_CAPS: ProviderCapabilities = {
+  seed: true,
+  negativePrompt: false,
+  adjustableSteps: false,
+  fixedSteps: 6,
+  guidance: false,
+  maxReferenceImages: 4,
+  maxBatch: 4,
+  arbitrarySize: true,
+  sizeMultiple: 32,
+  presets: [{ id: '2048x2048', label: '2048×2048 (4 MP · Recommended)', width: 2048, height: 2048 }],
+  outputFormats: ['png'],
+  streamingProgress: true,
+  notes: [],
+};
+
+function generationForm(overrides: Partial<GenerationForm> = {}): GenerationForm {
+  return {
+    providerId: 'comfyui',
+    prompt: 'a brass lighthouse at dusk',
+    negativePrompt: '',
+    width: 2048,
+    height: 2048,
+    presetId: '2048x2048',
+    count: 1,
+    seed: '',
+    steps: 20,
+    guidance: 7,
+    promptEnhancer: 'qwen3.5_9b',
+    modelVariant: 'w4a8',
+    textEncoderVariant: 'int8',
+    references: [],
+    ...overrides,
+  };
+}
+
+describe('studio defaults and the text encoder preference', () => {
+  const store = new Map<string, string>();
+
+  beforeEach(() => {
+    store.clear();
+    installFakeStorage(store);
+  });
+
+  afterEach(() => {
+    uninstallFakeStorage();
+  });
+
+  it('applies tuned defaults to the live composer and persists every one of them', () => {
+    applyStudioDefaults({
+      width: 4096,
+      height: 4096,
+      modelVariant: 'int8_convrot',
+      textEncoderVariant: 'nvfp4',
+      promptEnhancer: 'qwen3.8_27b',
+    });
+
+    expect(readStudioDefaults()).toEqual({
+      width: 4096,
+      height: 4096,
+      modelVariant: 'int8_convrot',
+      textEncoderVariant: 'nvfp4',
+      promptEnhancer: 'qwen3.8_27b',
+    });
+    expect(readDefaultResolutionPreference()).toEqual({ width: 4096, height: 4096 });
+    expect(readModelVariantPreference()).toBe('int8_convrot');
+    expect(readTextEncoderPreference()).toBe('nvfp4');
+    expect(readPromptEnhancerPreference()).toBe('qwen3.8_27b');
+
+    expect(store.get('h3-studio:text-encoder-variant')).toBe('nvfp4');
+    expect(store.get('h3-studio:model-variant')).toBe('int8_convrot');
+    expect(store.get('h3-studio:default-resolution')).toBe('4096x4096');
+    expect(store.get('h3-studio:prompt-enhancer')).toBe('qwen3.8_27b');
+  });
+
+  it('keeps the parts of the composer the defaults do not name', () => {
+    applyStudioDefaults({ width: 1024, height: 1024 });
+    const after = readStudioDefaults();
+    expect(after.width).toBe(1024);
+    expect(after.height).toBe(1024);
+    // The model choices were not named, so whatever the composer had stays.
+    expect(after.textEncoderVariant).toBe(readTextEncoderPreference());
+  });
+
+  it('defaults the encoder to INT8 and the canvas to 2048 when nothing is stored', () => {
+    store.clear();
+    expect(readTextEncoderPreference()).toBe('int8');
+    expect(readModelVariantPreference()).toBe('w4a8');
+    expect(readDefaultResolutionPreference()).toEqual({ width: 2048, height: 2048 });
+  });
+
+  it('ignores an unknown stored preference instead of trusting it', () => {
+    store.set('h3-studio:text-encoder-variant', 'fp8');
+    store.set('h3-studio:model-variant', 'nonsense');
+    store.set('h3-studio:default-resolution', 'huge');
+    expect(readTextEncoderPreference()).toBe('int8');
+    expect(readModelVariantPreference()).toBe('w4a8');
+    expect(readDefaultResolutionPreference()).toEqual({ width: 2048, height: 2048 });
+  });
+
+  it('reads a stored resolution written with either x', () => {
+    expect(parseResolutionPreference('2048x2048')).toEqual({ width: 2048, height: 2048 });
+    expect(parseResolutionPreference('4096×4096')).toEqual({ width: 4096, height: 4096 });
+    expect(parseResolutionPreference(' 1024 X 768 ')).toEqual({ width: 1024, height: 768 });
+    expect(parseResolutionPreference('huge')).toBeNull();
+    expect(parseResolutionPreference('10x10')).toBeNull();
+    expect(parseResolutionPreference(null)).toBeNull();
+  });
+
+  it('sends the chosen text encoder with the generation request', () => {
+    const prepared = toGenerationBody(
+      generationForm({ textEncoderVariant: 'nvfp4', modelVariant: 'int8_convrot', promptEnhancer: 'qwen3.8_27b' }),
+      H3_CAPS,
+      'comfyui',
+    );
+    expect(prepared.problem).toBeNull();
+    expect(prepared.body?.textEncoderVariant).toBe('nvfp4');
+    expect(prepared.body?.modelVariant).toBe('int8_convrot');
+    expect(prepared.body?.promptEnhancer).toBe('qwen3.8_27b');
+    expect(prepared.body?.enhancePrompt).toBe(true);
+
+    const draft = toGenerationBody(generationForm({ textEncoderVariant: 'int8' }), H3_CAPS, 'comfyui');
+    expect(draft.body?.textEncoderVariant).toBe('int8');
+  });
+});
+
+describe('launch env and argument helpers', () => {
+  it('reads KEY=VALUE lines and skips blank lines and comments', () => {
+    const parsed = parseEnvLines(
+      ['TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1', '', '   # a note', 'HSA_OVERRIDE_GFX_VERSION=11.0.0'].join('\n'),
+    );
+    expect(parsed.problem).toBeNull();
+    expect(parsed.env).toEqual({
+      TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: '1',
+      HSA_OVERRIDE_GFX_VERSION: '11.0.0',
+    });
+  });
+
+  it('keeps an equals sign inside a value and strips surrounding quotes', () => {
+    expect(parseEnvLines('EQUATION=a=b=c').env).toEqual({ EQUATION: 'a=b=c' });
+    expect(parseEnvLines('QUOTED="two words"').env).toEqual({ QUOTED: 'two words' });
+    expect(parseEnvLines("SINGLE='x'").env).toEqual({ SINGLE: 'x' });
+    expect(parseEnvLines('EMPTY=').env).toEqual({ EMPTY: '' });
+    expect(parseEnvLines('').env).toEqual({});
+  });
+
+  it('reports a line that is not a usable assignment', () => {
+    expect(parseEnvLines('NOT_AN_ASSIGNMENT').problem).toContain('KEY=VALUE');
+    expect(parseEnvLines('=value').problem).toContain('KEY=VALUE');
+    expect(parseEnvLines('2FAST=1').problem).toContain('valid environment variable name');
+    expect(parseEnvLines('GOOD=1\nbad line').problem).not.toBeNull();
+  });
+
+  it('round trips an env map through the textarea form, sorted by key', () => {
+    const env = { B_SECOND: '2', A_FIRST: '1' };
+    const text = formatEnvLines(env);
+    expect(text).toBe('A_FIRST=1\nB_SECOND=2');
+    expect(parseEnvLines(text).env).toEqual(env);
+    expect(formatEnvLines(undefined)).toBe('');
+    expect(formatEnvLines({})).toBe('');
+  });
+
+  it('round trips launch arguments, quoting an argument that contains a space', () => {
+    expect(formatLaunchArguments(['-u', 'main.py'])).toBe('-u main.py');
+    expect(parseLaunchArguments('-u main.py')).toEqual(['-u', 'main.py']);
+    expect(formatLaunchArguments(undefined)).toBe('');
+
+    const spaced = ['--extra-model-paths-config', 'C:/My Models/paths.yaml'];
+    const text = formatLaunchArguments(spaced);
+    expect(text).toBe(JSON.stringify(spaced));
+    expect(parseLaunchArguments(text)).toEqual(spaced);
+
+    expect(parseLaunchArguments('--listen\n--port\n8188')).toEqual(['--listen', '--port', '8188']);
+    expect(parseLaunchArguments('')).toEqual([]);
+    expect(parseLaunchArguments('[1, 2]')).toBeNull();
+    expect(parseLaunchArguments('["-u", 5]')).toBeNull();
+    expect(parseLaunchArguments('[not json')).toBeNull();
   });
 });
