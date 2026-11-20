@@ -139,10 +139,7 @@ export function PromptComposer({
     .filter((id): id is string => id !== null)
     .join(' ');
   // A quiet line beside the add control: what to do with no attachments, what is left with some.
-  const referenceHint =
-    referenceCount === 0
-      ? `0/${referenceLimit} · Drop images or click to reference as <Picture 1>`
-      : `${referenceCount}/${referenceLimit}`;
+  const referenceHint = `${referenceCount}/${referenceLimit}`;
 
   // A new image, an opened batch or an "Alter this" click all ask for the prompt box.
   useEffect(() => {
