@@ -157,6 +157,22 @@ function SparkleIcon(): ReactNode {
   );
 }
 
+function ChevronLeftIcon(): ReactNode {
+  return (
+    <svg viewBox="0 0 16 16" width="11" height="11" fill="none" aria-hidden="true">
+      <path d="M10 3.5L5.5 8L10 12.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function ChevronRightIcon(): ReactNode {
+  return (
+    <svg viewBox="0 0 16 16" width="11" height="11" fill="none" aria-hidden="true">
+      <path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function PaperclipIcon(): ReactNode {
   return (
     <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -196,6 +212,11 @@ export function PromptComposer({
   const errorId = `${promptId}-prompt-error`;
   const blockedId = `${promptId}-blocked`;
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
+  const themeStripRef = useRef<HTMLDivElement | null>(null);
+  const [stripScroll, setStripScroll] = useState<{ left: boolean; right: boolean }>({
+    left: false,
+    right: false,
+  });
   const [uploading, setUploading] = useState(false);
   const [referenceError, setReferenceError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -209,6 +230,62 @@ export function PromptComposer({
   );
   const activeIds = useMemo(() => new Set(activeThemes.map((theme) => theme.id)), [activeThemes]);
   const strip = useMemo(() => stripThemes(themes, activeIds), [themes, activeIds]);
+
+  const updateStripScroll = useCallback((): void => {
+    const el = themeStripRef.current;
+    if (el === null) return;
+    const left = el.scrollLeft > 2;
+    const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 2;
+    setStripScroll((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
+  }, []);
+
+  // Translate vertical mouse-wheel scrolling into horizontal movement over the tag strip.
+  // React's synthetic onWheel is passive in Chromium, so we bind a native non-passive listener.
+  useEffect(() => {
+    const el = themeStripRef.current;
+    if (el === null) return;
+    const onWheel = (event: WheelEvent): void => {
+      if (el.scrollWidth <= el.clientWidth + 1) return;
+      if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
+        event.preventDefault();
+        el.scrollLeft += event.deltaY;
+      }
+    };
+    const onScroll = (): void => {
+      updateStripScroll();
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('scroll', onScroll, { passive: true });
+    updateStripScroll();
+    const observer =
+      typeof ResizeObserver === 'undefined'
+        ? null
+        : new ResizeObserver(() => {
+            updateStripScroll();
+          });
+    observer?.observe(el);
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('scroll', onScroll);
+      observer?.disconnect();
+    };
+  }, [updateStripScroll, themes.length, activeThemes.length]);
+
+  const nudgeStrip = useCallback((direction: -1 | 1): void => {
+    const el = themeStripRef.current;
+    if (el === null) return;
+    const step = Math.max(180, Math.round(el.clientWidth * 0.65));
+    el.scrollBy({ left: direction * step, behavior: 'smooth' });
+  }, []);
+
+  const stripFadeClass =
+    stripScroll.left && stripScroll.right
+      ? 'gen-theme-strip is-fade-both'
+      : stripScroll.left
+        ? 'gen-theme-strip is-fade-left'
+        : stripScroll.right
+          ? 'gen-theme-strip is-fade-right'
+          : 'gen-theme-strip';
   const composedPrompt = composePromptWithThemes(form.prompt, activeThemes);
   const appendDelta = themeAppendCharDelta(form.prompt, activeThemes);
   const overLimit = composedPrompt.length > PROMPT_MAX_LENGTH;
@@ -447,7 +524,19 @@ export function PromptComposer({
           )}
         </button>
 
-        <div className="gen-theme-strip" role="group" aria-label="Prompt theme tags">
+        {stripScroll.left ? (
+          <button
+            type="button"
+            className="gen-theme-nav"
+            aria-label="Scroll themes left"
+            title="Scroll themes left"
+            onClick={() => nudgeStrip(-1)}
+          >
+            <ChevronLeftIcon />
+          </button>
+        ) : null}
+
+        <div ref={themeStripRef} className={stripFadeClass} role="group" aria-label="Prompt theme tags">
           {activeThemes.map((theme) => (
             <button
               key={theme.id}
@@ -479,8 +568,20 @@ export function PromptComposer({
           ))}
         </div>
 
-        <div className="gen-theme-bar-actions">
-          {activeThemes.length === 0 ? null : (
+        {stripScroll.right ? (
+          <button
+            type="button"
+            className="gen-theme-nav"
+            aria-label="Scroll themes right"
+            title="Scroll themes right"
+            onClick={() => nudgeStrip(1)}
+          >
+            <ChevronRightIcon />
+          </button>
+        ) : null}
+
+        {activeThemes.length === 0 ? null : (
+          <div className="gen-theme-bar-actions">
             <button
               type="button"
               className="gen-theme-clear"
@@ -489,20 +590,8 @@ export function PromptComposer({
             >
               Clear
             </button>
-          )}
-          <button
-            type="button"
-            className="gen-theme-more"
-            aria-expanded={themesOpen}
-            aria-haspopup="dialog"
-            title="Pick and manage prompt themes"
-            onClick={() => {
-              setThemesOpen(true);
-            }}
-          >
-            All
-          </button>
-        </div>
+          </div>
+        )}
       </div>
 
       <div className="gen-composer-head">
