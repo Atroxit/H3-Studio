@@ -1,22 +1,46 @@
-**/node_modules/
-**/.next/
-**/dist/
-**/target/
-**/artifacts/
-**/test-results/
-**/playwright-report/
-**/coverage/
-**/.env
-**/.env.local
-**/*.tsbuildinfo
-*.log
+# H3 Studio
 
-# Local studio state and build output
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+
+# Local studio state. The real library lives in ~/.h3-studio; these cover an in-repo one.
 .h3data/
-*.log
+.h3-studio/
+
+# Desktop shell artefacts
 .desktop-profile/
-.desktop-out.log
-.desktop-err.log
-.desktop-launch.log
+.desktop-*.log
+
+# Model weights. One H3 file is 12 to 25 GB, and none of them belong in git.
+*.safetensors
+*.sft
+*.ckpt
+*.pt
+*.pth
+*.gguf
+
+# Logs, caches and temporary files
+*.log
+*.tmp
+*.tsbuildinfo
+
+# Environment and secrets
+.env
+.env.*
+
+# Test and tool output
+coverage/
+test-results/
+playwright-report/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
+
+# Internal project-os workspace: local tool paths and session notes, not for the repo
+project-os/

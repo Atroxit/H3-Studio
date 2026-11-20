@@ -3,7 +3,26 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local image generation studio, model agnostic",
+  "description": "Local desktop studio for MiniMax H3 Image: live diffusion previews, vision-aware prompt enhancement, and hardware-aware auto-tuning.",
+  "homepage": "https://github.com/Atroxit/H3-Studio#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Atroxit/H3-Studio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Atroxit/H3-Studio/issues"
+  },
+  "keywords": [
+    "minimax-h3",
+    "comfyui",
+    "image-generation",
+    "electron",
+    "react",
+    "typescript",
+    "rocm",
+    "cuda",
+    "local-first"
+  ],
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
@@ -16,6 +35,7 @@
     "start": "tsx src/server/index.ts",
     "desktop:build": "npm run build && esbuild src/server/index.ts --bundle --platform=node --format=cjs --outfile=dist/server/main.cjs",
     "desktop": "npm run desktop:build && node scripts/desktop.mjs",
+    "desktop:shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop-shortcut.ps1",
     "verify": "npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
