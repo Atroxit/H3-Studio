@@ -1147,6 +1147,105 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 100%;
+}
+
+/* The live VRAM budget: pinned to the rail's foot, riding above the scrolling controls. */
+.gen-vram {
+  position: sticky;
+  bottom: calc(var(--space-4) * -1);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: auto calc(var(--space-4) * -1) calc(var(--space-4) * -1);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line-soft);
+  background: var(--panel);
+  box-shadow: 0 -8px 16px rgba(10, 10, 12, 0.35);
+}
+
+.gen-vram-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.gen-vram-label {
+  font-family: var(--font-ui);
+  font-size: var(--text-micro);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.gen-vram-value {
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.gen-vram-track {
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--panel-sunken);
+  overflow: hidden;
+}
+
+.gen-vram-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  transition: width 180ms ease, background 180ms ease;
+}
+
+.gen-vram-fill.is-ok {
+  background: var(--ok);
+}
+
+.gen-vram-fill.is-tight {
+  background: var(--warn);
+}
+
+.gen-vram-fill.is-offload,
+.gen-vram-fill.is-oom {
+  background: var(--danger);
+}
+
+.gen-vram-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--text-micro);
+  line-height: 1.4;
+}
+
+.gen-vram-peak {
+  color: var(--text-faint);
+}
+
+.gen-vram-status {
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.gen-vram-status.is-ok {
+  color: var(--ok);
+}
+
+.gen-vram-status.is-tight {
+  color: var(--warn);
+}
+
+.gen-vram-status.is-offload,
+.gen-vram-status.is-oom {
+  color: var(--danger);
+  font-weight: 600;
 }
 
 .gen-section {
@@ -1162,8 +1261,8 @@
   padding-top: 0;
 }
 
-.gen-section:last-child {
-  padding-bottom: 0;
+.gen-section:last-of-type {
+  padding-bottom: var(--space-3);
   border-bottom: 0;
 }
 

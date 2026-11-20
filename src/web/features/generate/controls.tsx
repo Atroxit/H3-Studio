@@ -2,12 +2,31 @@
 // a control the provider does not support becomes one quiet line of explanation,
 // never a disabled field with no reason.
 
-import { useId, useState, type ChangeEvent, type ReactNode } from 'react';
-import { uploadReference } from '../../api';
+import { useEffect, useId, useState, type ChangeEvent, type ReactNode } from 'react';
+import { getSystemProfile, uploadReference } from '../../api';
 import { Button, Field, Slider, Spinner } from '../../components';
 import type { ProviderCapabilities, SizePreset } from '../../../core/types';
 import { ratioOf, seedProblem, sizeProblem } from './helpers';
 import { MAX_STEPS, MIN_STEPS, type GenerationController } from './useGeneration';
+import { estimateVram, formatVramGb } from './vram';
+
+interface HardwareSummary {
+  gpuVramGb: number | null;
+  systemRamGb: number | null;
+}
+
+/**
+ * One hardware read per session: the inspector mounts on every tab switch, but the GPU does
+ * not change. A failed or missing profile stays silent so the bar falls back to its estimate.
+ */
+let hardwarePromise: Promise<HardwareSummary> | null = null;
+
+function loadHardware(): Promise<HardwareSummary> {
+  hardwarePromise ??= getSystemProfile()
+    .then((profile) => ({ gpuVramGb: profile.gpu.vramGb, systemRamGb: profile.ramTotalGb }))
+    .catch((): HardwareSummary => ({ gpuVramGb: null, systemRamGb: null }));
+  return hardwarePromise;
+}
 
 export interface GenerationControlsProps {
   controller: GenerationController;
@@ -25,7 +44,7 @@ interface ChipOption {
   detail?: string;
 }
 
-/** The prompt enhancer choices, cheapest first, with the recommendation stated once below. */
+/** The prompt enhancer choices, cheapest first; each chip explains itself. */
 const PROMPT_ENHANCER_OPTIONS: readonly ChipOption[] = [
   { value: 'off', label: 'Off', detail: 'Use your exact prompt as written' },
   { value: 'qwen3.5_9b', label: 'Fast (Qwen3.5 9B)', detail: 'Quick art-direction expansion (+15-20s)' },
@@ -217,6 +236,17 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const [advancedOpen, setAdvancedOpen] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [referenceError, setReferenceError] = useState<string | null>(null);
+  const [hardware, setHardware] = useState<HardwareSummary | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void loadHardware().then((summary) => {
+      if (active) setHardware(summary);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   if (providerLabel === null) {
     return <QuietLine text="No provider is enabled yet. Connect one to see its controls." />;
@@ -245,6 +275,17 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const sizeIssue = sizeProblem(form.width, form.height);
   const sizeInvalid = sizeIssue !== null;
   const seedIssue = seedProblem(form.seed);
+
+  const vram = estimateVram({
+    width: form.width,
+    height: form.height,
+    modelVariant: form.modelVariant,
+    textEncoderVariant: form.textEncoderVariant,
+    promptEnhancer: form.promptEnhancer,
+    referenceCount: form.references.length,
+    gpuVramGb: hardware === null ? null : hardware.gpuVramGb,
+    systemRamGb: hardware === null ? null : hardware.systemRamGb,
+  });
 
   const aspectOptions: ChipOption[] = groups.map((group) => ({ value: group.ratio, label: group.ratio }));
   const sizeOptions: ChipOption[] = visiblePresets.map((preset) => ({
@@ -605,6 +646,34 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
           <QuietLine text={referenceNote ?? 'This provider does not accept reference images.'} />
         )}
       </section>
+
+      <div className="gen-vram" title={vram.breakdownTitle}>
+        <div className="gen-vram-head">
+          <span className="gen-vram-label">Est. VRAM</span>
+          <span className="gen-vram-value">
+            {vram.gpuVramGb === null
+              ? `~${vram.peakGb.toFixed(1)} GB`
+              : `~${vram.peakGb.toFixed(1)} / ${formatVramGb(vram.gpuVramGb)} GB`}
+          </span>
+        </div>
+        <div
+          className="gen-vram-track"
+          role="meter"
+          aria-label="Estimated peak VRAM"
+          aria-valuemin={0}
+          aria-valuemax={vram.gpuVramGb ?? 24}
+          aria-valuenow={vram.peakGb}
+        >
+          <span
+            className={`gen-vram-fill is-${vram.status}`}
+            style={{ width: `${vram.fillPercent}%` }}
+          />
+        </div>
+        <div className="gen-vram-foot">
+          <span className="gen-vram-peak">Peak: {vram.peakStage.label}</span>
+          <span className={`gen-vram-status is-${vram.status}`}>{vram.statusLabel}</span>
+        </div>
+      </div>
     </div>
   );
 }
