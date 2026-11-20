@@ -7,7 +7,8 @@ import type { BatchRecord, BatchStatus } from '../../../core/types';
 import { imageUrl } from '../../api';
 import { useStudio } from '../../App';
 import { Button, Dialog, EmptyState, SegmentedControl, Spinner } from '../../components';
-import { PresetsPanel } from './presets';
+import { batchDurationMs, formatDuration } from '../generate/helpers';
+import { clearIfShowingBatch } from '../generate/useGeneration';
 import {
   formatCount,
   formatShortTimestamp,
@@ -32,6 +33,14 @@ function ImageIcon(): ReactNode {
       <rect x="3.5" y="5" width="17" height="14" rx="2" />
       <circle cx="8.5" cy="10" r="1.4" />
       <path d="M4.5 17.5l5-5 4 4 2.5-2.5 3.5 3.5" />
+    </svg>
+  );
+}
+
+function TrashIcon(): ReactNode {
+  return (
+    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M5 7.5h14M9.5 7.5V5.5h5v2M7 7.5l.8 11h8.4l.8-11M10.5 10.5v5M13.5 10.5v5" />
     </svg>
   );
 }
@@ -162,15 +171,14 @@ function BatchSection({
                     height={image.height}
                   />
                 </button>
-                <input
-                  type="checkbox"
-                  className="lb-tile-select"
-                  checked={selected}
+                <button
+                  type="button"
+                  role="checkbox"
+                  aria-checked={selected}
+                  className={selected ? 'lb-tile-select is-checked' : 'lb-tile-select'}
                   aria-label={`Select image ${position + 1} of ${images.length}`}
-                  onChange={() => undefined}
                   onClick={(event) => {
-                    // Shift click extends the selection, so the handler owns the toggle.
-                    event.preventDefault();
+                    event.stopPropagation();
                     onToggleImage(batch, image.index, event.shiftKey);
                   }}
                 />
@@ -484,8 +492,6 @@ export function LibraryCanvas(): ReactNode {
             </Button>
           </div>
         ) : null}
-
-        <PresetsPanel />
       </div>
 
       <Dialog
@@ -535,6 +541,18 @@ export function LibraryRail(): ReactNode {
   const library = useLibrary();
   const recent = library.batches.slice(0, RAIL_LIMIT);
 
+  const handleDelete = async (batch: BatchRecord): Promise<void> => {
+    const notice = await library.deleteBatch(batch.id);
+    if (notice.tone === 'success') {
+      // A deleted batch must not stay on the Generate canvas, and the totals refresh
+      // inside the library controller so the rail updates at the same time.
+      clearIfShowingBatch(batch.id);
+      studio.notify('Deleted batch');
+    } else {
+      studio.notify(notice.message, 'error');
+    }
+  };
+
   if (recent.length === 0) {
     if (library.phase === 'idle' || library.phase === 'loading') {
       return <p className="lb-rail-note">Reading the library.</p>;
@@ -550,8 +568,10 @@ export function LibraryRail(): ReactNode {
       {recent.map((batch) => {
         const cover = orderedImages(batch)[0];
         const active = library.activeBatchId === batch.id;
+        const deleting = library.deletingBatchId === batch.id;
+        const duration = formatDuration(batchDurationMs(batch));
         return (
-          <li key={batch.id}>
+          <li key={batch.id} className="lb-rail-item">
             <button
               type="button"
               className={active ? 'lb-rail-row is-active' : 'lb-rail-row'}
@@ -573,9 +593,25 @@ export function LibraryRail(): ReactNode {
                 <span className="lb-rail-name">{batch.prompt}</span>
                 <span className="lb-rail-meta">
                   {formatCount(batch.images.length, 'image', 'images')} · {batch.width} x {batch.height} ·{' '}
+                  {duration === null ? null : `${duration} · `}
                   {formatShortTimestamp(batch.createdAt)}
                 </span>
               </span>
+            </button>
+            <button
+              type="button"
+              className="lb-rail-delete"
+              aria-label="Delete batch"
+              title="Delete"
+              disabled={library.deletingBatchId !== null}
+              aria-busy={deleting}
+              onClick={(event) => {
+                // The row behind this icon opens the batch, so never let the click through.
+                event.stopPropagation();
+                void handleDelete(batch);
+              }}
+            >
+              <TrashIcon />
             </button>
           </li>
         );

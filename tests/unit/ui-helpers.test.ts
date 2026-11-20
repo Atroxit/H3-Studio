@@ -1,8 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { BatchRecord, StoredImage } from '../../src/core/types';
 import {
+  batchDurationMs,
   formatClock,
+  formatDuration,
   formatEta,
   formatSecondsPerStep,
+  imageDurationMs,
   pipelineStages,
   previewBlurPx,
   promptProblem,
@@ -16,14 +20,29 @@ import {
   uniqueNotes,
 } from '../../src/web/features/generate/helpers';
 import {
+  applyItemEvent,
   applyPreviewEvent,
   applyProgressEvent,
+  batchFromRecord,
+  clearIfShowingBatch,
+  createTiles,
+  mergeBatchRecord,
+  openStoredBatch,
   readCurrentFormSnapshot,
+  readGenerationBatch,
   readPromptEnhancerPreference,
   resolveAlterationTarget,
+  startNewImage,
   type GenerationBatch,
   type GenerationTile,
 } from '../../src/web/features/generate/useGeneration';
+
+// The stored batch fetch is the only thing openStoredBatch needs from the network.
+vi.mock('../../src/web/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/web/api')>();
+  return { ...actual, getBatch: vi.fn() };
+});
+import { getBatch } from '../../src/web/api';
 import {
   computeZoomScroll,
   computeZoomedDimensions,
@@ -254,6 +273,7 @@ function batchOf(tiles: GenerationTile[]): GenerationBatch {
     streamError: null,
     startedAt: 0,
     finishedAt: 1,
+    durationMs: null,
     seed: 7,
   };
 }
@@ -386,6 +406,110 @@ describe('composer snapshot and enhancer preference', () => {
 
   it('starts on the fast 9B enhancer without a stored preference', () => {
     expect(readPromptEnhancerPreference()).toBe('qwen3.5_9b');
+  });
+});
+
+function storedImage(overrides: Partial<StoredImage> = {}): StoredImage {
+  return {
+    id: 'img_one',
+    batchId: 'batch_old',
+    index: 0,
+    filename: 'img_one.png',
+    bytes: 1_234,
+    sha256: 'a'.repeat(64),
+    width: 512,
+    height: 512,
+    providerId: 'comfy-h3',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function storedBatch(overrides: Partial<BatchRecord> = {}): BatchRecord {
+  return {
+    id: 'batch_old',
+    providerId: 'comfy-h3',
+    prompt: 'a brass lighthouse',
+    width: 512,
+    height: 512,
+    requested: 1,
+    status: 'complete',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    finishedAt: '2026-01-01T00:01:14.000Z',
+    seed: 7,
+    images: [storedImage()],
+    failures: [],
+    ...overrides,
+  };
+}
+
+describe('duration formatting and fallbacks', () => {
+  it('formats finished durations for a person', () => {
+    expect(formatDuration(0)).toBe('<1s');
+    expect(formatDuration(750)).toBe('<1s');
+    expect(formatDuration(-500)).toBe('<1s');
+    expect(formatDuration(2_300)).toBe('2.3s');
+    expect(formatDuration(14_000)).toBe('14s');
+    expect(formatDuration(59_400)).toBe('59s');
+    expect(formatDuration(65_000)).toBe('1m 05s');
+    expect(formatDuration(750_000)).toBe('12m 30s');
+    expect(formatDuration(null)).toBeNull();
+    expect(formatDuration(undefined)).toBeNull();
+    expect(formatDuration(Number.NaN)).toBeNull();
+  });
+
+  it('uses a stored batch duration and falls back to its timestamps', () => {
+    expect(batchDurationMs(storedBatch({ durationMs: 4_200 }))).toBe(4_200);
+    expect(batchDurationMs(storedBatch())).toBe(74_000);
+    expect(batchDurationMs(storedBatch({ finishedAt: undefined }))).toBeNull();
+    expect(batchDurationMs(storedBatch({ durationMs: Number.NaN }))).toBe(74_000);
+  });
+
+  it('counts the whole wall clock for a single image batch', () => {
+    expect(imageDurationMs(storedImage({ durationMs: 30_000 }), storedBatch())).toBe(74_000);
+    expect(imageDurationMs(storedImage({ durationMs: 90_000 }), storedBatch())).toBe(90_000);
+    expect(imageDurationMs(storedImage(), storedBatch())).toBe(74_000);
+  });
+
+  it('keeps a per image duration in a multi image batch', () => {
+    const batch = storedBatch({
+      requested: 2,
+      images: [storedImage({ durationMs: 30_000 }), storedImage({ id: 'img_two', index: 1, durationMs: 40_000 })],
+    });
+    expect(imageDurationMs(storedImage({ durationMs: 30_000 }), batch)).toBe(30_000);
+    expect(imageDurationMs(storedImage({ id: 'img_three', index: 2 }), batch)).toBeNull();
+  });
+
+  it('carries the duration into tiles from an item event and a stored record', () => {
+    const live = applyItemEvent([waitingTile(0)], {
+      type: 'item',
+      index: 0,
+      item: { index: 0, ok: true, width: 512, height: 512, durationMs: 4_200 },
+    });
+    expect(live[0]?.durationMs).toBe(4_200);
+
+    const merged = mergeBatchRecord(createTiles(1), storedBatch({ durationMs: 74_000, images: [storedImage({ durationMs: 30_000 })] }));
+    expect(merged[0]?.durationMs).toBe(74_000);
+
+    const oldRecord = storedBatch({ images: [storedImage()] });
+    expect(oldRecord.durationMs).toBeUndefined();
+    expect(mergeBatchRecord(createTiles(1), oldRecord)[0]?.durationMs).toBe(74_000);
+  });
+
+  it('fills the batch and tile durations when a stored batch is opened', async () => {
+    const record = storedBatch({ images: [storedImage({ durationMs: 30_000 })] });
+    expect(batchFromRecord(record).durationMs).toBe(74_000);
+
+    vi.mocked(getBatch).mockResolvedValueOnce(record);
+    await openStoredBatch(record.id);
+    const opened = readGenerationBatch();
+    expect(opened?.batchId).toBe(record.id);
+    expect(opened?.durationMs).toBe(74_000);
+    expect(opened?.tiles[0]?.durationMs).toBe(74_000);
+
+    clearIfShowingBatch(record.id);
+    expect(readGenerationBatch()).toBeNull();
+    startNewImage();
   });
 });
 

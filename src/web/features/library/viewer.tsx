@@ -16,6 +16,7 @@ import type { BatchRecord } from '../../../core/types';
 import { imageUrl } from '../../api';
 import { Button } from '../../components';
 import { useStudio } from '../../studio';
+import { formatDuration, imageDurationMs } from '../generate/helpers';
 import { formatBytes, formatCount, formatTimestamp, orderedImages } from './useLibrary';
 
 const FOCUSABLE_SELECTOR =
@@ -202,6 +203,8 @@ export function ImageViewer({
   const safePosition = images.length === 0 ? 0 : Math.min(position, images.length - 1);
   const image = images[safePosition];
   const sourceImageId = batch.sourceImageId ?? null;
+  const generationDuration =
+    image === undefined ? null : formatDuration(imageDurationMs(image, batch));
 
   // A different image always opens showing the alteration, never the hold to compare view.
   useEffect(() => {
@@ -747,6 +750,12 @@ export function ImageViewer({
                   {image.width} x {image.height}
                 </dd>
               </div>
+              {generationDuration === null ? null : (
+                <div className="lb-viewer-row">
+                  <dt>Generation time</dt>
+                  <dd className="lb-viewer-mono">{generationDuration}</dd>
+                </div>
+              )}
               <div className="lb-viewer-row">
                 <dt>Created</dt>
                 <dd>{formatTimestamp(image.createdAt)}</dd>

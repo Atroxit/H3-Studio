@@ -17,7 +17,6 @@ import {
 import type { Preset, ProviderCapabilities, ProviderConfig, ProviderKind } from '../core/types';
 import {
   checkProviderHealth,
-  createPreset,
   createProvider,
   getProviderStatus,
   getStats,
@@ -36,7 +35,6 @@ import {
   adoptPromptSettings,
   applyPresetToForm,
   openStoredBatch,
-  readCurrentFormSnapshot,
   startNewImage,
 } from './features/generate/useGeneration';
 import {
@@ -428,9 +426,6 @@ export function App({ slots = {} }: AppProps): ReactNode {
   const [view, setView] = useState<StudioView>(readViewFromLocation);
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [setupOpen, setSetupOpen] = useState(false);
-  const [quickSaveOpen, setQuickSaveOpen] = useState(false);
-  const [quickSaveName, setQuickSaveName] = useState('');
-  const [quickSaving, setQuickSaving] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [railWidth, setRailWidth] = useState<number>(() =>
     readStoredWidth(RAIL_WIDTH_STORAGE_KEY, RAIL_WIDTH_DEFAULT, RAIL_WIDTH_MIN, RAIL_WIDTH_MAX),
@@ -513,7 +508,7 @@ export function App({ slots = {} }: AppProps): ReactNode {
     if (mode === 'initial') setPhase('loading');
     try {
       const [nextProviders, nextStats] = await Promise.all([listProviders(), getStats()]);
-      // The presets strip is secondary: a failure there must not blank the studio.
+      // Presets stay on the context for the API, but a failed read must not blank the studio.
       const nextPresets = await listPresets().catch((): Preset[] => []);
       setProviders(nextProviders);
       setStats(nextStats);
@@ -658,25 +653,6 @@ export function App({ slots = {} }: AppProps): ReactNode {
     },
     [enabledProviders, provider, selectView],
   );
-
-  /** Saves the current Generate composer as a preset, straight from the left rail. */
-  const saveQuickPreset = useCallback(async (): Promise<void> => {
-    const name = quickSaveName.trim();
-    if (name.length === 0 || quickSaving) return;
-    setQuickSaving(true);
-    try {
-      const snapshot = readCurrentFormSnapshot();
-      const saved = await createPreset({ name, ...snapshot });
-      await refresh();
-      setQuickSaveOpen(false);
-      setQuickSaveName('');
-      notify(`Saved preset "${saved.name}"`);
-    } catch (error) {
-      notify(describeError(error), 'error');
-    } finally {
-      setQuickSaving(false);
-    }
-  }, [quickSaveName, quickSaving, refresh, notify]);
 
   const contextValue = useMemo<StudioContextValue>(
     () => ({
@@ -837,7 +813,7 @@ export function App({ slots = {} }: AppProps): ReactNode {
             }
             style={{ '--rail-width': `${railWidth}px`, '--inspector-width': `${inspectorWidth}px` } as CSSProperties}
           >
-            <aside className="rail" aria-label="Library summary and presets">
+            <aside className="rail" aria-label="Library history">
               <Button variant="primary" className="rail-new-btn" onClick={newImage}>
                 <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                   <path d="M12 5.5v13M5.5 12h13" />
@@ -845,7 +821,7 @@ export function App({ slots = {} }: AppProps): ReactNode {
                 New image
               </Button>
 
-              <section className="rail-section">
+              <section className="rail-section is-history">
                 <div className="rail-head">
                   <h2 className="section-label">Library</h2>
                 </div>
@@ -864,87 +840,6 @@ export function App({ slots = {} }: AppProps): ReactNode {
                   </div>
                 </dl>
                 {slots.rail === undefined ? null : <div className="rail-slot">{slots.rail}</div>}
-              </section>
-
-              <section className="rail-section">
-                <div className="rail-head">
-                  <h2 className="section-label">Presets</h2>
-                  <div className="rail-head-actions">
-                    <span className="rail-count">{presets.length}</span>
-                    <button
-                      type="button"
-                      className="rail-quick-save"
-                      aria-expanded={quickSaveOpen}
-                      title="Save the current composer as a preset"
-                      onClick={() => {
-                        setQuickSaveOpen(!quickSaveOpen);
-                        setQuickSaveName('');
-                      }}
-                    >
-                      + Save
-                    </button>
-                  </div>
-                </div>
-                {quickSaveOpen ? (
-                  <form
-                    className="rail-quick-form"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      void saveQuickPreset();
-                    }}
-                  >
-                    <input
-                      type="text"
-                      className="rail-quick-input"
-                      value={quickSaveName}
-                      placeholder="Preset name..."
-                      maxLength={120}
-                      aria-label="Preset name"
-                      autoFocus
-                      onChange={(event) => {
-                        setQuickSaveName(event.target.value);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key !== 'Escape') return;
-                        event.preventDefault();
-                        setQuickSaveOpen(false);
-                        setQuickSaveName('');
-                      }}
-                    />
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      type="submit"
-                      busy={quickSaving}
-                      disabled={quickSaveName.trim().length === 0}
-                    >
-                      Save
-                    </Button>
-                  </form>
-                ) : null}
-                {presets.length === 0 ? (
-                  <p className="rail-empty">No presets saved yet.</p>
-                ) : (
-                  <ul className="preset-strip">
-                    {presets.map((preset) => (
-                      <li key={preset.id}>
-                        <button
-                          type="button"
-                          className="preset-chip"
-                          title={`Apply ${preset.name}`}
-                          onClick={() => {
-                            applyPreset(preset);
-                          }}
-                        >
-                          <span className="preset-chip-name">{preset.name}</span>
-                          <span className="preset-chip-meta">
-                            {preset.width} x {preset.height} / {preset.count}
-                          </span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
               </section>
             </aside>
 

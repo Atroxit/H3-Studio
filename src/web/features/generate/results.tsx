@@ -12,6 +12,7 @@ import { Button, Spinner } from '../../components';
 import { useStudio } from '../../studio';
 import {
   formatClock,
+  formatDuration,
   formatEta,
   formatSecondsPerStep,
   pipelineStages,
@@ -578,6 +579,7 @@ export function ResultsGrid({
   const showPartial = summary !== null && summary.failed > 0;
   const canRetry = !running && batch.batchId !== null;
   const statusLabel = batchStatusLabel(batch, running);
+  const batchDuration = formatDuration(batch.durationMs);
   const providerLabel =
     studio.providers.find((provider) => provider.id === batch.providerId)?.label ?? batch.providerId;
 
@@ -602,6 +604,7 @@ export function ResultsGrid({
             {providerLabel} / {batch.width} x {batch.height} /{' '}
             {batch.requested === 1 ? '1 image' : `${batch.requested} images`}
             {batch.seed === null ? null : ` / seed ${batch.seed}`}
+            {batchDuration === null ? null : ` / ${batchDuration}`}
           </p>
         </div>
         <div className="gen-results-actions">
@@ -674,6 +677,9 @@ export function ResultsGrid({
       >
         {batch.tiles.map((tile) => {
           const clock = tickClocks.get(tile.index);
+          // A stored duration is the honest one for a finished image: it survives a reopen,
+          // while the live clock below only exists for the run this page started.
+          const storedDuration = tile.phase === 'done' ? formatDuration(tile.durationMs) : null;
           return (
           <ResultTile
             key={tile.index}
@@ -681,7 +687,7 @@ export function ResultsGrid({
             total={batch.tiles.length}
             width={batch.width}
             height={batch.height}
-            elapsed={elapsedLabel(clock, now)}
+            elapsed={storedDuration ?? elapsedLabel(clock, now)}
             elapsedMs={clock === undefined ? null : (clock.settledAt ?? now) - clock.startedAt}
             settled={!running}
             canRetry={canRetry}

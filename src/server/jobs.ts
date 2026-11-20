@@ -229,7 +229,10 @@ export class GenerationHub {
     const { item } = event;
     const bytes = item.ok ? item.bytes : undefined;
     if (bytes !== undefined) {
-      await this.store.saveImage(state.batchId, event.index, bytes, { providerId: state.providerId });
+      await this.store.saveImage(state.batchId, event.index, bytes, {
+        providerId: state.providerId,
+        durationMs: item.durationMs,
+      });
       state.images += 1;
       this.publish(state, { type: 'item', index: event.index, item: wireItem(item) });
       return;

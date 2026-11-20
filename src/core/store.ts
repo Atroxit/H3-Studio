@@ -98,7 +98,8 @@ function isStoredImage(value: unknown): value is StoredImage {
     typeof value.width === 'number' &&
     typeof value.height === 'number' &&
     typeof value.providerId === 'string' &&
-    typeof value.createdAt === 'string'
+    typeof value.createdAt === 'string' &&
+    (value.durationMs === undefined || typeof value.durationMs === 'number')
   );
 }
 
@@ -442,12 +443,16 @@ export class LibraryStore {
     batchId: string,
     index: number,
     bytes: Uint8Array,
-    meta: { providerId: string },
+    meta: { providerId: string; durationMs?: number },
   ): Promise<StoredImage> {
     const sha256 = createHash('sha256').update(bytes).digest('hex');
     const { width, height } = readPngSize(bytes);
     const id = createId('img');
     const filename = `${id}.png`;
+    const durationMs =
+      meta.durationMs === undefined || !Number.isFinite(meta.durationMs)
+        ? undefined
+        : Math.max(0, Math.round(meta.durationMs));
     const image: StoredImage = {
       id,
       batchId,
@@ -459,6 +464,7 @@ export class LibraryStore {
       height,
       providerId: meta.providerId,
       createdAt: new Date().toISOString(),
+      ...(durationMs === undefined ? {} : { durationMs }),
     };
     return this.transact(async (current) => {
       findBatch(current, batchId);

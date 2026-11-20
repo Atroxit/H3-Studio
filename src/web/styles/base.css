@@ -329,6 +329,12 @@ button {
   gap: var(--space-2);
 }
 
+/* History is the rail's whole job now, so its section takes the remaining height. */
+.rail-section.is-history {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .rail-head {
   display: flex;
   align-items: baseline;
@@ -336,76 +342,13 @@ button {
   gap: var(--space-2);
 }
 
-.rail-count {
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-  color: var(--text-faint);
-}
-
-.rail-head-actions {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
-/* The rail's one click preset save. Ghost styling keeps it quiet beside the count. */
-.rail-quick-save {
-  padding: 0;
-  border: none;
-  background: none;
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-  color: var(--text-muted);
-  white-space: nowrap;
-  cursor: pointer;
-  transition: color 120ms ease;
-}
-
-.rail-quick-save:hover,
-.rail-quick-save[aria-expanded='true'] {
-  color: var(--accent);
-}
-
-.rail-quick-save:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-  border-radius: var(--radius-control);
-}
-
-/* A narrow rail must never grow a horizontal scrollbar, so the input can shrink. */
-.rail-quick-form {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  min-width: 0;
-}
-
-.rail-quick-input {
-  flex: 1 1 auto;
-  min-width: 0;
-  padding: var(--space-1) var(--space-2);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-control);
-  background: var(--panel-sunken);
-  color: var(--text);
-  font-size: var(--text-sm);
-}
-
-.rail-quick-input::placeholder {
-  color: var(--text-faint);
-}
-
-.rail-quick-input:focus-visible {
-  outline: none;
-  border-color: var(--accent-line);
-}
-
 .rail-slot {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: var(--space-2);
   min-height: 0;
+  overflow-y: auto;
 }
 
 .rail-empty {
@@ -436,51 +379,6 @@ button {
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   color: var(--text);
-}
-
-.preset-strip {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
-
-.preset-chip {
-  display: flex;
-  width: 100%;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-control);
-  background: var(--panel-sunken);
-  text-align: left;
-  transition: border-color 140ms ease, background 140ms ease;
-}
-
-.preset-chip:hover {
-  border-color: var(--accent-line);
-  background: var(--panel-raised);
-}
-
-.preset-chip:active {
-  background: var(--panel);
-}
-
-.preset-chip-name {
-  min-width: 0;
-  overflow: hidden;
-  font-size: var(--text-sm);
-  color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.preset-chip-meta {
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-  color: var(--text-muted);
-  white-space: nowrap;
 }
 
 /* Centre column */

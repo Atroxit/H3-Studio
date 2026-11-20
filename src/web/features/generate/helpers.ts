@@ -1,6 +1,8 @@
 // Pure helpers for the generate surface. Nothing here touches React or the DOM,
 // so the unit suite can import this module directly under Node.
 
+import type { BatchRecord, StoredImage } from '../../../core/types';
+
 /** The largest prompt the server accepts, mirrored here so the UI can block it early. */
 export const PROMPT_MAX_LENGTH = 4000;
 /** The size range the server accepts. */
@@ -148,6 +150,60 @@ function parseGraph(templateJson: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * A finished duration, worded the way a person reads a stopwatch: under a second is
+ * "<1s", under ten seconds keeps one decimal, under a minute is whole seconds, and
+ * anything longer is minutes and zero padded seconds. Null means there is nothing honest
+ * to show.
+ */
+export function formatDuration(ms: number | null | undefined): string | null {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return null;
+  const clamped = Math.max(0, ms);
+  if (clamped < 1000) return '<1s';
+  const seconds = clamped / 1000;
+  if (seconds < 10) return `${seconds.toFixed(1)}s`;
+  const total = Math.round(seconds);
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  return `${minutes}m ${String(rest).padStart(2, '0')}s`;
+}
+
+/**
+ * A stored batch's wall clock duration. New records carry it outright; an older record
+ * is measured from its timestamps, so history saved before this field existed still
+ * shows a real number instead of nothing.
+ */
+export function batchDurationMs(batch: BatchRecord): number | null {
+  if (typeof batch.durationMs === 'number' && Number.isFinite(batch.durationMs) && batch.durationMs >= 0) {
+    return batch.durationMs;
+  }
+  if (batch.finishedAt === undefined) return null;
+  const created = Date.parse(batch.createdAt);
+  const finished = Date.parse(batch.finishedAt);
+  if (!Number.isFinite(created) || !Number.isFinite(finished)) return null;
+  return Math.max(0, finished - created);
+}
+
+/**
+ * One image's generation time. A single image run took the whole batch's wall clock, so
+ * the larger of the two is the honest number: prompt enhancement and fetch time happen
+ * before the provider reports the item, and the tile should still count them.
+ */
+export function imageDurationMs(image: StoredImage, batch: BatchRecord): number | null {
+  const own =
+    typeof image.durationMs === 'number' && Number.isFinite(image.durationMs) && image.durationMs >= 0
+      ? image.durationMs
+      : null;
+  const batchMs = batchDurationMs(batch);
+  if (batch.requested === 1 || batch.images.length === 1) {
+    if (own === null) return batchMs;
+    if (batchMs === null) return own;
+    return Math.max(own, batchMs);
+  }
+  return own;
 }
 
 /** The loading view clock: always m:ss, so the width never changes as it counts. */

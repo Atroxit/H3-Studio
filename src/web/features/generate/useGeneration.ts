@@ -30,7 +30,14 @@ import {
   type GenerationBody,
 } from '../../api';
 import { useStudio, type PromptSettings } from '../../studio';
-import { promptProblem, retryEventIndex, seedProblem, sizeProblem } from './helpers';
+import {
+  batchDurationMs,
+  imageDurationMs,
+  promptProblem,
+  retryEventIndex,
+  seedProblem,
+  sizeProblem,
+} from './helpers';
 
 export { retryEventIndex } from './helpers';
 
@@ -57,6 +64,8 @@ export interface GenerationTile {
   cached?: boolean;
   /** The newest live denoise frame, as a data URL. Cleared once the tile settles. */
   previewUrl?: string;
+  /** Wall clock time the provider spent on this image, persisted once it is stored. */
+  durationMs?: number;
   /** When sampling began, used for the elapsed sampling clock. */
   stepStartedAt?: number;
   /** When the last distinct step arrived, for the rolling step time. */
@@ -89,6 +98,8 @@ export interface GenerationBatch {
   streamError: string | null;
   startedAt: number;
   finishedAt: number | null;
+  /** The whole run's wall clock time, from the stored record or its timestamps. */
+  durationMs: number | null;
   /** The seed the batch used, when the provider reports one. */
   seed: number | null;
 }
@@ -291,6 +302,7 @@ export function applyItemEvent(tiles: readonly GenerationTile[], event: ItemEven
         failure: null,
         width: item.width ?? tile.width,
         height: item.height ?? tile.height,
+        ...(item.durationMs === undefined ? {} : { durationMs: item.durationMs }),
         previewUrl: undefined,
         detail: undefined,
         cached: undefined,
@@ -337,6 +349,7 @@ export function mergeBatchRecord(
     const base = previousByIndex.get(tile.index) ?? tile;
     const image = images.get(base.index);
     if (image !== undefined) {
+      const durationMs = imageDurationMs(image, record) ?? base.durationMs;
       return {
         ...base,
         phase: 'done',
@@ -346,6 +359,7 @@ export function mergeBatchRecord(
         imageId: image.id,
         width: image.width,
         height: image.height,
+        ...(durationMs === undefined ? {} : { durationMs }),
         previewUrl: undefined,
         detail: undefined,
         cached: undefined,
@@ -702,7 +716,7 @@ function cancelledTile(index: number): GenerationTile {
 }
 
 /** Builds the display batch for a stored record, including cancelled slots. */
-function batchFromRecord(record: BatchRecord): GenerationBatch {
+export function batchFromRecord(record: BatchRecord): GenerationBatch {
   const merged = mergeBatchRecord(createTiles(record.requested), record);
   const tiles: GenerationTile[] =
     record.status === 'cancelled'
@@ -726,6 +740,7 @@ function batchFromRecord(record: BatchRecord): GenerationBatch {
     streamError: null,
     startedAt: Number.isFinite(createdAt) ? createdAt : Date.now(),
     finishedAt: finishedAt !== null && Number.isFinite(finishedAt) ? finishedAt : null,
+    durationMs: batchDurationMs(record),
     seed: record.seed ?? null,
   };
 }
@@ -792,6 +807,21 @@ export function openStoredBatch(batchId: string, sourceImageId: string | null = 
 /** Opens a stored batch on the canvas with this image selected for alteration. */
 export function alterImage(batchId: string, imageId: string): void {
   void loadBatchById(batchId, imageId);
+}
+
+/**
+ * A deleted batch must not keep sitting on the Generate canvas. A live run is left alone,
+ * because it is not the stored batch that was deleted.
+ */
+export function clearIfShowingBatch(batchId: string): void {
+  if (state.running) return;
+  if (state.batch === null || state.batch.batchId !== batchId) return;
+  startNewImage();
+}
+
+/** The batch currently on the canvas, for tests and for one shot reads. */
+export function readGenerationBatch(): GenerationBatch | null {
+  return state.batch;
 }
 
 /** Clears the canvas back to a blank composer, ready for a brand new image. */
@@ -928,6 +958,7 @@ function applyRecord(record: BatchRecord, retried: readonly number[] | null): vo
         batchId: current.batch.batchId ?? record.id,
         status: record.status,
         revisedPrompt: record.revisedPrompt ?? current.batch.revisedPrompt,
+        durationMs: batchDurationMs(record) ?? current.batch.durationMs,
         seed: record.seed ?? current.batch.seed,
         tiles: mergeBatchRecord(current.batch.tiles, record, mapper),
       },
@@ -1056,6 +1087,7 @@ async function beginGeneration(onSettled: () => void): Promise<void> {
     streamError: null,
     startedAt: Date.now(),
     finishedAt: null,
+    durationMs: null,
     seed: body.seed ?? null,
   };
   // The selection belongs to the batch just left behind. Clearing it makes the finished
@@ -1129,6 +1161,7 @@ async function retryRun(indices: readonly number[], onSettled: () => void): Prom
         streamBatchId: null,
         startedAt: Date.now(),
         finishedAt: null,
+        durationMs: null,
       },
     };
   });

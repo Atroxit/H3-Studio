@@ -265,6 +265,7 @@
   place-items: center;
   width: 18px;
   height: 18px;
+  padding: 0;
   margin: 0;
   appearance: none;
   -webkit-appearance: none;
@@ -279,12 +280,14 @@
   border-color: var(--accent);
 }
 
-.lb-tile-select:checked {
+.lb-tile-select:checked,
+.lb-tile-select.is-checked {
   border-color: var(--accent);
   background: var(--accent);
 }
 
-.lb-tile-select:checked::after {
+.lb-tile-select:checked::after,
+.lb-tile-select.is-checked::after {
   content: '';
   width: 9px;
   height: 5px;
@@ -345,15 +348,76 @@
   gap: 2px;
 }
 
+.lb-rail-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
 .lb-rail-row {
   display: flex;
   align-items: center;
   gap: 9px;
   width: 100%;
-  padding: 5px 6px;
+  /* Reserved so the hover delete icon never sits on top of the meta line. */
+  padding: 5px 32px 5px 6px;
   border: 1px solid transparent;
   border-radius: 6px;
   text-align: left;
+}
+
+.lb-rail-delete {
+  position: absolute;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease, color 120ms ease, background 120ms ease;
+}
+
+.lb-rail-item:hover .lb-rail-delete,
+.lb-rail-item:focus-within .lb-rail-delete {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.lb-rail-delete:hover {
+  color: var(--danger, #e5484d);
+  background: var(--panel-sunken);
+}
+
+.lb-rail-delete:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.lb-rail-delete:disabled {
+  cursor: progress;
+  opacity: 0.5;
+}
+
+/* A touch rail has no hover, so the delete control is always reachable. */
+@media (hover: none) {
+  .lb-rail-delete {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.lb-rail-delete .icon {
+  width: 14px;
+  height: 14px;
 }
 
 .lb-rail-row:hover {

@@ -156,6 +156,8 @@ export interface StoredImage {
   height: number;
   providerId: string;
   createdAt: string;
+  /** Wall clock time the provider spent producing this image, when it reports one. */
+  durationMs?: number;
 }
 
 export interface BatchFailure {
