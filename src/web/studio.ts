@@ -3,6 +3,7 @@
 
 import { createContext, useContext } from 'react';
 import type {
+  AppliedPromptTheme,
   H3ModelVariant,
   H3PromptEnhancer,
   H3TextEncoderVariant,
@@ -16,6 +17,13 @@ export type StudioView = 'generate' | 'library';
 /** The values a batch or preset can hand to the Generate composer. */
 export interface PromptSettings {
   prompt: string;
+  /**
+   * The prompt before theme chunks were appended. When present it wins over `prompt`, so
+   * reusing a themed batch restores the words and re-applies the tags instead of doubling them.
+   */
+  basePrompt?: string;
+  /** The theme tags that batch ran with, in selection order. */
+  appliedThemes?: AppliedPromptTheme[];
   width?: number;
   height?: number;
   count?: number;

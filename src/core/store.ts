@@ -430,9 +430,16 @@ export class LibraryStore {
   async createBatch(
     input: Omit<BatchRecord, 'images' | 'failures' | 'createdAt'> & { createdAt?: string },
   ): Promise<BatchRecord> {
+    const { basePrompt, appliedThemes, createdAt, ...rest } = input;
+    // The theme fields are written only when they carry something: a plain text-to-image
+    // batch has no base prompt to restore and no tags to badge on the result header.
     const batch: BatchRecord = {
-      ...input,
-      createdAt: input.createdAt ?? new Date().toISOString(),
+      ...rest,
+      createdAt: createdAt ?? new Date().toISOString(),
+      ...(basePrompt === undefined || basePrompt.trim().length === 0 ? {} : { basePrompt }),
+      ...(appliedThemes === undefined || appliedThemes.length === 0
+        ? {}
+        : { appliedThemes: appliedThemes.map((theme) => ({ id: theme.id, name: theme.name })) }),
       images: [],
       failures: [],
     };

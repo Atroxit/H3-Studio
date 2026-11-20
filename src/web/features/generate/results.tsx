@@ -678,6 +678,10 @@ export function ResultsGrid({
   const canRetry = !running && batch.batchId !== null;
   const batchDuration = formatDuration(batch.durationMs);
   const hasSource = (batch.sourceImageId ?? null) !== null;
+  // A themed batch reads as the words the user typed; the composed prompt stays one
+  // hover away, and is what Copy prompt copies.
+  const appliedThemes = batch.appliedThemes ?? [];
+  const headerPrompt = appliedThemes.length > 0 ? (batch.basePrompt ?? batch.prompt) : batch.prompt;
   // One quiet line of facts under the prompt: the canvas, how many images, how long, the seed.
   const resultFacts = [
     `${batch.width} × ${batch.height}`,
@@ -702,8 +706,19 @@ export function ResultsGrid({
     <section className="gen-results" aria-label="Batch results">
       <header className="gen-results-head">
         <div className="gen-results-copy">
-          <h3 className="gen-results-title">{batch.prompt}</h3>
+          <h3 className="gen-results-title" title={headerPrompt === batch.prompt ? undefined : batch.prompt}>
+            {headerPrompt}
+          </h3>
           <p className="gen-results-detail">{resultFacts.join(' · ')}</p>
+          {appliedThemes.length === 0 ? null : (
+            <ul className="gen-result-themes" aria-label="Prompt themes used">
+              {appliedThemes.map((theme) => (
+                <li key={theme.id} className="gen-result-theme">
+                  {theme.name}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
         <div className="gen-results-actions">
           <Button variant="ghost" size="sm" onClick={() => void copyPrompt()}>
@@ -715,6 +730,8 @@ export function ResultsGrid({
             onClick={() => {
               studio.useSettings({
                 prompt: batch.prompt,
+                basePrompt: batch.basePrompt ?? batch.prompt,
+                appliedThemes,
                 width: batch.width,
                 height: batch.height,
                 count: batch.requested,

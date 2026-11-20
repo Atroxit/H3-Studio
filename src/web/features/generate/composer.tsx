@@ -4,8 +4,10 @@
 // one decision. Files can be picked or dropped onto the card.
 
 import {
+  useCallback,
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -13,14 +15,29 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from 'react';
-import type { ReferenceImage } from '../../../core/types';
-import { imageUrl, uploadReference } from '../../api';
+import { composePromptWithThemes, themeAppendCharDelta } from '../../../core/themes';
+import type { PromptTheme, ReferenceImage } from '../../../core/types';
+import {
+  imageUrl,
+  uploadReference,
+  type ThemeCreateBody,
+  type ThemeUpdateBody,
+} from '../../api';
 import { Button, Spinner } from '../../components';
 import { PROMPT_MAX_LENGTH, promptProblem } from './helpers';
-import type { AlterationCandidate, GenerationForm } from './useGeneration';
+import { ThemeDrawer } from './ThemeDrawer';
+import { resolveActiveThemes, type AlterationCandidate, type GenerationForm } from './useGeneration';
 
 export interface PromptComposerProps {
   form: GenerationForm;
+  /** Every theme the server knows, shipped and custom. */
+  themes: PromptTheme[];
+  onToggleTheme: (id: string) => void;
+  onClearThemes: () => void;
+  onCreateTheme: (input: ThemeCreateBody) => Promise<PromptTheme>;
+  onUpdateTheme: (id: string, patch: ThemeUpdateBody) => Promise<PromptTheme>;
+  onDeleteTheme: (id: string) => Promise<void>;
+  onResetThemes: () => Promise<void>;
   running: boolean;
   canGenerate: boolean;
   blockedReason: string | null;
@@ -87,6 +104,59 @@ function CrossIcon(): ReactNode {
   );
 }
 
+/**
+ * The tags the strip offers when nothing is picked yet, in the order the studio wants
+ * them read: the three styles a new user reaches for first, then film, mood, light, lens.
+ */
+const QUICK_PICK_THEME_IDS: readonly string[] = [
+  'realistic',
+  'cinematic',
+  'cyberpunk',
+  '35mm-film',
+  'noir',
+  'golden-hour',
+  'neon-night',
+  'shallow-dof',
+  'editorial',
+  'studio-softbox',
+];
+
+/**
+ * The strip order: active tags first in selection order, then the quick picks, then any
+ * custom themes, then whatever shipped themes are left. Nothing is dropped, so a user
+ * theme is always one click away even before it is active.
+ */
+function stripThemes(themes: readonly PromptTheme[], activeIds: ReadonlySet<string>): PromptTheme[] {
+  const available = themes.filter((theme) => !activeIds.has(theme.id));
+  const byId = new Map(available.map((theme) => [theme.id, theme]));
+  const ordered: PromptTheme[] = [];
+  const placed = new Set<string>();
+  for (const id of QUICK_PICK_THEME_IDS) {
+    const theme = byId.get(id);
+    if (theme === undefined) continue;
+    ordered.push(theme);
+    placed.add(id);
+  }
+  for (const theme of available) {
+    if (theme.builtIn === true || placed.has(theme.id)) continue;
+    ordered.push(theme);
+    placed.add(theme.id);
+  }
+  for (const theme of available) {
+    if (!placed.has(theme.id)) ordered.push(theme);
+  }
+  return ordered;
+}
+
+function SparkleIcon(): ReactNode {
+  return (
+    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 4.5l1.6 4.4 4.4 1.6-4.4 1.6L12 16.5l-1.6-4.4L6 10.5l4.4-1.6z" />
+      <path d="M18 16.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z" />
+    </svg>
+  );
+}
+
 function PaperclipIcon(): ReactNode {
   return (
     <svg className="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -99,6 +169,13 @@ function PaperclipIcon(): ReactNode {
 
 export function PromptComposer({
   form,
+  themes,
+  onToggleTheme,
+  onClearThemes,
+  onCreateTheme,
+  onUpdateTheme,
+  onDeleteTheme,
+  onResetThemes,
   running,
   canGenerate,
   blockedReason,
@@ -122,6 +199,19 @@ export function PromptComposer({
   const [uploading, setUploading] = useState(false);
   const [referenceError, setReferenceError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [themesOpen, setThemesOpen] = useState(false);
+  const closeThemes = useCallback((): void => {
+    setThemesOpen(false);
+  }, []);
+  const activeThemes = useMemo(
+    () => resolveActiveThemes(form.themeIds, themes),
+    [form.themeIds, themes],
+  );
+  const activeIds = useMemo(() => new Set(activeThemes.map((theme) => theme.id)), [activeThemes]);
+  const strip = useMemo(() => stripThemes(themes, activeIds), [themes, activeIds]);
+  const composedPrompt = composePromptWithThemes(form.prompt, activeThemes);
+  const appendDelta = themeAppendCharDelta(form.prompt, activeThemes);
+  const overLimit = composedPrompt.length > PROMPT_MAX_LENGTH;
   const altering = alterationSource !== null;
   const referenceLimit = Math.max(0, Math.trunc(maxReferenceImages));
   const referenceCount = form.references.length;
@@ -134,7 +224,8 @@ export function PromptComposer({
     : form.count === 1
       ? '1 image'
       : `${form.count} images`;
-  const promptIssue = form.prompt.trim().length === 0 ? null : promptProblem(form.prompt);
+  const promptIssue =
+    form.prompt.trim().length === 0 ? null : (promptProblem(form.prompt) ?? promptProblem(composedPrompt));
   const describedBy = [running ? hintId : null, promptIssue === null ? null : errorId]
     .filter((id): id is string => id !== null)
     .join(' ');
@@ -334,12 +425,97 @@ export function PromptComposer({
         </div>
       ) : null}
 
+      {/* The theme bar: a quiet shelf of preset chunks between the attachments and the
+          words. It never takes a row of its own from the prompt. */}
+      <div className="gen-theme-bar">
+        <button
+          type="button"
+          className={themesOpen ? 'gen-theme-label is-open' : 'gen-theme-label'}
+          aria-expanded={themesOpen}
+          aria-haspopup="dialog"
+          title="Browse every prompt theme"
+          onClick={() => {
+            setThemesOpen((open) => !open);
+          }}
+        >
+          <SparkleIcon />
+          <span>Themes</span>
+          {activeThemes.length === 0 ? null : (
+            <span className="gen-theme-label-count" aria-hidden="true">
+              {activeThemes.length}
+            </span>
+          )}
+        </button>
+
+        <div className="gen-theme-strip" role="group" aria-label="Prompt theme tags">
+          {activeThemes.map((theme) => (
+            <button
+              key={theme.id}
+              type="button"
+              className="gen-theme-tag is-active"
+              aria-pressed
+              title={`Appends: "${theme.snippet}"`}
+              onClick={() => {
+                onToggleTheme(theme.id);
+              }}
+            >
+              <span className="gen-theme-tag-dot" aria-hidden="true" />
+              {theme.name}
+            </button>
+          ))}
+          {strip.map((theme) => (
+            <button
+              key={theme.id}
+              type="button"
+              className="gen-theme-tag"
+              aria-pressed={false}
+              title={`Appends: "${theme.snippet}"`}
+              onClick={() => {
+                onToggleTheme(theme.id);
+              }}
+            >
+              {theme.name}
+            </button>
+          ))}
+        </div>
+
+        <div className="gen-theme-bar-actions">
+          {activeThemes.length === 0 ? null : (
+            <button
+              type="button"
+              className="gen-theme-clear"
+              title="Clear every prompt theme"
+              onClick={onClearThemes}
+            >
+              Clear
+            </button>
+          )}
+          <button
+            type="button"
+            className="gen-theme-more"
+            aria-expanded={themesOpen}
+            aria-haspopup="dialog"
+            title="Pick and manage prompt themes"
+            onClick={() => {
+              setThemesOpen(true);
+            }}
+          >
+            All
+          </button>
+        </div>
+      </div>
+
       <div className="gen-composer-head">
         <label className="gen-composer-label" htmlFor={promptId}>
           {altering ? 'Alteration prompt' : 'New image prompt'}
         </label>
-        <span className={promptIssue === null ? 'gen-composer-count' : 'gen-composer-count is-error'} aria-hidden="true">
-          {form.prompt.length} / {PROMPT_MAX_LENGTH}
+        <span className={overLimit ? 'gen-composer-count is-error' : 'gen-composer-count'} aria-hidden="true">
+          {form.prompt.length}
+          {activeThemes.length === 0 ? null : (
+            <span className="gen-composer-delta"> (+{appendDelta})</span>
+          )}
+          {' / '}
+          {PROMPT_MAX_LENGTH}
         </span>
       </div>
 
@@ -406,6 +582,19 @@ export function PromptComposer({
           </Button>
         </div>
       </div>
+
+      <ThemeDrawer
+        open={themesOpen}
+        themes={themes}
+        activeThemes={activeThemes}
+        onToggle={onToggleTheme}
+        onClear={onClearThemes}
+        onCreate={onCreateTheme}
+        onUpdate={onUpdateTheme}
+        onDelete={onDeleteTheme}
+        onReset={onResetThemes}
+        onClose={closeThemes}
+      />
     </section>
   );
 }

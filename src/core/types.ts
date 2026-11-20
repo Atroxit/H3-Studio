@@ -36,6 +36,26 @@ export interface ProviderCapabilities {
   notes: string[];
 }
 
+/** The groups the prompt theme picker sorts tags into. */
+export type PromptThemeCategory = 'style' | 'mood' | 'lighting' | 'camera' | 'custom';
+
+/** One preset prompt chunk the composer can append to the prompt with a single tag. */
+export interface PromptTheme {
+  id: string;
+  name: string;
+  category: PromptThemeCategory;
+  /** Prompt text chunk appended when this theme tag is active. */
+  snippet: string;
+  /** True for shipped defaults; false or omitted for user-created themes. */
+  builtIn?: boolean;
+}
+
+/** A theme as it was applied to one batch, so the record reads without the theme store. */
+export interface AppliedPromptTheme {
+  id: string;
+  name: string;
+}
+
 export interface ReferenceImage {
   id: string;
   filename: string;
@@ -202,6 +222,10 @@ export interface BatchRecord {
   textEncoderVariant?: H3TextEncoderVariant;
   /** The library image this batch altered, when it is an alteration. */
   sourceImageId?: string;
+  /** Original prompt text before active prompt theme chunks were appended. */
+  basePrompt?: string;
+  /** Prompt themes appended when this batch was created. */
+  appliedThemes?: AppliedPromptTheme[];
   images: StoredImage[];
   failures: BatchFailure[];
 }

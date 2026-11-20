@@ -682,6 +682,7 @@ function generationForm(overrides: Partial<GenerationForm> = {}): GenerationForm
     promptEnhancer: 'qwen3.5_9b',
     modelVariant: 'w4a8',
     textEncoderVariant: 'int8',
+    themeIds: [],
     references: [],
     ...overrides,
   };

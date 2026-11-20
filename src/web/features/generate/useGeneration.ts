@@ -7,7 +7,9 @@
 // the untested part is the wiring between them and the DOM.
 
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
+import { DEFAULT_PROMPT_THEMES, composePromptWithThemes } from '../../../core/themes';
 import type {
+  AppliedPromptTheme,
   BatchRecord,
   BatchStatus,
   GenerationEvent,
@@ -16,19 +18,27 @@ import type {
   H3TextEncoderVariant,
   ItemFailure,
   Preset,
+  PromptTheme,
   ProviderCapabilities,
   ReferenceImage,
   SizePreset,
   StoredImage,
 } from '../../../core/types';
 import {
+  createTheme as createThemeRequest,
+  deleteTheme as deleteThemeRequest,
+  fetchThemes,
   getBatch,
   getProviderCapabilities,
   listBatches,
   openGenerationEvents,
+  resetThemes as resetThemesRequest,
   retryBatch,
   startGeneration,
+  updateTheme as updateThemeRequest,
   type GenerationBody,
+  type ThemeCreateBody,
+  type ThemeUpdateBody,
 } from '../../api';
 import { useStudio, type PromptSettings } from '../../studio';
 import {
@@ -94,6 +104,10 @@ export interface GenerationBatch {
   requested: number;
   status: BatchStatus;
   revisedPrompt: string | null;
+  /** The prompt before theme chunks were appended, when the composer used themes. */
+  basePrompt?: string;
+  /** The theme tags this batch ran with, in selection order. */
+  appliedThemes?: AppliedPromptTheme[];
   /** The stored image this batch altered, when it is an alteration, so a comparison exists. */
   sourceImageId?: string | null;
   tiles: GenerationTile[];
@@ -126,6 +140,8 @@ export interface GenerationForm {
   modelVariant: H3ModelVariant;
   /** Which 32B H3 text encoder build the graph loads. INT8 works on every vendor. */
   textEncoderVariant: H3TextEncoderVariant;
+  /** The prompt theme tags that are active, in the order they were picked. */
+  themeIds: string[];
   references: ReferenceImage[];
 }
 
@@ -163,6 +179,8 @@ export interface GenerationController {
   providerId: string | null;
   capability: CapabilityState;
   form: GenerationForm;
+  /** Every theme the server knows, shipped and custom, in catalog order. */
+  themes: PromptTheme[];
   batch: GenerationBatch | null;
   running: boolean;
   summary: TileSummary | null;
@@ -179,6 +197,15 @@ export interface GenerationController {
   setPrompt: (value: string) => void;
   updateForm: (patch: Partial<Omit<GenerationForm, 'references' | 'providerId'>>) => void;
   choosePreset: (preset: SizePreset) => void;
+  /** Adds a theme to the end of the active list, or removes it when it is already on. */
+  toggleTheme: (id: string) => void;
+  clearThemes: () => void;
+  /** Creates a custom theme and activates it, so the new chunk is one click from use. */
+  createTheme: (input: ThemeCreateBody) => Promise<PromptTheme>;
+  updateTheme: (id: string, patch: ThemeUpdateBody) => Promise<PromptTheme>;
+  deleteTheme: (id: string) => Promise<void>;
+  /** Restores the shipped themes while keeping custom ones. */
+  resetThemes: () => Promise<void>;
   addReference: (reference: ReferenceImage) => void;
   removeReference: (referenceId: string) => void;
   start: () => void;
@@ -542,15 +569,37 @@ export interface PreparedBody {
   problem: string | null;
 }
 
+/**
+ * The selected themes, in selection order. An id the catalog no longer carries is dropped
+ * rather than resolved to nothing, so a deleted theme leaves the prompt clean.
+ */
+export function resolveActiveThemes(
+  themeIds: readonly string[],
+  themes: readonly PromptTheme[],
+): PromptTheme[] {
+  const byId = new Map(themes.map((theme) => [theme.id, theme]));
+  const active: PromptTheme[] = [];
+  for (const id of themeIds) {
+    const theme = byId.get(id);
+    if (theme !== undefined) active.push(theme);
+  }
+  return active;
+}
+
 /** Builds the request from the form, sending only what the provider supports. */
 export function toGenerationBody(
   form: GenerationForm,
   capabilities: ProviderCapabilities,
   providerId: string,
   alterationSourceId: string | null = null,
+  themes: readonly PromptTheme[] = [],
 ): PreparedBody {
-  const prompt = form.prompt.trim();
-  const promptIssue = promptProblem(prompt);
+  const basePrompt = form.prompt.trim();
+  const activeThemes = resolveActiveThemes(form.themeIds, themes);
+  const prompt = composePromptWithThemes(form.prompt, activeThemes);
+  // The user's own words are required even when a tag would fill the prompt, and the
+  // composed text is what the server measures against its 4000 character limit.
+  const promptIssue = promptProblem(basePrompt) ?? promptProblem(prompt);
   if (promptIssue !== null) return { body: null, problem: promptIssue };
   const sizeIssue = sizeProblem(form.width, form.height);
   if (sizeIssue !== null) return { body: null, problem: sizeIssue };
@@ -573,6 +622,10 @@ export function toGenerationBody(
     textEncoderVariant: form.textEncoderVariant,
   };
 
+  if (activeThemes.length > 0) {
+    body.basePrompt = basePrompt;
+    body.appliedThemes = activeThemes.map((theme) => ({ id: theme.id, name: theme.name }));
+  }
   if (capabilities.negativePrompt && form.negativePrompt.trim().length > 0) {
     body.negativePrompt = form.negativePrompt.trim();
   }
@@ -620,6 +673,7 @@ export const PROMPT_ENHANCER_STORAGE_KEY = 'h3-studio:prompt-enhancer';
 export const MODEL_VARIANT_STORAGE_KEY = 'h3-studio:model-variant';
 export const TEXT_ENCODER_STORAGE_KEY = 'h3-studio:text-encoder-variant';
 export const DEFAULT_RESOLUTION_STORAGE_KEY = 'h3-studio:default-resolution';
+export const THEME_IDS_STORAGE_KEY = 'h3-studio:prompt-themes';
 
 function isPromptEnhancer(value: unknown): value is H3PromptEnhancer {
   return value === 'off' || value === 'qwen3.5_9b' || value === 'qwen3.8_27b';
@@ -727,6 +781,34 @@ export function persistDefaultResolutionPreference(value: ResolutionPreference):
   writePreference(DEFAULT_RESOLUTION_STORAGE_KEY, `${width}x${height}`);
 }
 
+/**
+ * The theme tags the user last had active. The payload is read defensively: a stale or
+ * hand-edited value must never stop the composer from opening.
+ */
+export function readThemeIdsPreference(): string[] {
+  const stored = readPreference(THEME_IDS_STORAGE_KEY);
+  if (stored === null || stored.trim().length === 0) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stored) as unknown;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const ids: string[] = [];
+  for (const value of parsed) {
+    if (typeof value !== 'string') continue;
+    const id = value.trim();
+    if (id.length === 0 || id.length > 80 || ids.includes(id)) continue;
+    ids.push(id);
+  }
+  return ids;
+}
+
+function persistThemeIdsPreference(themeIds: readonly string[]): void {
+  writePreference(THEME_IDS_STORAGE_KEY, JSON.stringify(themeIds));
+}
+
 /** The preset that exactly matches a size, so a tuned canvas shows as a selected chip. */
 function presetIdForSize(
   capabilities: ProviderCapabilities | null,
@@ -754,6 +836,7 @@ const EMPTY_FORM: GenerationForm = {
   promptEnhancer: readPromptEnhancerPreference(),
   modelVariant: readModelVariantPreference(),
   textEncoderVariant: readTextEncoderPreference(),
+  themeIds: readThemeIdsPreference(),
   references: [],
 };
 
@@ -835,6 +918,8 @@ const EMPTY_CAPABILITY: CapabilityState = {
 
 interface GenerationState {
   form: GenerationForm;
+  /** Starts on the shipped themes, so the tag bar is never empty while /api/themes loads. */
+  themes: PromptTheme[];
   capability: CapabilityState;
   batch: GenerationBatch | null;
   running: boolean;
@@ -849,6 +934,7 @@ type Listener = () => void;
 const listeners = new Set<Listener>();
 let state: GenerationState = {
   form: EMPTY_FORM,
+  themes: [...DEFAULT_PROMPT_THEMES],
   capability: EMPTY_CAPABILITY,
   batch: null,
   running: false,
@@ -914,6 +1000,8 @@ export function batchFromRecord(record: BatchRecord): GenerationBatch {
     requested: record.requested,
     status: record.status,
     revisedPrompt: record.revisedPrompt ?? null,
+    ...(record.basePrompt === undefined ? {} : { basePrompt: record.basePrompt }),
+    ...(record.appliedThemes === undefined ? {} : { appliedThemes: record.appliedThemes }),
     sourceImageId: record.sourceImageId ?? null,
     tiles,
     streamError: null,
@@ -1045,6 +1133,16 @@ export function adoptPromptSettings(settings: PromptSettings, providerId: string
   if (settings.textEncoderVariant !== undefined) persistTextEncoderPreference(settings.textEncoderVariant);
   if (settings.promptEnhancer !== undefined) persistPromptEnhancerPreference(settings.promptEnhancer);
   update((current) => {
+    // A themed batch restores its words and its tags, so the next run composes the same
+    // prompt from the same pieces. A batch without themes clears the tags: its prompt is
+    // the whole text, and keeping a tag on would append it a second time.
+    const themeIds =
+      settings.basePrompt === undefined
+        ? current.form.themeIds
+        : (settings.appliedThemes ?? [])
+            .map((theme) => theme.id)
+            .filter((id) => current.themes.some((theme) => theme.id === id));
+    if (settings.basePrompt !== undefined) persistThemeIdsPreference(themeIds);
     const activeCapabilities =
       providerId !== null && current.capability.providerId === providerId ? current.capability.capabilities : null;
     const multiple = activeCapabilities === null ? 1 : Math.max(1, Math.trunc(activeCapabilities.sizeMultiple));
@@ -1061,7 +1159,8 @@ export function adoptPromptSettings(settings: PromptSettings, providerId: string
       form: {
         ...current.form,
         providerId: providerId ?? current.form.providerId,
-        prompt: settings.prompt,
+        prompt: settings.basePrompt ?? settings.prompt,
+        themeIds,
         negativePrompt:
           settings.negativePrompt === undefined ? current.form.negativePrompt : settings.negativePrompt,
         width,
@@ -1111,6 +1210,75 @@ function removeReferenceState(referenceId: string): void {
       references: current.form.references.filter((reference) => reference.id !== referenceId),
     },
   }));
+}
+
+/** Replaces the catalog and drops ids the new catalog no longer carries. */
+function replaceThemes(themes: PromptTheme[]): void {
+  const known = new Set(themes.map((theme) => theme.id));
+  update((current) => {
+    const themeIds = current.form.themeIds.filter((id) => known.has(id));
+    if (themeIds.length !== current.form.themeIds.length) persistThemeIdsPreference(themeIds);
+    return { ...current, themes, form: { ...current.form, themeIds } };
+  });
+}
+
+function toggleThemeState(id: string): void {
+  update((current) => {
+    const active = current.form.themeIds.includes(id);
+    const themeIds = active
+      ? current.form.themeIds.filter((candidate) => candidate !== id)
+      : [...current.form.themeIds, id];
+    persistThemeIdsPreference(themeIds);
+    return { ...current, form: { ...current.form, themeIds } };
+  });
+}
+
+function clearThemesState(): void {
+  update((current) => {
+    if (current.form.themeIds.length === 0) return current;
+    persistThemeIdsPreference([]);
+    return { ...current, form: { ...current.form, themeIds: [] } };
+  });
+}
+
+/** Creates a theme and turns it on, so a chunk the user just wrote is ready to generate. */
+async function createThemeState(input: ThemeCreateBody): Promise<PromptTheme> {
+  const result = await createThemeRequest(input);
+  update((current) => {
+    const themeIds = current.form.themeIds.includes(result.theme.id)
+      ? current.form.themeIds
+      : [...current.form.themeIds, result.theme.id];
+    persistThemeIdsPreference(themeIds);
+    return { ...current, themes: result.themes, form: { ...current.form, themeIds } };
+  });
+  return result.theme;
+}
+
+async function updateThemeState(id: string, patch: ThemeUpdateBody): Promise<PromptTheme> {
+  const result = await updateThemeRequest(id, patch);
+  update((current) => ({ ...current, themes: result.themes }));
+  return result.theme;
+}
+
+async function deleteThemeState(id: string): Promise<void> {
+  const result = await deleteThemeRequest(id);
+  update((current) => {
+    const themeIds = current.form.themeIds.filter((candidate) => candidate !== id);
+    persistThemeIdsPreference(themeIds);
+    return { ...current, themes: result.themes, form: { ...current.form, themeIds } };
+  });
+}
+
+async function resetThemesState(): Promise<void> {
+  replaceThemes(await resetThemesRequest());
+}
+
+async function loadThemes(): Promise<void> {
+  try {
+    replaceThemes(await fetchThemes());
+  } catch {
+    // The shipped defaults stay on screen when the server cannot answer yet.
+  }
 }
 
 function ensureCapabilities(providerId: string): void {
@@ -1269,6 +1437,7 @@ async function beginGeneration(onSettled: () => void): Promise<void> {
     capabilities,
     providerId,
     alterationTarget === null ? null : alterationTarget.imageId,
+    state.themes,
   );
   if (prepared.body === null) return;
   const body = prepared.body;
@@ -1285,6 +1454,8 @@ async function beginGeneration(onSettled: () => void): Promise<void> {
     requested: body.count,
     status: 'queued',
     revisedPrompt: null,
+    ...(body.basePrompt === undefined ? {} : { basePrompt: body.basePrompt }),
+    ...(body.appliedThemes === undefined ? {} : { appliedThemes: body.appliedThemes }),
     sourceImageId: alterationTarget === null ? null : alterationTarget.imageId,
     tiles: createTiles(body.count),
     streamError: null,
@@ -1481,6 +1652,12 @@ export function useGeneration(): GenerationController {
     if (state.batch === null) void hydrateLatestBatch();
   }, []);
 
+  // The shipped themes are already on screen; this replaces them with the stored catalog,
+  // which is where custom themes live.
+  useEffect(() => {
+    void loadThemes();
+  }, []);
+
   const settle = useCallback((): void => {
     void refresh();
   }, [refresh]);
@@ -1495,6 +1672,30 @@ export function useGeneration(): GenerationController {
 
   const choosePreset = useCallback((preset: SizePreset): void => {
     updateFormState({ width: preset.width, height: preset.height, presetId: preset.id });
+  }, []);
+
+  const toggleTheme = useCallback((id: string): void => {
+    toggleThemeState(id);
+  }, []);
+
+  const clearThemes = useCallback((): void => {
+    clearThemesState();
+  }, []);
+
+  const createTheme = useCallback((input: ThemeCreateBody): Promise<PromptTheme> => {
+    return createThemeState(input);
+  }, []);
+
+  const updateTheme = useCallback((id: string, patch: ThemeUpdateBody): Promise<PromptTheme> => {
+    return updateThemeState(id, patch);
+  }, []);
+
+  const deleteTheme = useCallback((id: string): Promise<void> => {
+    return deleteThemeState(id);
+  }, []);
+
+  const resetThemes = useCallback((): Promise<void> => {
+    return resetThemesState();
   }, []);
 
   const addReference = useCallback((reference: ReferenceImage): void => {
@@ -1554,7 +1755,10 @@ export function useGeneration(): GenerationController {
     maxReferenceImages,
   );
 
-  const promptIssue = promptProblem(snapshot.form.prompt);
+  // The user's own words are required, and the composed text is what the server measures.
+  const promptIssue =
+    promptProblem(snapshot.form.prompt) ??
+    promptProblem(composePromptWithThemes(snapshot.form.prompt, resolveActiveThemes(snapshot.form.themeIds, snapshot.themes)));
   const sizeIssue = sizeProblem(snapshot.form.width, snapshot.form.height);
   const seedIssue = seedProblem(snapshot.form.seed);
   let blockedReason: string | null = null;
@@ -1572,6 +1776,7 @@ export function useGeneration(): GenerationController {
     providerId,
     capability: snapshot.capability,
     form: snapshot.form,
+    themes: snapshot.themes,
     batch: snapshot.batch,
     running: snapshot.running,
     summary: snapshot.batch === null ? null : summarizeTiles(snapshot.batch.tiles),
@@ -1584,6 +1789,12 @@ export function useGeneration(): GenerationController {
     setPrompt,
     updateForm,
     choosePreset,
+    toggleTheme,
+    clearThemes,
+    createTheme,
+    updateTheme,
+    deleteTheme,
+    resetThemes,
     addReference,
     removeReference,
     start,

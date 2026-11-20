@@ -2,6 +2,7 @@
 // One function per endpoint, JSON in and out, and a typed error for every failure.
 
 import type {
+  AppliedPromptTheme,
   BatchRecord,
   GenerationEvent,
   H3ModelVariant,
@@ -9,6 +10,8 @@ import type {
   H3TextEncoderVariant,
   Preset,
   ProviderCapabilities,
+  PromptTheme,
+  PromptThemeCategory,
   ProviderConfig,
   ReferenceImage,
   SystemProfile,
@@ -62,6 +65,30 @@ export interface GenerationBody {
   promptEnhancer?: H3PromptEnhancer;
   modelVariant?: H3ModelVariant;
   textEncoderVariant?: H3TextEncoderVariant;
+  /** The prompt before theme chunks were appended. Sent only when themes are active. */
+  basePrompt?: string;
+  /** The theme tags the composer had active, in selection order. */
+  appliedThemes?: AppliedPromptTheme[];
+}
+
+/** The body POST /api/themes accepts: a whole theme minus the id the server assigns. */
+export interface ThemeCreateBody {
+  name: string;
+  category: PromptThemeCategory;
+  snippet: string;
+}
+
+/** The body PATCH /api/themes/:id accepts: the id travels in the path. */
+export type ThemeUpdateBody = Partial<ThemeCreateBody>;
+
+export interface ThemeMutation {
+  theme: PromptTheme;
+  themes: PromptTheme[];
+}
+
+export interface ThemeDeleteResponse {
+  removed: boolean;
+  themes: PromptTheme[];
 }
 
 /** The body POST /api/providers accepts: a whole config minus the id the server assigns. */
@@ -260,6 +287,29 @@ export async function createPreset(input: Omit<Preset, 'id' | 'createdAt'>): Pro
 
 export async function deletePreset(id: string): Promise<OkResponse> {
   return (await send('DELETE', `/api/presets/${encodeURIComponent(id)}`)) as OkResponse;
+}
+
+export async function fetchThemes(): Promise<PromptTheme[]> {
+  const body = (await send('GET', '/api/themes')) as { themes: PromptTheme[] };
+  return body.themes;
+}
+
+export async function createTheme(input: ThemeCreateBody): Promise<ThemeMutation> {
+  return (await send('POST', '/api/themes', input)) as ThemeMutation;
+}
+
+export async function updateTheme(id: string, patch: ThemeUpdateBody): Promise<ThemeMutation> {
+  return (await send('PATCH', `/api/themes/${encodeURIComponent(id)}`, patch)) as ThemeMutation;
+}
+
+export async function deleteTheme(id: string): Promise<ThemeDeleteResponse> {
+  return (await send('DELETE', `/api/themes/${encodeURIComponent(id)}`)) as ThemeDeleteResponse;
+}
+
+/** Restores the shipped themes while keeping the user's own ones. */
+export async function resetThemes(): Promise<PromptTheme[]> {
+  const body = (await send('POST', '/api/themes/reset')) as { themes: PromptTheme[] };
+  return body.themes;
 }
 
 export async function getStats(): Promise<StudioStats> {

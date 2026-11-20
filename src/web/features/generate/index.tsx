@@ -82,6 +82,13 @@ export function GenerateCanvas(): ReactNode {
       />
       <PromptComposer
         form={generation.form}
+        themes={generation.themes}
+        onToggleTheme={generation.toggleTheme}
+        onClearThemes={generation.clearThemes}
+        onCreateTheme={generation.createTheme}
+        onUpdateTheme={generation.updateTheme}
+        onDeleteTheme={generation.deleteTheme}
+        onResetThemes={generation.resetThemes}
         running={generation.running}
         canGenerate={generation.canGenerate}
         blockedReason={generation.blockedReason}

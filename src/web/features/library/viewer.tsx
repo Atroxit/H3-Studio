@@ -563,6 +563,9 @@ export function ImageViewer({
   const usePrompt = (): void => {
     studio.useSettings({
       prompt: batch.prompt,
+      // A themed batch restores its words and tags instead of re-appending the chunks.
+      basePrompt: batch.basePrompt ?? batch.prompt,
+      appliedThemes: batch.appliedThemes ?? [],
       width: batch.width,
       height: batch.height,
       count: batch.requested,

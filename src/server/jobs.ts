@@ -13,6 +13,7 @@ import { setTimeout as scheduleTimer } from 'node:timers';
 import { createAdapter } from '../core/providers/registry';
 import { LibraryStore, createId } from '../core/store';
 import type {
+  AppliedPromptTheme,
   BatchRecord,
   BatchStatus,
   GeneratedItem,
@@ -95,11 +96,14 @@ export class GenerationHub {
   /**
    * Creates the batch record and starts the job. The job runs on its own afterwards.
    * sourceImageId names the library image an alteration started from, when there is one.
+   * meta carries the pre-theme prompt and the applied theme tags, when the composer used
+   * any: the adapter only needs the composed prompt, but the record keeps both.
    */
   async start(
     config: ProviderConfig,
     request: GenerationRequest,
     sourceImageId?: string,
+    meta: { basePrompt?: string; appliedThemes?: AppliedPromptTheme[] } = {},
   ): Promise<BatchRecord> {
     const startedAt = Date.now();
     const batch = await this.store.createBatch({
@@ -117,6 +121,8 @@ export class GenerationHub {
       enhancePrompt: request.enhancePrompt,
       promptEnhancer: request.promptEnhancer,
       sourceImageId,
+      basePrompt: meta.basePrompt,
+      appliedThemes: meta.appliedThemes,
     });
     const state: JobState = {
       batchId: batch.id,

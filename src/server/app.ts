@@ -24,6 +24,7 @@ import type { BatchStreamEvent, Subscription } from './jobs';
 import { GenerationHub, HEARTBEAT_MS } from './jobs';
 import { createProviderLauncher, type ProviderLauncher } from './launcher';
 import { ProviderSettings, providerInputSchema, providerPatchSchema } from './settings';
+import { ThemeStore, themeInputSchema, themePatchSchema } from './themes';
 import { applyProfileOverrides, detectSystemProfile, mergeLaunchArgs } from './system';
 
 const API_VERSION = '0.1.0';
@@ -69,6 +70,13 @@ const generationSchema = z.object({
   promptEnhancer: z.enum(['off', 'qwen3.5_9b', 'qwen3.8_27b']).optional(),
   modelVariant: z.enum(['w4a8', 'int8_convrot']).optional(),
   textEncoderVariant: z.enum(['nvfp4', 'int8']).optional(),
+  /** The prompt before theme chunks were appended, kept for the result header. */
+  basePrompt: z.string().max(4000).optional(),
+  /** The theme tags the composer had active, in selection order. */
+  appliedThemes: z
+    .array(z.object({ id: z.string().min(1).max(80), name: z.string().min(1).max(60) }))
+    .max(20)
+    .optional(),
 });
 
 /** POST /api/system/apply-profile: every field is an override of what detection chose. */
@@ -260,6 +268,7 @@ export function createApp(options: { dataDir: string }): StudioApplication {
   const referencesDir = path.join(dataDir, 'references');
   const store = new QueuedLibrary(new LibraryStore({ rootDir: dataDir }));
   const settings = new ProviderSettings({ rootDir: dataDir });
+  const themes = new ThemeStore({ rootDir: dataDir });
   const hub = new GenerationHub({ store });
   /** Reference metadata for this process. Ids are resolved from disk after a restart. */
   const references = new Map<string, ReferenceImage>();
@@ -269,6 +278,7 @@ export function createApp(options: { dataDir: string }): StudioApplication {
     await mkdir(dataDir, { recursive: true });
     await store.init();
     await settings.init();
+    await themes.init();
   })();
   void ready.catch(() => undefined);
 
@@ -424,6 +434,43 @@ export function createApp(options: { dataDir: string }): StudioApplication {
     }
   });
 
+  app.get('/api/themes', async (_req: Request, res: Response) => {
+    res.json({ themes: await themes.list() });
+  });
+
+  app.post('/api/themes', async (req: Request, res: Response) => {
+    const input = parseBody(themeInputSchema, req.body, res);
+    if (input === null) return;
+    res.status(201).json(await themes.create(input));
+  });
+
+  // Reset is declared before the id route so it can never be read as a theme named "reset".
+  app.post('/api/themes/reset', async (_req: Request, res: Response) => {
+    res.json({ themes: await themes.resetDefaults() });
+  });
+
+  app.patch('/api/themes/:id', async (req: Request, res: Response) => {
+    const patch = parseBody(themePatchSchema, req.body, res);
+    if (patch === null) return;
+    const id = routeParam(req, 'id');
+    const updated = await themes.update(id, patch);
+    if (updated === null) {
+      fail(res, 404, 'unknown_theme', `No prompt theme with id "${id}".`);
+      return;
+    }
+    res.json(updated);
+  });
+
+  app.delete('/api/themes/:id', async (req: Request, res: Response) => {
+    const id = routeParam(req, 'id');
+    const result = await themes.remove(id);
+    if (!result.removed) {
+      fail(res, 404, 'unknown_theme', `No prompt theme with id "${id}".`);
+      return;
+    }
+    res.json(result);
+  });
+
   app.post('/api/references', async (req: Request, res: Response) => {
     const input = parseBody(referenceSchema, req.body, res);
     if (input === null) return;
@@ -518,7 +565,10 @@ export function createApp(options: { dataDir: string }): StudioApplication {
         console.warn(`h3-studio: provider ${config.id} did not start: ${messageOf(error)}`);
       }
     }
-    const batch = await hub.start(config, request, sourceImageId);
+    const batch = await hub.start(config, request, sourceImageId, {
+      basePrompt: input.basePrompt,
+      appliedThemes: input.appliedThemes,
+    });
     res.status(202).json({ batchId: batch.id });
   });
 
