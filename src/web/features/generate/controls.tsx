@@ -6,7 +6,7 @@ import { useId, useState, type ChangeEvent, type ReactNode } from 'react';
 import { uploadReference } from '../../api';
 import { Button, Field, Slider, Spinner } from '../../components';
 import type { ProviderCapabilities, SizePreset } from '../../../core/types';
-import { ratioOf, seedProblem, sizeProblem, uniqueNotes } from './helpers';
+import { ratioOf, seedProblem, sizeProblem } from './helpers';
 import { MAX_STEPS, MIN_STEPS, type GenerationController } from './useGeneration';
 
 export interface GenerationControlsProps {
@@ -213,7 +213,6 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const precisionName = useId();
   const encoderName = useId();
   const referencesHeadingId = useId();
-  const notesHeadingId = useId();
   // Open by default, so the model precision switch and the prompt enhancer are on screen.
   const [advancedOpen, setAdvancedOpen] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -258,19 +257,18 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
     (_unused, index) => ({ value: String(index + 1), label: String(index + 1) }),
   );
 
-  // An unsupported sampling capability is one visible line, never a hidden control.
-  // These are capability-specific and never echo a full provider note.
-  const advancedNotes = uniqueNotes([
+  // Unsupported sampling options compress into one muted line inside Advanced.
+  const fixedSummary = [
     ...(capabilities.adjustableSteps
       ? []
       : [
           capabilities.fixedSteps !== null
-            ? `Steps are fixed at ${capabilities.fixedSteps}.`
-            : 'Steps are chosen by this provider.',
+            ? `${capabilities.fixedSteps} steps fixed`
+            : 'Auto steps',
         ]),
-    ...(capabilities.guidance ? [] : ['Guidance is disabled.']),
-    ...(capabilities.negativePrompt ? [] : ['Negative prompt is not supported.']),
-  ]);
+    ...(capabilities.guidance ? [] : ['No guidance']),
+    ...(capabilities.negativePrompt ? [] : ['No negative prompt']),
+  ].join(' · ');
   // Precision, text encoder and prompt enhancer are always here, plus the sampling controls
   // this provider actually supports.
   const advancedCount =
@@ -290,15 +288,6 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const seedNote = capabilities.seed ? null : noteFor(capabilities, ['seed']);
   const referenceNote =
     capabilities.maxReferenceImages > 0 ? null : noteFor(capabilities, ['reference', 'image input', 'edit']);
-  const progressNote = capabilities.streamingProgress ? null : 'This provider reports progress only when each image finishes.';
-  const shownElsewhere = new Set(
-    [...advancedNotes, sizeEmptyNote, sizeFixedNote, seedNote, referenceNote, progressNote]
-      .filter((note): note is string => note !== null)
-      .map((note) => note.trim()),
-  );
-  const providerNotes = uniqueNotes(capabilities.notes).filter((note) => !shownElsewhere.has(note));
-  const showNotesSection = providerNotes.length > 0 || progressNote !== null;
-
   const handleAspect = (ratio: string): void => {
     const group = groups.find((candidate) => candidate.ratio === ratio);
     const preset = group === undefined ? undefined : group.presets[0];
@@ -545,12 +534,8 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
               })
             }
           />
-          <QuietLine text="Recommended for short prompts — expands both new images and reference edits into full scene & lighting detail." />
+          {fixedSummary.length === 0 ? null : <p className="gen-fixed-meta">{fixedSummary}</p>}
         </div>
-
-        {advancedNotes.map((note) => (
-          <QuietLine key={note} text={note} />
-        ))}
       </section>
 
       <section className="gen-section" aria-labelledby={referencesHeadingId}>
@@ -611,30 +596,15 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
                 <span className="gen-ref-add-text">{uploading ? 'Uploading' : 'Add image'}</span>
               </label>
             )}
+            {form.references.length === 0 ? null : (
+              <QuietLine text="Reference in prompt as <Picture 1>, <Picture 2>…" />
+            )}
             {referenceError === null ? null : <p className="gen-quiet is-error">{referenceError}</p>}
           </>
         ) : (
           <QuietLine text={referenceNote ?? 'This provider does not accept reference images.'} />
         )}
       </section>
-
-      {showNotesSection ? (
-        <section className="gen-section" aria-labelledby={notesHeadingId}>
-          <h3 className="gen-section-title" id={notesHeadingId}>
-            Provider notes
-          </h3>
-          {progressNote === null ? null : <QuietLine text={progressNote} />}
-          {providerNotes.length === 0 ? null : (
-            <ul className="gen-notes">
-              {providerNotes.map((note) => (
-                <li key={note} className="gen-quiet">
-                  {note}
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      ) : null}
     </div>
   );
 }

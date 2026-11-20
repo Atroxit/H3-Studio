@@ -1241,6 +1241,13 @@
   display: none;
 }
 
+.gen-fixed-meta {
+  margin: 0;
+  padding-top: var(--space-1);
+  font-size: var(--text-micro);
+  color: var(--text-faint);
+}
+
 .gen-legend,
 .gen-label {
   display: block;
@@ -1530,12 +1537,6 @@
 .gen-ref-add-text {
   font-size: var(--text-sm);
   font-weight: 500;
-}
-
-.gen-notes {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
 }
 
 /* Loading skeleton: the inspector shows shape, not a broken form */
