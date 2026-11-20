@@ -508,7 +508,9 @@ export function adoptCapabilities(
   } else if (presetId !== null) {
     const match = capabilities.presets.find((preset) => preset.id === presetId);
     if (match === undefined) {
-      presetId = null;
+      // A synthesized tier (see tieredPresetsForRatio) has no provider preset behind it, but
+      // its id names the exact canvas, so it survives a capabilities refresh.
+      if (presetId !== `${width}x${height}`) presetId = null;
       width = snapToMultiple(width, multiple);
       height = snapToMultiple(height, multiple);
     } else {

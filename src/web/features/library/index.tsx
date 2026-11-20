@@ -573,9 +573,9 @@ export function LibraryRail(): ReactNode {
         const active = library.activeBatchId === batch.id;
         const deleting = library.deletingBatchId === batch.id;
         const duration = formatDuration(batchDurationMs(batch));
-        // One quiet line of data on the artwork: the width plus how long it took, or the
-        // canvas when the batch has no duration to report yet.
-        const meta = duration === null ? `${batch.width} × ${batch.height}` : `${batch.width}px · ${duration}`;
+        // A half-width thumb has room for one short fact, so it shows how long the batch
+        // took, or the canvas when there is no duration to report yet.
+        const meta = duration ?? `${batch.width}×${batch.height}`;
         return (
           <li key={batch.id} className={active ? 'lb-rail-item is-active' : 'lb-rail-item'}>
             <button
@@ -605,7 +605,9 @@ export function LibraryRail(): ReactNode {
                     height={cover.height}
                   />
                   <span className="lb-rail-scrim">
-                    <span className="lb-rail-meta">{meta}</span>
+                    <span className="lb-rail-meta" title={`${batch.width} × ${batch.height}`}>
+                      {meta}
+                    </span>
                     {images.length > 1 ? (
                       <span className="lb-rail-multi">{images.length}×</span>
                     ) : null}

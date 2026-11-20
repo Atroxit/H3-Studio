@@ -1,7 +1,7 @@
 // Pure helpers for the generate surface. Nothing here touches React or the DOM,
 // so the unit suite can import this module directly under Node.
 
-import type { BatchRecord, StoredImage } from '../../../core/types';
+import type { BatchRecord, SizePreset, StoredImage } from '../../../core/types';
 
 /** The largest prompt the server accepts, mirrored here so the UI can block it early. */
 export const PROMPT_MAX_LENGTH = 4000;
@@ -54,6 +54,123 @@ export function ratioOf(width: number, height: number): string {
   }
   const divisor = greatestCommonDivisor(width, height);
   return `${Math.round(width / divisor)}:${Math.round(height / divisor)}`;
+}
+
+/** The three resolution classes the inspector shows, cheapest first. */
+export const SIZE_TIER_LABELS = ['1K', '2K', '4K'] as const;
+export type SizeTierLabel = (typeof SIZE_TIER_LABELS)[number];
+
+/** The micro line under each tier label. */
+export const SIZE_TIER_DETAILS: Readonly<Record<SizeTierLabel, string>> = {
+  '1K': 'Draft',
+  '2K': '4MP',
+  '4K': 'Hero',
+};
+
+interface SizeTierTarget {
+  label: SizeTierLabel;
+  /** The longest side a preset of this tier may have; the same cuts `presetShort` uses. */
+  longest: number;
+  /** The pixel count a synthesized preset aims for. */
+  area: number;
+}
+
+const SIZE_TIER_TARGETS: readonly SizeTierTarget[] = [
+  { label: '1K', longest: 1280, area: 1024 * 1024 },
+  { label: '2K', longest: 2560, area: 2048 * 2048 },
+  { label: '4K', longest: Number.POSITIVE_INFINITY, area: 4096 * 4096 },
+];
+
+/**
+ * The tier a preset belongs to, by its longest side. Providers name their presets freely,
+ * so this is the only shared vocabulary between a provider preset and a synthesized one.
+ */
+export function sizeTier(preset: SizePreset): SizeTierLabel {
+  const longest = Math.max(preset.width, preset.height);
+  if (!Number.isFinite(longest) || longest <= 0) return '2K';
+  for (const target of SIZE_TIER_TARGETS) {
+    if (longest <= target.longest) return target.label;
+  }
+  return '4K';
+}
+
+/** The numeric value of an "a:b" label, defaulting to square for anything unreadable. */
+function ratioValue(ratio: string): number {
+  const [left, right] = ratio.split(':');
+  const numerator = Number(left);
+  const denominator = Number(right);
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || numerator <= 0 || denominator <= 0) {
+    return 1;
+  }
+  return numerator / denominator;
+}
+
+/** Whether a size reads back as the ratio label, by name or within the ratio tolerance. */
+function matchesRatio(width: number, height: number, ratio: string): boolean {
+  if (ratioOf(width, height) === ratio) return true;
+  const value = ratioValue(ratio);
+  return Math.abs(width / height - value) / value <= RATIO_TOLERANCE;
+}
+
+/**
+ * One synthesized preset at a target pixel count and aspect ratio. Sizes are rounded to the
+ * provider's multiple, then nudged by whole steps until the label reads back as the same
+ * ratio, so the tile the user picks is the tile the ratio row shows.
+ */
+function synthesizedPreset(ratio: string, area: number, multiple: number): SizePreset {
+  const step = Math.max(1, Math.trunc(Number.isFinite(multiple) && multiple > 0 ? multiple : 32));
+  const value = ratioValue(ratio);
+  const snap = (candidate: number): number =>
+    Math.min(MAX_IMAGE_SIZE, Math.max(MIN_IMAGE_SIZE, Math.round(candidate / step) * step));
+  const baseWidth = snap(Math.sqrt(area * value));
+  const baseHeight = snap(Math.sqrt(area / value));
+  let width = baseWidth;
+  let height = baseHeight;
+  let bestDelta = Number.POSITIVE_INFINITY;
+  for (let offsetWidth = -2; offsetWidth <= 2; offsetWidth += 1) {
+    for (let offsetHeight = -2; offsetHeight <= 2; offsetHeight += 1) {
+      const candidateWidth = snap(baseWidth + offsetWidth * step);
+      const candidateHeight = snap(baseHeight + offsetHeight * step);
+      if (!matchesRatio(candidateWidth, candidateHeight, ratio)) continue;
+      const delta = Math.abs(candidateWidth * candidateHeight - area);
+      if (delta < bestDelta) {
+        width = candidateWidth;
+        height = candidateHeight;
+        bestDelta = delta;
+      }
+    }
+  }
+  return { id: `${width}x${height}`, label: `${width}×${height}`, width, height };
+}
+
+/**
+ * Exactly three resolution tiers for one aspect ratio, in 1K, 2K, 4K order. A provider
+ * preset that already sits in a tier is reused (the one closest to the tier's pixel count
+ * when there are several); the rest are synthesized, because a provider that lists one
+ * 16 MP preset per ratio would otherwise hide the cheaper, faster sizes entirely.
+ *
+ * A provider that only takes its own presets gets its list back untouched.
+ */
+export function tieredPresetsForRatio(
+  ratioPresets: readonly SizePreset[],
+  ratio: string,
+  multiple: number,
+  arbitrarySize: boolean,
+): SizePreset[] {
+  if (!arbitrarySize) return [...ratioPresets];
+  return SIZE_TIER_TARGETS.map((target) => {
+    let best: SizePreset | null = null;
+    let bestDelta = Number.POSITIVE_INFINITY;
+    for (const preset of ratioPresets) {
+      if (sizeTier(preset) !== target.label) continue;
+      const delta = Math.abs(preset.width * preset.height - target.area);
+      if (delta < bestDelta) {
+        best = preset;
+        bestDelta = delta;
+      }
+    }
+    return best ?? synthesizedPreset(ratio, target.area, multiple);
+  });
 }
 
 /**

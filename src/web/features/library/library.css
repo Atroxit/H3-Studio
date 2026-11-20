@@ -341,12 +341,17 @@
   pointer-events: none;
 }
 
-/* Rail list: a visual-first contact sheet. The artwork is the item; the metadata is a
-   scrim over its foot, so a batch is recognised by the picture, not by a filename. */
+/* Rail list: a visual-first contact sheet of half-width square thumbs, so more of the
+   recent work fits in the rail without a scroll. The metadata is a scrim over the
+   artwork's foot, because a batch is recognised by the picture, not by a filename. */
 .lb-rail {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .lb-rail-item {
@@ -361,7 +366,7 @@
   min-width: 0;
   padding: 0;
   border: 1px solid var(--line-soft);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--panel-sunken);
   text-align: left;
   overflow: hidden;
@@ -387,9 +392,9 @@
   position: relative;
   display: block;
   width: 100%;
-  aspect-ratio: 4 / 3;
+  aspect-ratio: 1 / 1;
   overflow: hidden;
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--panel-sunken);
 }
 
@@ -414,9 +419,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-4) var(--space-2) 6px;
-  background: linear-gradient(to top, rgba(8, 8, 10, 0.88), rgba(8, 8, 10, 0.35) 55%, transparent);
+  gap: 4px;
+  padding: var(--space-3) 5px 4px;
+  background: linear-gradient(to top, rgba(8, 8, 10, 0.9), rgba(8, 8, 10, 0.35) 55%, transparent);
   pointer-events: none;
 }
 
@@ -424,7 +429,7 @@
   min-width: 0;
   overflow: hidden;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 9px;
   line-height: 1.3;
   font-variant-numeric: tabular-nums;
   color: var(--text);
@@ -434,12 +439,12 @@
 
 .lb-rail-multi {
   flex: 0 0 auto;
-  padding: 1px 5px;
+  padding: 0 4px;
   border: 1px solid var(--line);
   border-radius: var(--radius-pill);
   background: var(--scrim-strong);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 9px;
   font-variant-numeric: tabular-nums;
   color: var(--text-muted);
 }
@@ -449,19 +454,23 @@
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: 4px;
   width: 100%;
-  aspect-ratio: 4 / 3;
-  padding: var(--space-2);
+  aspect-ratio: 1 / 1;
+  padding: 6px;
   background: linear-gradient(160deg, var(--panel-sunken), var(--panel));
 }
 
 .lb-rail-status {
   align-self: flex-start;
-  padding: 1px var(--space-2);
+  max-width: 100%;
+  padding: 0 4px;
   border: 1px solid var(--line);
   border-radius: var(--radius-pill);
-  font-size: 10px;
+  font-size: 9px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -489,8 +498,8 @@
 .lb-rail-blank-prompt {
   display: -webkit-box;
   overflow: hidden;
-  font-size: var(--text-sm);
-  line-height: 1.35;
+  font-size: 11px;
+  line-height: 1.3;
   color: var(--text-muted);
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -500,13 +509,13 @@
 /* Delete sits over the artwork, hidden until the card is hovered or focused. */
 .lb-rail-delete {
   position: absolute;
-  top: 6px;
-  right: 6px;
+  top: 4px;
+  right: 4px;
   z-index: 2;
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -550,8 +559,8 @@
 }
 
 .lb-rail-delete .icon {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
 }
 
 .lb-rail-note {

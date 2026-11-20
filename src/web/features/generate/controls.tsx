@@ -7,7 +7,14 @@ import { useEffect, useId, useState, type ChangeEvent, type ReactNode } from 're
 import { getSystemProfile } from '../../api';
 import { Button, Slider, VramLedMeter } from '../../components';
 import type { ProviderCapabilities, SizePreset } from '../../../core/types';
-import { ratioOf, seedProblem, sizeProblem } from './helpers';
+import {
+  SIZE_TIER_DETAILS,
+  SIZE_TIER_LABELS,
+  ratioOf,
+  seedProblem,
+  sizeProblem,
+  tieredPresetsForRatio,
+} from './helpers';
 import { MAX_STEPS, MIN_STEPS, type GenerationController } from './useGeneration';
 import { estimateVram, formatVramGb } from './vram';
 
@@ -246,7 +253,13 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   const groups = groupPresetsByRatio(capabilities.presets);
   const activeRatio = ratioOf(form.width, form.height);
   const activeGroup = groups.find((group) => group.ratio === activeRatio) ?? null;
-  const visiblePresets = activeGroup === null ? capabilities.presets : activeGroup.presets;
+  // A ratio with a single 16 MP provider preset still offers the cheaper tiers, so the
+  // inspector never shrinks to one hero size plus Custom.
+  const presetsForRatio = (group: AspectGroup): SizePreset[] =>
+    tieredPresetsForRatio(group.presets, group.ratio, multiple, capabilities.arbitrarySize);
+  const visiblePresets = activeGroup === null ? capabilities.presets : presetsForRatio(activeGroup);
+  // Synthesized tiers keep the 1K/2K/4K names they were built for, whatever their longest side.
+  const tieredActive = capabilities.arbitrarySize && activeGroup !== null;
   const activePreset = visiblePresets.find((preset) => preset.id === form.presetId) ?? null;
   const sizeIssue = sizeProblem(form.width, form.height);
   const sizeInvalid = sizeIssue !== null;
@@ -266,11 +279,14 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
   });
 
   const aspectOptions: SegmentedOption[] = groups.map((group) => ({ value: group.ratio, label: group.ratio }));
-  const sizeOptions: SegmentedOption[] = visiblePresets.map((preset) => ({
-    value: preset.id,
-    ...presetShort(preset),
-    title: `${preset.width} × ${preset.height} — ${preset.label}`,
-  }));
+  const sizeOptions: SegmentedOption[] = visiblePresets.map((preset, index) => {
+    const tier = tieredActive ? SIZE_TIER_LABELS[index] : undefined;
+    return {
+      value: preset.id,
+      ...(tier === undefined ? presetShort(preset) : { label: tier, detail: SIZE_TIER_DETAILS[tier] }),
+      title: `${preset.width} × ${preset.height} — ${preset.label}`,
+    };
+  });
   // Four counts at most, plus whatever larger count the form already holds, so nothing hides.
   const countLimit = Math.min(4, Math.max(1, Math.trunc(capabilities.maxBatch)));
   const countValues = Array.from({ length: countLimit }, (_unused, index) => index + 1);
@@ -298,12 +314,18 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
 
   const handleAspect = (ratio: string): void => {
     const group = groups.find((candidate) => candidate.ratio === ratio);
-    const preset = group === undefined ? undefined : group.presets[0];
+    if (group === undefined) return;
+    const presets = presetsForRatio(group);
+    // Keep the tier the user is already on, so switching ratio changes shape and not cost.
+    const activeTier = tieredActive ? visiblePresets.findIndex((preset) => preset.id === form.presetId) : -1;
+    const wantedTier = activeTier >= 0 ? activeTier : Math.min(1, presets.length - 1);
+    const preset = presets[wantedTier] ?? presets[0];
     if (preset !== undefined) controller.choosePreset(preset);
   };
 
   const handleSize = (presetId: string): void => {
-    const preset = capabilities.presets.find((candidate) => candidate.id === presetId);
+    // A synthesized tier is not in capabilities.presets, so the visible list comes first.
+    const preset = visiblePresets.find((candidate) => candidate.id === presetId);
     if (preset !== undefined) controller.choosePreset(preset);
   };
 
@@ -437,9 +459,12 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
 
       <section className="gen-section">
         <h3 className="gen-section-title">Batch &amp; seed</h3>
-        <div className="gen-batch-row">
-          <fieldset className="gen-field is-count" aria-label="Images">
-            <div className="gen-seg">
+        <div className="gen-field">
+          <p className="gen-legend" aria-hidden="true">
+            Images
+          </p>
+          <fieldset className="gen-field gen-batch-count" aria-label="Images">
+            <div className="gen-seg is-fixed">
               {countValues.map((value) => (
                 <label key={value} className="gen-seg-option" title={`${value} ${value === 1 ? 'image' : 'images'}`}>
                   <input
@@ -458,32 +483,33 @@ export function GenerationControls({ controller, providerLabel }: GenerationCont
               ))}
             </div>
           </fieldset>
-
-          {capabilities.seed ? (
-            <div className="gen-field">
-              <label className="gen-legend" htmlFor={`${countName}-seed`}>
-                Seed
-              </label>
-              <input
-                id={`${countName}-seed`}
-                className="field-input gen-num"
-                type="number"
-                inputMode="numeric"
-                min={0}
-                step={1}
-                placeholder="Seed"
-                aria-label="Seed"
-                title="Leave empty for a fresh seed per image"
-                value={form.seed}
-                disabled={controller.running}
-                aria-invalid={seedIssue === null ? undefined : true}
-                onChange={(event) => controller.updateForm({ seed: event.target.value })}
-              />
-            </div>
-          ) : (
-            <QuietLine text={seedNote ?? 'This provider chooses the seed itself.'} />
-          )}
         </div>
+
+        {capabilities.seed ? (
+          <div className="gen-field">
+            <label className="gen-label" htmlFor={`${countName}-seed`}>
+              Seed
+            </label>
+            <input
+              id={`${countName}-seed`}
+              className="field-input gen-num"
+              type="number"
+              inputMode="numeric"
+              min={0}
+              step={1}
+              placeholder="Random"
+              aria-label="Seed"
+              title="Leave empty for a fresh seed per image"
+              value={form.seed}
+              disabled={controller.running}
+              aria-invalid={seedIssue === null ? undefined : true}
+              onChange={(event) => controller.updateForm({ seed: event.target.value })}
+            />
+            <p className="gen-hint">Empty means a fresh random seed per image.</p>
+          </div>
+        ) : (
+          <QuietLine text={seedNote ?? 'This provider chooses the seed itself.'} />
+        )}
         {seedIssue === null ? null : <p className="gen-hint is-error">{seedIssue}</p>}
       </section>
 

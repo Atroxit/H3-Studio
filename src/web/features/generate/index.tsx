@@ -10,7 +10,7 @@ import { ImageViewer } from '../library/viewer';
 import { PromptComposer } from './composer';
 import { GenerationControls } from './controls';
 import { ResultsGrid } from './results';
-import { snapToMultiple, useGeneration } from './useGeneration';
+import { useGeneration } from './useGeneration';
 import './generate.css';
 
 interface ViewerState {
@@ -25,13 +25,6 @@ export function GenerateCanvas(): ReactNode {
   const generation = useGeneration();
   const studio = useStudio();
   const [viewer, setViewer] = useState<ViewerState | null>(null);
-
-  const multiple = Math.max(
-    1,
-    Math.trunc(generation.capability.capabilities?.sizeMultiple ?? 1),
-  );
-  const snappedWidth = snapToMultiple(generation.form.width, multiple);
-  const snappedHeight = snapToMultiple(generation.form.height, multiple);
 
   const openImage = useCallback(
     async (imageId: string, trigger: HTMLElement | null, compare = false): Promise<void> => {
@@ -92,8 +85,6 @@ export function GenerateCanvas(): ReactNode {
         running={generation.running}
         canGenerate={generation.canGenerate}
         blockedReason={generation.blockedReason}
-        snappedWidth={snappedWidth}
-        snappedHeight={snappedHeight}
         maxReferenceImages={
           generation.capability.capabilities === null
             ? 0

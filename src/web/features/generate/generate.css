@@ -1326,35 +1326,17 @@
   color: var(--danger);
 }
 
-.gen-snapped {
-  color: var(--text-faint);
-}
-
 .gen-quiet.is-error {
   color: var(--danger);
 }
 
+/* The action row is just the buttons: the size readout lives in the inspector now. */
 .gen-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: var(--space-3);
-}
-
-.gen-actions-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-3);
-  min-width: 0;
-}
-
-.gen-mono {
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-  color: var(--text-muted);
-  white-space: nowrap;
 }
 
 .gen-actions-buttons {
@@ -1535,10 +1517,11 @@
   background: var(--panel-sunken);
 }
 
-/* The five aspect ratios always share one crisp row of equal cells. */
+/* The aspect ratios and the batch counts always share one crisp row of equal cells. */
 .gen-seg.is-fixed {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
 }
 
 .gen-seg-option {
@@ -1664,21 +1647,10 @@
   cursor: not-allowed;
 }
 
-/* Batch and seed sit on one row: the count scale left, the seed field right. The seed
-   carries a small visible label, so the two controls bottom-align. */
-.gen-batch-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: var(--space-2);
-  align-items: end;
-}
-
-.gen-batch-row .gen-field.is-count {
-  min-width: 0;
-}
-
-.gen-batch-row .gen-num {
-  height: 32px;
+/* Batch and seed stack: a full width count bar, then a full width seed field, so neither
+   control is squeezed into half of the rail. */
+.gen-batch-count .gen-seg-body.is-single {
+  min-height: 32px;
 }
 
 .gen-pair {

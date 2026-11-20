@@ -16,7 +16,7 @@ import {
 import type { ReferenceImage } from '../../../core/types';
 import { imageUrl, uploadReference } from '../../api';
 import { Button, Spinner } from '../../components';
-import { PROMPT_MAX_LENGTH, promptProblem, sizeProblem } from './helpers';
+import { PROMPT_MAX_LENGTH, promptProblem } from './helpers';
 import type { AlterationCandidate, GenerationForm } from './useGeneration';
 
 export interface PromptComposerProps {
@@ -24,8 +24,6 @@ export interface PromptComposerProps {
   running: boolean;
   canGenerate: boolean;
   blockedReason: string | null;
-  snappedWidth: number;
-  snappedHeight: number;
   /** The images this provider accepts, or 0 when it takes text only. */
   maxReferenceImages: number;
   /** The image an alteration would use, or null when the composer writes a new image. */
@@ -104,8 +102,6 @@ export function PromptComposer({
   running,
   canGenerate,
   blockedReason,
-  snappedWidth,
-  snappedHeight,
   maxReferenceImages,
   alterationSource,
   alterationCandidates,
@@ -139,9 +135,6 @@ export function PromptComposer({
       ? '1 image'
       : `${form.count} images`;
   const promptIssue = form.prompt.trim().length === 0 ? null : promptProblem(form.prompt);
-  const snapped =
-    sizeProblem(form.width, form.height) === null &&
-    (snappedWidth !== form.width || snappedHeight !== form.height);
   const describedBy = [running ? hintId : null, promptIssue === null ? null : errorId]
     .filter((id): id is string => id !== null)
     .join(' ');
@@ -389,16 +382,6 @@ export function PromptComposer({
       )}
 
       <div className="gen-actions">
-        <p className="gen-actions-meta">
-          <span className="gen-mono">
-            {form.width} × {form.height}
-          </span>
-          {snapped ? (
-            <span className="gen-mono gen-snapped" title="The size sent to the provider">
-              → {snappedWidth} × {snappedHeight}
-            </span>
-          ) : null}
-        </p>
         <div className="gen-actions-buttons">
           {running ? (
             <Button variant="secondary" onClick={onCancel}>
