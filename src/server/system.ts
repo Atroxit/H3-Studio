@@ -369,18 +369,24 @@ function diffusionFileFor(variant: H3ModelVariant): string {
   return variant === 'w4a8' ? W4A8_FILE : INT8_DIFFUSION_FILE;
 }
 
-function textEncoderFileFor(variant: H3TextEncoderVariant): string {
-  return variant === 'nvfp4' ? NVFP4_TEXT_ENCODER_FILE : INT8_TEXT_ENCODER_FILE;
-}
-
 /**
- * NVFP4 is an NVIDIA format and the AWQ build assumes CUDA, so an AMD card always gets the
- * vendor neutral INT8 encoder. Everywhere else the NVFP4 file is used when it is already on
- * disk, because it is smaller and faster, and INT8 is the fallback.
+ * The 32B encoder is the one phase that decides whether a 24 GB card offloads. NVFP4 (14.6 GB)
+ * fits entirely in VRAM on every vendor, AMD included, and measured ~3.5x faster than the
+ * 25.3 GB INT8 build which has to stream over PCIe. Only a 30 GB class card can hold INT8
+ * outright, so that is where INT8 is preferred.
  */
-function chooseTextEncoder(vendor: GpuVendor, installed: ReadonlySet<string>): H3TextEncoderVariant {
-  if (vendor === 'amd') return 'int8';
-  return installed.has(NVFP4_TEXT_ENCODER_FILE) ? 'nvfp4' : 'int8';
+function chooseTextEncoder(tier: HardwareTier, installed: ReadonlySet<string>): H3TextEncoderVariant {
+  if (tier === 'extreme') {
+    if (!installed.has(INT8_TEXT_ENCODER_FILE) && installed.has(NVFP4_TEXT_ENCODER_FILE)) {
+      return 'nvfp4';
+    }
+    return 'int8';
+  }
+  if (installed.has(NVFP4_TEXT_ENCODER_FILE) || !installed.has(INT8_TEXT_ENCODER_FILE)) {
+    return 'nvfp4';
+  }
+  // Only the INT8 file is on disk: point Apply at it rather than at a missing file.
+  return 'int8';
 }
 
 function chooseEnhancer(tier: HardwareTier, installed: ReadonlySet<string>): H3PromptEnhancer {
@@ -443,7 +449,7 @@ function planFor(tier: HardwareTier, ramTotalGb: number, vramGb: number | null):
         cacheNone: true,
         lowvram: false,
         notes: [
-          'W4A8 diffusion plus the NVFP4 text encoder use about 100% of a 24 GB card.',
+          'W4A8 diffusion (11.7 GB) and NVFP4 text encoder (14.6 GB) each fit inside a 24 GB card with zero RAM offloading.',
           pinnedWarning
             ? `Pinned memory is disabled because this machine has only ${round1(ramTotalGb)} GB of RAM.`
             : `Pinned memory stays on: ${round1(ramTotalGb)} GB of RAM is enough to speed up PCIe loads.`,
@@ -506,7 +512,7 @@ export function recommendForHardware(input: HardwareInput): HardwareRecommendati
 
   const tier = tierFor(vramGb);
   const plan = planFor(tier, ramTotalGb, vramGb);
-  const textEncoderVariant = chooseTextEncoder(vendor, installed);
+  const textEncoderVariant = chooseTextEncoder(tier, installed);
   const promptEnhancer = chooseEnhancer(tier, installed);
   const launchArgs = buildLaunchArgs({
     reserveVramGb: plan.reserveVramGb,
@@ -525,13 +531,22 @@ export function recommendForHardware(input: HardwareInput): HardwareRecommendati
   if (installed.size === 0) {
     notes.push('No H3 model file was found yet. Download the recommended files before the first run.');
   }
+  if (tier !== 'extreme' && textEncoderVariant === 'int8') {
+    notes.push(
+      'Only the 25.3 GB INT8 text encoder is installed; downloading the 14.6 GB NVFP4 AWQ text encoder avoids RAM offloading.',
+    );
+  }
   if (vramGb === null) {
     notes.push('The GPU memory size could not be read, so this plan is the conservative one.');
   }
 
+  // Step 2 always points at the encoder that should be on disk, even when Apply has to use
+  // the INT8 fallback for now, so the NVFP4 upgrade stays visible.
+  const recommendedEncoderFile =
+    tier === 'extreme' ? INT8_TEXT_ENCODER_FILE : NVFP4_TEXT_ENCODER_FILE;
   const recommendedFiles = new Set<string>([
     diffusionFileFor(plan.modelVariant),
-    textEncoderFileFor(textEncoderVariant),
+    recommendedEncoderFile,
     VAE_FILE,
   ]);
   const enhancerFile = enhancerFileFor(promptEnhancer);

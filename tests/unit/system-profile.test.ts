@@ -73,11 +73,11 @@ describe('recommendForHardware: extreme tier', () => {
     installedFiles: EVERY_FILE,
   });
 
-  it('picks the INT8 diffusion build, NVFP4 encoder and the 27B enhancer at 4K', () => {
+  it('picks both INT8 builds and the 27B enhancer at 4K', () => {
     expect(recommended.tier).toBe('extreme');
     expect(recommended.tierLabel).toBe('Extreme');
     expect(recommended.modelVariant).toBe('int8_convrot');
-    expect(recommended.textEncoderVariant).toBe('nvfp4');
+    expect(recommended.textEncoderVariant).toBe('int8');
     expect(recommended.promptEnhancer).toBe('qwen3.8_27b');
     expect(recommended.width).toBe(4096);
     expect(recommended.height).toBe(4096);
@@ -108,10 +108,22 @@ describe('recommendForHardware: extreme tier', () => {
   it('marks the extreme files it recommends as installed', () => {
     expect(modelOf(models, INT8_DIFFUSION).recommended).toBe(true);
     expect(modelOf(models, W4A8).recommended).toBe(false);
-    expect(modelOf(models, NVFP4_TEXT_ENCODER).recommended).toBe(true);
+    expect(modelOf(models, INT8_TEXT_ENCODER).recommended).toBe(true);
+    expect(modelOf(models, NVFP4_TEXT_ENCODER).recommended).toBe(false);
     expect(modelOf(models, ENHANCER_27B).recommended).toBe(true);
     expect(modelOf(models, VAE).recommended).toBe(true);
     expect(modelOf(models, VAE).installed).toBe(true);
+  });
+
+  it('uses NVFP4 at extreme size when it is the only encoder on disk', () => {
+    const { recommended } = recommendForHardware({
+      vramGb: 32,
+      ramTotalGb: 64,
+      vendor: 'nvidia',
+      installedFiles: [INT8_DIFFUSION, NVFP4_TEXT_ENCODER, ENHANCER_27B, VAE],
+    });
+
+    expect(recommended.textEncoderVariant).toBe('nvfp4');
   });
 });
 
@@ -180,11 +192,56 @@ describe('recommendForHardware: high tier', () => {
       installedFiles: [W4A8, INT8_TEXT_ENCODER, ENHANCER_9B, VAE],
     });
     expect(recommended.textEncoderVariant).toBe('int8');
-    expect(modelOf(models, INT8_TEXT_ENCODER).recommended).toBe(true);
-    expect(modelOf(models, NVFP4_TEXT_ENCODER).recommended).toBe(false);
+    // Step 2 still points at the NVFP4 file, so the faster upgrade stays visible.
+    expect(modelOf(models, INT8_TEXT_ENCODER).recommended).toBe(false);
+    expect(modelOf(models, NVFP4_TEXT_ENCODER).recommended).toBe(true);
+    expect(recommended.notes.join(' ')).toContain('downloading the 14.6 GB NVFP4 AWQ text encoder');
     // The 27B enhancer is missing too, so the 9B build is what runs.
     expect(recommended.promptEnhancer).toBe('qwen3.5_9b');
     expect(recommended.launchEnv).toEqual({});
+  });
+
+  it('recommends NVFP4 on a 24 GB AMD card when it is installed', () => {
+    const { recommended, models } = recommendForHardware({
+      vramGb: 24,
+      ramTotalGb: 64,
+      vendor: 'amd',
+      installedFiles: EVERY_FILE,
+    });
+
+    expect(recommended.tier).toBe('high');
+    expect(recommended.textEncoderVariant).toBe('nvfp4');
+    expect(modelOf(models, NVFP4_TEXT_ENCODER).recommended).toBe(true);
+    expect(modelOf(models, INT8_TEXT_ENCODER).recommended).toBe(false);
+    expect(recommended.notes.join(' ')).not.toContain('NVFP4 AWQ text encoder avoids RAM offloading');
+  });
+
+  it('recommends NVFP4 on a 24 GB AMD card with only INT8 installed, and flags the offload', () => {
+    const { recommended, models } = recommendForHardware({
+      vramGb: 24,
+      ramTotalGb: 64,
+      vendor: 'amd',
+      installedFiles: amdFiles,
+    });
+
+    expect(recommended.textEncoderVariant).toBe('int8');
+    expect(modelOf(models, NVFP4_TEXT_ENCODER).recommended).toBe(true);
+    expect(modelOf(models, INT8_TEXT_ENCODER).recommended).toBe(false);
+    expect(recommended.notes.join(' ')).toContain(
+      'Only the 25.3 GB INT8 text encoder is installed; downloading the 14.6 GB NVFP4 AWQ text encoder avoids RAM offloading.',
+    );
+  });
+
+  it('recommends NVFP4 without any installed file, so a fresh build downloads it', () => {
+    const { recommended, models } = recommendForHardware({
+      vramGb: 24,
+      ramTotalGb: 64,
+      vendor: 'nvidia',
+      installedFiles: [],
+    });
+
+    expect(recommended.textEncoderVariant).toBe('nvfp4');
+    expect(modelOf(models, NVFP4_TEXT_ENCODER).recommended).toBe(true);
   });
 
   it('prefers NVFP4 and the 27B enhancer when both are installed on NVIDIA', () => {

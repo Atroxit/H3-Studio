@@ -8,6 +8,7 @@ import { applySystemProfile, type ApplySystemProfileResponse } from '../../api';
 import { Button, Spinner } from '../../components';
 import { useStudio } from '../../studio';
 import { applyStudioDefaults } from '../generate/useGeneration';
+import { estimateVram, formatVramGb } from '../generate/vram';
 import {
   describeError,
   formatGigabytes,
@@ -279,6 +280,21 @@ export function SetupWizard({
   const installedModels = profile === null ? 0 : installedModelCount(profile.models);
   const locked = profile === null;
   const targetProviderId = comfyProviderIdOf(studio.providers);
+  // Step three's budget preview: the same pure estimator the Generate rail uses, pinned to the
+  // profile the wizard is about to write, so the user sees the fit before applying it.
+  const vram =
+    step === 3 && profile !== null
+      ? estimateVram({
+          width: profile.recommended.width,
+          height: profile.recommended.height,
+          modelVariant: profile.recommended.modelVariant,
+          textEncoderVariant: profile.recommended.textEncoderVariant,
+          promptEnhancer: profile.recommended.promptEnhancer,
+          referenceCount: 0,
+          gpuVramGb: profile.gpu.vramGb,
+          systemRamGb: profile.ramTotalGb,
+        })
+      : null;
 
   return (
     <div className="sw">
@@ -545,6 +561,51 @@ export function SetupWizard({
               </div>
             </div>
           </div>
+
+          {vram === null ? null : (
+            <div className="sw-vram">
+              <div className="sw-vram-head">
+                <h3 className="sw-group-title">Estimated peak VRAM</h3>
+                <span className="sw-vram-figures">
+                  <span className="sw-vram-value">
+                    {vram.gpuVramGb === null
+                      ? `~${vram.peakGb.toFixed(1)} GB`
+                      : `~${vram.peakGb.toFixed(1)} / ${formatVramGb(vram.gpuVramGb)} GB`}
+                  </span>
+                  <span className={`sw-vram-status is-${vram.status}`}>{vram.statusLabel}</span>
+                </span>
+              </div>
+              <div
+                className="sw-vram-track"
+                role="meter"
+                aria-label="Estimated peak VRAM"
+                aria-valuemin={0}
+                aria-valuemax={vram.gpuVramGb ?? 24}
+                aria-valuenow={vram.peakGb}
+              >
+                <span
+                  className={`sw-vram-fill is-${vram.status}`}
+                  style={{ width: `${vram.fillPercent}%` }}
+                />
+              </div>
+              <div className="sw-vram-stages">
+                <ul className="sw-vram-stage-list">
+                  {vram.stages.map((stage) => (
+                    <li
+                      key={stage.id}
+                      className={
+                        stage.id === vram.peakStage.id ? 'sw-vram-stage is-peak' : 'sw-vram-stage'
+                      }
+                    >
+                      <span className="sw-vram-stage-label">{stage.label}</span>
+                      <span className="sw-vram-stage-gb">{stage.gb.toFixed(1)} GB</span>
+                    </li>
+                  ))}
+                </ul>
+                <span className="sw-vram-hint">Sequential peak · models hand off between stages</span>
+              </div>
+            </div>
+          )}
 
           <div className="sw-why">
             <h3 className="sw-group-title">Why these settings?</h3>

@@ -768,6 +768,139 @@
   min-width: 0;
 }
 
+/* Step three: the VRAM budget the tuned profile will actually need. */
+.sw-vram {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-panel);
+  background: var(--panel-sunken);
+}
+
+.sw-vram-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.sw-vram-figures {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.sw-vram-value {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.sw-vram-status {
+  font-size: var(--text-micro);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.sw-vram-status.is-ok {
+  color: var(--ok);
+}
+
+.sw-vram-status.is-tight {
+  color: var(--warn);
+}
+
+.sw-vram-status.is-offload,
+.sw-vram-status.is-oom {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.sw-vram-track {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.sw-vram-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-pill);
+  transition: width 180ms ease, background 180ms ease;
+}
+
+.sw-vram-fill.is-ok {
+  background: var(--ok);
+}
+
+.sw-vram-fill.is-tight {
+  background: var(--warn);
+}
+
+.sw-vram-fill.is-offload,
+.sw-vram-fill.is-oom {
+  background: var(--danger);
+}
+
+.sw-vram-stages {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-4);
+  flex-wrap: wrap;
+}
+
+.sw-vram-stage-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sw-vram-stage {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: var(--text-micro);
+  color: var(--text-faint);
+}
+
+.sw-vram-stage.is-peak {
+  color: var(--text-muted);
+}
+
+.sw-vram-stage.is-peak::before {
+  content: '';
+  align-self: center;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--text-muted);
+}
+
+.sw-vram-stage.is-peak .sw-vram-stage-label {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.sw-vram-stage-gb {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.sw-vram-hint {
+  font-size: var(--text-micro);
+  color: var(--text-faint);
+}
+
 .sw-kv {
   display: flex;
   flex-direction: column;
