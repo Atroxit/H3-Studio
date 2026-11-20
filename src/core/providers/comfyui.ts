@@ -134,6 +134,32 @@ const H3_ENHANCER_BY_MODE: Readonly<Record<Exclude<H3PromptEnhancer, 'off'>, str
   'qwen3.8_27b': 'qwen3.8_27b_minimax_h3_image_pe_w4a8_gptq.safetensors',
 };
 const H3_ENHANCER_NAMES: ReadonlySet<string> = new Set(Object.values(H3_ENHANCER_BY_MODE));
+/**
+ * A tight token budget per enhancer. The fast 9B model answers without private reasoning, so
+ * 1024 tokens cover the JSON caption; the 27B model keeps a small private thinking budget
+ * instead of the template's 8192 tokens, which was minutes of runaway thinking.
+ */
+const H3_ENHANCER_TOKEN_BUDGET: Readonly<
+  Record<Exclude<H3PromptEnhancer, 'off'>, { readonly thinking: boolean; readonly maxLength: number }>
+> = {
+  'qwen3.5_9b': { thinking: false, maxLength: 1024 },
+  'qwen3.8_27b': { thinking: true, maxLength: 2048 },
+};
+/** The template sentence that asks the enhancer to reason before answering. */
+const THINKING_FIRST_SENTENCE = 'Reason in the thinking section first.';
+/**
+ * Class names that make up the image pipeline. An enhancer subgraph that reaches any of them
+ * would drag a diffusion model into RAM beside the enhancer, so extraction refuses it.
+ */
+const ENHANCER_SUBGRAPH_EXCLUDED_CLASSES: readonly string[] = [
+  'UNETLoader',
+  'VAELoader',
+  'KSampler',
+  'VAEDecode',
+  'SaveImage',
+  'ConditioningZeroOut',
+  ...REFERENCE_CONDITIONING_CLASSES,
+];
 
 /** A standard text to image pipeline. Placeholders are replaced per request. */
 export const defaultWorkflowTemplate: WorkflowGraph = {
@@ -701,6 +727,10 @@ export function applyPromptEnhancer(
   const effective = effectivePromptEnhancer(enhancePrompt, promptEnhancer);
   const wanted = effective !== 'off';
   const enhancerClip = effective === 'off' ? null : H3_ENHANCER_BY_MODE[effective];
+  // A running fast enhancer must not spend minutes in a private thinking section, so its
+  // system prompt loses the sentence that asks for one.
+  const systemPromptIds =
+    effective === 'qwen3.5_9b' ? enhancerSystemPromptIds(graph) : new Set<string>();
   const cloned: Record<string, unknown> = {};
   let changed = false;
   for (const [nodeId, node] of Object.entries(graph)) {
@@ -725,9 +755,48 @@ export function applyPromptEnhancer(
       cloned[nodeId] = { ...node, inputs: { ...inputs, clip_name: enhancerClip } };
       continue;
     }
+    if (wanted && nodeClassType(node) === 'TextGenerateV2' && isRecord(inputs)) {
+      const budget = H3_ENHANCER_TOKEN_BUDGET[effective];
+      if (inputs['thinking'] !== budget.thinking || inputs['max_length'] !== budget.maxLength) {
+        changed = true;
+      }
+      cloned[nodeId] = {
+        ...node,
+        inputs: { ...inputs, thinking: budget.thinking, max_length: budget.maxLength },
+      };
+      continue;
+    }
+    if (
+      systemPromptIds.has(nodeId) &&
+      nodeClassType(node) === 'PrimitiveStringMultiline' &&
+      isRecord(inputs) &&
+      typeof inputs['value'] === 'string' &&
+      inputs['value'].includes(THINKING_FIRST_SENTENCE)
+    ) {
+      changed = true;
+      cloned[nodeId] = {
+        ...node,
+        inputs: {
+          ...inputs,
+          value: inputs['value'].replaceAll(THINKING_FIRST_SENTENCE, '').trimStart(),
+        },
+      };
+      continue;
+    }
     cloned[nodeId] = node;
   }
   return changed ? cloned : graph;
+}
+
+/** The PrimitiveStringMultiline node ids wired into a TextGenerateV2 system_prompt. */
+function enhancerSystemPromptIds(graph: Record<string, unknown>): Set<string> {
+  const ids = new Set<string>();
+  for (const node of Object.values(graph)) {
+    if (nodeClassType(node) !== 'TextGenerateV2') continue;
+    const source = linkSource(nodeInputs(node)['system_prompt']);
+    if (source !== null) ids.add(source);
+  }
+  return ids;
 }
 
 /**
@@ -774,6 +843,104 @@ function linkSource(value: unknown): string | null {
   const source = value[0];
   if (typeof source === 'string') return source;
   return typeof source === 'number' && Number.isFinite(source) ? String(source) : null;
+}
+
+/** Every node id referenced from one input value, including nested link arrays. */
+function linkSourcesIn(value: unknown, into: string[]): void {
+  const source = linkSource(value);
+  if (source !== null) {
+    into.push(source);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) linkSourcesIn(item, into);
+    return;
+  }
+  if (isRecord(value)) {
+    for (const item of Object.values(value)) linkSourcesIn(item, into);
+  }
+}
+
+/** Every node reachable backwards from one node through its inputs, including itself. */
+function collectDependencies(graph: Record<string, unknown>, startId: string): Set<string> {
+  const collected = new Set<string>();
+  const queue = [startId];
+  while (queue.length > 0) {
+    const nodeId = queue.pop();
+    if (nodeId === undefined || collected.has(nodeId) || !isRecord(graph[nodeId])) continue;
+    collected.add(nodeId);
+    const sources: string[] = [];
+    for (const value of Object.values(nodeInputs(graph[nodeId]))) linkSourcesIn(value, sources);
+    for (const source of sources) {
+      if (!collected.has(source)) queue.push(source);
+    }
+  }
+  return collected;
+}
+
+/** True when the graph has a node of that class. */
+function graphHasNodeClass(graph: Record<string, unknown>, classType: string): boolean {
+  return Object.values(graph).some((node) => nodeClassType(node) === classType);
+}
+
+export interface EnhancerSubgraph {
+  graph: Record<string, unknown>;
+  /** The PreviewAny node that prints the extracted caption. */
+  outputNodeId: string;
+}
+
+/**
+ * Splits the prompt enhancer out of a full H3 graph into a graph of its own. ComfyUI eagerly
+ * executes every leaf loader of a graph, so the full template loads the 29 GB Qwen3-VL encoder
+ * and the 14-20 GB H3 UNet before the enhancer runs. Running the enhancer alone first, then the
+ * image graph with the finished caption, keeps only one large model in RAM at a time.
+ *
+ * The subgraph is the transitive closure of the switch's on_true input: JsonExtractString,
+ * TextGenerateV2, its CLIPLoader, the system and task prompts, StringReplace, and every wired
+ * LoadImage reference. A PreviewAny prints the extracted caption. Anything that would pull the
+ * diffusion pipeline in (a UNETLoader, the conditioning node, a sampler or the VAE) makes the
+ * graph non isolatable, and the caller keeps the single pass path.
+ */
+export function extractEnhancerSubgraph(fullGraph: Record<string, unknown>): EnhancerSubgraph | null {
+  const switchId = Object.keys(fullGraph).find(
+    (nodeId) =>
+      nodeClassType(fullGraph[nodeId]) === 'ComfySwitchNode' &&
+      nodeInputs(fullGraph[nodeId])['switch'] === true,
+  );
+  if (switchId === undefined) return null;
+  const onTrue = linkSource(nodeInputs(fullGraph[switchId])['on_true']);
+  if (onTrue === null) return null;
+
+  const ids = collectDependencies(fullGraph, onTrue);
+  const classes = new Set<string>();
+  for (const nodeId of ids) {
+    const classType = nodeClassType(fullGraph[nodeId]);
+    if (classType !== null) classes.add(classType);
+  }
+  if (!classes.has('TextGenerateV2')) return null;
+  if (ENHANCER_SUBGRAPH_EXCLUDED_CLASSES.some((excluded) => classes.has(excluded))) return null;
+
+  const graph: Record<string, unknown> = {};
+  for (const nodeId of ids) {
+    const node = fullGraph[nodeId];
+    graph[nodeId] = isRecord(node) ? { ...node, inputs: { ...nodeInputs(node) } } : node;
+  }
+
+  // Reuse the graph's own PreviewAny when it has one, so the node id the history reports is
+  // the same the rest of the adapter already knows.
+  const previewIds = Object.keys(fullGraph).filter((nodeId) => nodeClassType(fullGraph[nodeId]) === 'PreviewAny');
+  let outputNodeId = previewIds.find((nodeId) => !ids.has(nodeId)) ?? previewIds[0];
+  if (outputNodeId === undefined) {
+    outputNodeId = 'enhancer_preview';
+    while (ids.has(outputNodeId)) outputNodeId = `_${outputNodeId}`;
+  }
+  const previewNode = fullGraph[outputNodeId];
+  graph[outputNodeId] = {
+    class_type: 'PreviewAny',
+    inputs: { ...(isRecord(previewNode) ? nodeInputs(previewNode) : {}), source: [onTrue, 0] },
+  };
+
+  return { graph, outputNodeId };
 }
 
 /**
@@ -1736,7 +1903,8 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
         uploadedRefs.push(await uploadReferenceImage(baseUrl, filePath, ctx.signal));
       }
     }
-    const enhancerOn = effectivePromptEnhancer(request.enhancePrompt, request.promptEnhancer) !== 'off';
+    const enhancer = effectivePromptEnhancer(request.enhancePrompt, request.promptEnhancer);
+    const enhancerOn = enhancer !== 'off';
     const effectiveRequest =
       uploadedRefs.length > 0
         ? {
@@ -1751,12 +1919,87 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
           }
         : request;
 
+    // Two phase enhancement: ComfyUI eagerly executes every leaf loader of one graph, so the
+    // full H3 template would hold the Qwen3-VL encoder, the enhancer and the H3 UNet in RAM
+    // together (50+ GB on a 32 GB machine). The enhancer runs alone first, then the image
+    // graph runs with the extracted caption. Phase 2 keeps the switch off, and ComfyUI's
+    // ComfySwitchNode marks on_true lazy, so node 16 (the enhancer CLIPLoader) never loads.
+    let phaseRequest: GenerationRequest = effectiveRequest;
+    if (enhancerOn) {
+      const probeGraph = graphForRequest(
+        template,
+        { ...effectiveRequest, count: 1 },
+        options,
+        config,
+        seed,
+        uploadedRefs,
+      );
+      const enhancerRun = extractEnhancerSubgraph(probeGraph);
+      const hasImagePipeline =
+        graphHasNodeClass(probeGraph, 'UNETLoader') ||
+        graphHasNodeClass(probeGraph, 'MiniMaxH3ImageConditioning');
+      if (enhancerRun !== null && hasImagePipeline) {
+        ctx.onEvent({
+          type: 'progress',
+          index: 0,
+          stage: 'enhancing',
+          detail:
+            enhancer === 'qwen3.8_27b'
+              ? 'Expanding prompt with Qwen3.8 27B'
+              : 'Expanding prompt with Qwen3.5 9B',
+        });
+        let caption: string | undefined;
+        try {
+          const run = await runPrompt(
+            baseUrl,
+            progressUrl,
+            clientId,
+            enhancerRun.graph,
+            pollOptions,
+            ctx,
+            0,
+          );
+          if (run.history.state === 'done') {
+            caption = run.history.textsByNode[enhancerRun.outputNodeId]?.[0]?.trim();
+          }
+        } catch (error) {
+          throwIfAborted(ctx.signal);
+          if (!(error instanceof ComfyUIError)) throw error;
+          // A failed enhancement must not fail the generation: the raw prompt still renders.
+          caption = undefined;
+        }
+        if (caption !== undefined && caption.length > 0) {
+          if (caption !== request.prompt.trim()) revisedPrompt = caption;
+          phaseRequest = { ...effectiveRequest, prompt: caption, enhancePrompt: false, promptEnhancer: 'off' };
+          ctx.onEvent({
+            type: 'progress',
+            index: 0,
+            stage: 'encoding',
+            detail: 'Prompt enhanced — loading Qwen3-VL encoder',
+          });
+        } else {
+          // The expander produced nothing usable (for example malformed JSON), so render the
+          // user's own words instead of failing the run.
+          const fallbackPrompt =
+            uploadedRefs.length > 0
+              ? formatReferencePrompt(request.prompt, template, true, uploadedRefs.length, false)
+              : request.prompt;
+          phaseRequest = {
+            ...request,
+            prompt: fallbackPrompt,
+            enhancePrompt: false,
+            promptEnhancer: 'off',
+          };
+        }
+      }
+    }
+
     if (request.count > 1 && !templateHasBatchPlaceholder(template)) {
       // One prompt can carry the whole batch: every extra slot is a cloned sampler that
       // reuses the same text encode, which is the expensive part of a 2 to 4 image run.
       const baseGraph = graphForRequest(
         template,
-        { ...effectiveRequest, count: 1 },
+        { ...phaseRequest, count: 1 },
         options,
         config,
         seed,
@@ -1774,7 +2017,7 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
           0,
           expanded.samplerSlots,
         );
-        revisedPrompt = revisedPromptFrom(expanded.graph, run.history, request);
+        revisedPrompt = revisedPromptFrom(expanded.graph, run.history, request) ?? revisedPrompt;
         if (run.history.state === 'error') {
           for (let slot = 0; slot < request.count; slot += 1) {
             const item = failedItem(slot, run.history.message, 'execution_error', true);
@@ -1811,7 +2054,7 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
         const slotSeed = seed + slot;
         const { item, revisedPrompt: slotPrompt } = await generateSlot(
           template,
-          effectiveRequest,
+          phaseRequest,
           slot,
           slotSeed,
           uploadedRefs,
@@ -1824,9 +2067,9 @@ export function createComfyUIAdapter(config: ProviderConfig): ProviderAdapter {
       return outcome();
     }
 
-    const graph = graphForRequest(template, effectiveRequest, options, config, seed, uploadedRefs);
+    const graph = graphForRequest(template, phaseRequest, options, config, seed, uploadedRefs);
     const run = await runPrompt(baseUrl, progressUrl, clientId, graph, pollOptions, ctx, 0);
-    revisedPrompt = revisedPromptFrom(graph, run.history, request);
+    revisedPrompt = revisedPromptFrom(graph, run.history, request) ?? revisedPrompt;
     if (run.history.state === 'error') {
       const item = failedItem(0, run.history.message, 'execution_error', true);
       items.push(item);

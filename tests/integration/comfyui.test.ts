@@ -17,6 +17,7 @@ import {
   defaultWorkflowTemplate,
   detailForNode,
   expandMultiSeedGraph,
+  extractEnhancerSubgraph,
   formatReferencePrompt,
   parseBinaryPreview,
 } from '../../src/core/providers/comfyui';
@@ -45,7 +46,10 @@ interface StubResponse {
 
 interface StubConfig {
   promptResponse?: StubResponse;
+  /** Answers the nth POST /prompt in order, for a two phase generate(). */
+  promptResponses?: StubResponse[];
   historyResponse?: (poll: number) => StubResponse;
+  historyResponseFor?: (promptId: string, poll: number) => StubResponse;
   uploadResponse?: StubResponse;
   viewBytes?: Uint8Array;
   onHistory?: (poll: number) => void;
@@ -129,6 +133,7 @@ function startStub(config: StubConfig = {}): Promise<Stub> {
   return new Promise((resolve, reject) => {
     const requests: RecordedRequest[] = [];
     let polls = 0;
+    let promptPosts = 0;
 
     async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
       const method = request.method ?? 'GET';
@@ -137,7 +142,12 @@ function startStub(config: StubConfig = {}): Promise<Stub> {
       requests.push({ method, path, body });
 
       if (method === 'POST' && path === '/prompt') {
-        sendJson(response, config.promptResponse ?? { status: 200, body: { prompt_id: 'prompt-1', number: 1 } });
+        const staged = config.promptResponses?.[promptPosts];
+        promptPosts += 1;
+        sendJson(
+          response,
+          staged ?? config.promptResponse ?? { status: 200, body: { prompt_id: 'prompt-1', number: 1 } },
+        );
         return;
       }
       if (method === 'POST' && path === '/upload/image') {
@@ -147,7 +157,13 @@ function startStub(config: StubConfig = {}): Promise<Stub> {
       if (method === 'GET' && path.startsWith('/history/')) {
         polls += 1;
         config.onHistory?.(polls);
-        sendJson(response, config.historyResponse?.(polls) ?? { status: 200, body: {} });
+        const promptId = decodeURIComponent(path.slice('/history/'.length));
+        sendJson(
+          response,
+          config.historyResponseFor?.(promptId, polls) ??
+            config.historyResponse?.(polls) ??
+            { status: 200, body: {} },
+        );
         return;
       }
       if (method === 'GET' && path.startsWith('/view')) {
@@ -207,6 +223,13 @@ function postedGraph(stub: Stub): Record<string, unknown> {
   const posted = stub.requests.find((entry) => entry.method === 'POST' && entry.path === '/prompt');
   if (posted === undefined) throw new Error('no POST /prompt request recorded');
   return record(record(posted.body)['prompt']);
+}
+
+/** Every graph posted to /prompt, in the order the adapter queued them. */
+function postedGraphs(stub: Stub): Record<string, unknown>[] {
+  return stub.requests
+    .filter((entry) => entry.method === 'POST' && entry.path === '/prompt')
+    .map((entry) => record(record(entry.body)['prompt']));
 }
 
 afterEach(async () => {
@@ -1257,17 +1280,20 @@ describe('ComfyUI vision aware reference expansion', () => {
     try {
       const expanded = 'A knight in polished plate armour stands in a pixel-art meadow, <Picture 1> for the knight, <Picture 2> for the meadow.';
       const stub = await startStub({
-        promptResponse: { status: 200, body: { prompt_id: 'prompt-vision' } },
-        historyResponse: () => ({
+        promptResponses: [
+          { status: 200, body: { prompt_id: 'prompt-vision-expand' } },
+          { status: 200, body: { prompt_id: 'prompt-vision' } },
+        ],
+        historyResponseFor: (promptId) => ({
           status: 200,
-          body: {
-            'prompt-vision': {
-              outputs: {
-                '9': { images: [{ filename: 'knight.png', subfolder: '' }] },
-                '18': { text: [expanded] },
-              },
-            },
-          },
+          body:
+            promptId === 'prompt-vision-expand'
+              ? { 'prompt-vision-expand': { outputs: { '18': { text: [expanded] } } } }
+              : {
+                  'prompt-vision': {
+                    outputs: { '9': { images: [{ filename: 'knight.png', subfolder: '' }] } },
+                  },
+                },
         }),
         viewBytes: PNG_BYTES,
       });
@@ -1293,16 +1319,25 @@ describe('ComfyUI vision aware reference expansion', () => {
       expect(outcome.items[0]?.ok).toBe(true);
       expect(outcome.revisedPrompt).toBe(expanded);
 
-      const graph = postedGraph(stub);
-      expect(switchOf(graph)).toBe(true);
-      const textGenerateInputs = inputsOf(textGenerateOf(graph));
+      // Phase 1 is the vision aware expander alone; phase 2 is the image graph with the
+      // finished caption and the enhancer switch off, so the enhancer CLIP never loads.
+      const graphs = postedGraphs(stub);
+      expect(graphs).toHaveLength(2);
+      const enhancerGraph = graphs[0];
+      const imageGraph = graphs[1];
+      if (enhancerGraph === undefined || imageGraph === undefined) throw new Error('expected two phases');
+
+      const textGenerateInputs = inputsOf(textGenerateOf(enhancerGraph));
       expect(textGenerateInputs['images.image1']).toEqual(['ref_image_1', 0]);
       expect(textGenerateInputs['images.image2']).toEqual(['ref_image_2', 0]);
-      const conditioningInputs = inputsOf(nodesOfType(graph, 'MiniMaxH3ImageConditioning')[0] ?? {});
+      expect(inputsOf(nodeOf(enhancerGraph, '20'))['value']).toBe(H3_EDIT_EXPANSION_PROMPT);
+      expect(inputsOf(nodeOf(enhancerGraph, '24'))['value']).toBe('A realistic knight in a pixel world');
+
+      expect(switchOf(imageGraph)).toBe(false);
+      const conditioningInputs = inputsOf(nodesOfType(imageGraph, 'MiniMaxH3ImageConditioning')[0] ?? {});
       expect(conditioningInputs['images.image_1']).toEqual(['ref_image_1', 0]);
       expect(conditioningInputs['images.image_2']).toEqual(['ref_image_2', 0]);
-      expect(inputsOf(nodeOf(graph, '20'))['value']).toBe(H3_EDIT_EXPANSION_PROMPT);
-      expect(inputsOf(nodeOf(graph, '24'))['value']).toBe('A realistic knight in a pixel world');
+      expect(inputsOf(nodeOf(imageGraph, '24'))['value']).toBe(expanded);
     } finally {
       await rm(rootDir, { recursive: true, force: true });
     }
@@ -1361,17 +1396,16 @@ describe('ComfyUI vision aware reference expansion', () => {
 
   it('ignores a PreviewAny text that only repeats the raw prompt', async () => {
     const stub = await startStub({
-      promptResponse: { status: 200, body: { prompt_id: 'prompt-same' } },
-      historyResponse: () => ({
+      promptResponses: [
+        { status: 200, body: { prompt_id: 'prompt-same-expand' } },
+        { status: 200, body: { prompt_id: 'prompt-same' } },
+      ],
+      historyResponseFor: (promptId) => ({
         status: 200,
-        body: {
-          'prompt-same': {
-            outputs: {
-              '9': { images: [{ filename: 'same.png', subfolder: '' }] },
-              '18': { text: [BASE_REQUEST.prompt] },
-            },
-          },
-        },
+        body:
+          promptId === 'prompt-same-expand'
+            ? { 'prompt-same-expand': { outputs: { '18': { text: [BASE_REQUEST.prompt] } } } }
+            : { 'prompt-same': { outputs: { '9': { images: [{ filename: 'same.png', subfolder: '' }] } } } },
       }),
       viewBytes: PNG_BYTES,
     });
@@ -1390,6 +1424,207 @@ describe('ComfyUI vision aware reference expansion', () => {
     );
 
     expect(outcome.revisedPrompt).toBeUndefined();
+    const graphs = postedGraphs(stub);
+    expect(graphs).toHaveLength(2);
+    expect(switchOf(graphs[1] ?? {})).toBe(false);
+    expect(inputsOf(nodeOf(graphs[1] ?? {}, '24'))['value']).toBe(BASE_REQUEST.prompt);
+  });
+});
+
+/**
+ * A full H3 shaped graph: the diffusion and VAE loaders sit beside the enhancer leg, so
+ * extractEnhancerSubgraph has to isolate the enhancer without pulling them in.
+ */
+const H3_ENHANCER_TEMPLATE: Record<string, unknown> = {
+  ...VISION_REFERENCE_TEMPLATE,
+  '1': {
+    class_type: 'UNETLoader',
+    inputs: { unet_name: 'minimax_h3_image_pruned_int8_convrot.safetensors', weight_dtype: 'default' },
+  },
+  '3': { class_type: 'VAELoader', inputs: { vae_name: 'minimax_h3_image_vae_fp16.safetensors' } },
+  '7': {
+    class_type: 'KSampler',
+    inputs: { seed: '{{seed}}', model: ['1', 0], positive: ['5', 0], latent_image: ['5', 1] },
+  },
+};
+
+/** The H3 graph as the adapter builds it for a two reference edit with the enhancer on. */
+function enhancerFullGraph(): Record<string, unknown> {
+  const referenced = attachReferenceImages(H3_ENHANCER_TEMPLATE, ['a.png', 'b.png']);
+  return applyPromptEnhancer(applyReferenceVision(referenced, 2), undefined, true, 'qwen3.5_9b');
+}
+
+describe('ComfyUI enhancer isolation', () => {
+  it('tightens the thinking budget for each enhancer mode', () => {
+    const graph: Record<string, unknown> = {
+      ...VISION_REFERENCE_TEMPLATE,
+      '17': {
+        class_type: 'PrimitiveStringMultiline',
+        inputs: {
+          value:
+            'Reason in the thinking section first. The visible final content must be exactly one JSON object with exactly two keys: expanded_caption and aspect_ratio.',
+        },
+      },
+    };
+
+    const fast = applyPromptEnhancer(graph, undefined, false, 'qwen3.5_9b');
+    const fastInputs = inputsOf(textGenerateOf(fast));
+    expect(fastInputs['thinking']).toBe(false);
+    expect(fastInputs['max_length']).toBe(1024);
+    expect(inputsOf(nodeOf(fast, '17'))['value']).toBe(
+      'The visible final content must be exactly one JSON object with exactly two keys: expanded_caption and aspect_ratio.',
+    );
+
+    const best = applyPromptEnhancer(graph, undefined, false, 'qwen3.8_27b');
+    const bestInputs = inputsOf(textGenerateOf(best));
+    expect(bestInputs['thinking']).toBe(true);
+    expect(bestInputs['max_length']).toBe(2048);
+    // A thinking enhancer keeps the sentence that asks for private reasoning.
+    expect(inputsOf(nodeOf(best, '17'))['value']).toContain('Reason in the thinking section first.');
+
+    // The template itself is never mutated.
+    expect(inputsOf(textGenerateOf(graph))['thinking']).toBeUndefined();
+    expect(inputsOf(textGenerateOf(graph))['max_length']).toBeUndefined();
+    expect(inputsOf(nodeOf(graph, '17'))['value']).toContain('Reason in the thinking section first.');
+  });
+
+  it('extracts only the enhancer leg, never the diffusion pipeline', () => {
+    const extracted = extractEnhancerSubgraph(enhancerFullGraph());
+    if (extracted === null) throw new Error('expected an isolatable enhancer subgraph');
+    const { graph, outputNodeId } = extracted;
+
+    // The graph's own PreviewAny is reused and reads the extracted caption.
+    expect(outputNodeId).toBe('18');
+    expect(inputsOf(nodeOf(graph, outputNodeId))['source']).toEqual(['26', 0]);
+
+    expect(nodesOfType(graph, 'TextGenerateV2')).toHaveLength(1);
+    expect(nodesOfType(graph, 'CLIPLoader')).toHaveLength(1);
+    expect(nodesOfType(graph, 'JsonExtractString')).toHaveLength(1);
+    expect(nodesOfType(graph, 'PreviewAny')).toHaveLength(1);
+    expect(nodesOfType(graph, 'StringReplace')).toHaveLength(1);
+    // Every wired reference image comes along: the expander reads them.
+    expect(nodeOf(graph, 'ref_image_1')).toBeDefined();
+    expect(nodeOf(graph, 'ref_image_2')).toBeDefined();
+    for (const excluded of ['UNETLoader', 'KSampler', 'VAELoader', 'MiniMaxH3ImageConditioning']) {
+      expect(nodesOfType(graph, excluded)).toHaveLength(0);
+    }
+  });
+
+  it('returns null when the template cannot be split', () => {
+    expect(extractEnhancerSubgraph(ENHANCER_TEMPLATE)).toBeNull();
+    expect(extractEnhancerSubgraph(defaultWorkflowTemplate)).toBeNull();
+  });
+
+  it('runs the enhancer graph first, then the image graph with the caption', async () => {
+    const expanded =
+      'A brass lighthouse stands on a rocky headland at dusk, its lamp throwing a warm beam across a calm sea.';
+    const stub = await startStub({
+      promptResponses: [
+        { status: 200, body: { prompt_id: 'prompt-expand' } },
+        { status: 200, body: { prompt_id: 'prompt-image' } },
+      ],
+      historyResponseFor: (promptId) => ({
+        status: 200,
+        body:
+          promptId === 'prompt-expand'
+            ? { 'prompt-expand': { outputs: { '18': { text: [expanded] } } } }
+            : { 'prompt-image': { outputs: { '9': { images: [{ filename: 'enhanced.png', subfolder: '' }] } } } },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(
+      comfyConfig(stub.baseUrl, {
+        pollIntervalMs: 10,
+        timeoutMs: 2000,
+        workflowTemplate: JSON.stringify(H3_ENHANCER_TEMPLATE),
+      }),
+    );
+    const run = context();
+
+    const outcome = await adapter.generate(
+      { ...BASE_REQUEST, promptEnhancer: 'qwen3.5_9b' },
+      { signal: run.signal, onEvent: (event) => run.events.push(event) },
+    );
+
+    expect(outcome.revisedPrompt).toBe(expanded);
+    expect(outcome.items[0]?.ok).toBe(true);
+
+    const graphs = postedGraphs(stub);
+    expect(graphs).toHaveLength(2);
+    const enhancerGraph = graphs[0];
+    const imageGraph = graphs[1];
+    if (enhancerGraph === undefined || imageGraph === undefined) throw new Error('expected two phases');
+
+    expect(nodesOfType(enhancerGraph, 'TextGenerateV2')).toHaveLength(1);
+    expect(inputsOf(textGenerateOf(enhancerGraph))['thinking']).toBe(false);
+    expect(inputsOf(textGenerateOf(enhancerGraph))['max_length']).toBe(1024);
+    for (const excluded of ['UNETLoader', 'MiniMaxH3ImageConditioning', 'KSampler', 'VAELoader']) {
+      expect(nodesOfType(enhancerGraph, excluded)).toHaveLength(0);
+    }
+
+    // Phase 2 keeps the switch off (ComfyUI's ComfySwitchNode is lazy, so node 16 and node
+    // 15 never execute) and feeds the extracted caption into the raw prompt node.
+    expect(switchOf(imageGraph)).toBe(false);
+    expect(nodesOfType(imageGraph, 'UNETLoader')).toHaveLength(1);
+    expect(inputsOf(nodeOf(imageGraph, '24'))['value']).toBe(expanded);
+
+    const progress = run.events.filter(
+      (event): event is Extract<GenerationEvent, { type: 'progress' }> => event.type === 'progress',
+    );
+    expect(progress).toContainEqual({
+      type: 'progress',
+      index: 0,
+      stage: 'enhancing',
+      detail: 'Expanding prompt with Qwen3.5 9B',
+    });
+    expect(progress).toContainEqual({
+      type: 'progress',
+      index: 0,
+      stage: 'encoding',
+      detail: 'Prompt enhanced — loading Qwen3-VL encoder',
+    });
+  });
+
+  it('falls back to the raw prompt when the enhancer returns no text', async () => {
+    const stub = await startStub({
+      promptResponses: [
+        { status: 200, body: { prompt_id: 'prompt-empty-expand' } },
+        { status: 200, body: { prompt_id: 'prompt-empty' } },
+      ],
+      historyResponseFor: (promptId) => ({
+        status: 200,
+        body:
+          promptId === 'prompt-empty-expand'
+            ? { 'prompt-empty-expand': { outputs: { '18': { text: [] } } } }
+            : { 'prompt-empty': { outputs: { '9': { images: [{ filename: 'fallback.png', subfolder: '' }] } } } },
+      }),
+      viewBytes: PNG_BYTES,
+    });
+    const adapter = createComfyUIAdapter(
+      comfyConfig(stub.baseUrl, {
+        pollIntervalMs: 10,
+        timeoutMs: 2000,
+        workflowTemplate: JSON.stringify(H3_ENHANCER_TEMPLATE),
+      }),
+    );
+    const run = context();
+
+    const outcome = await adapter.generate(
+      { ...BASE_REQUEST, promptEnhancer: 'qwen3.8_27b' },
+      { signal: run.signal, onEvent: () => {} },
+    );
+
+    expect(outcome.revisedPrompt).toBeUndefined();
+    expect(outcome.items[0]?.ok).toBe(true);
+    const graphs = postedGraphs(stub);
+    expect(graphs).toHaveLength(2);
+    const enhancerGraph = graphs[0];
+    const imageGraph = graphs[1];
+    if (enhancerGraph === undefined || imageGraph === undefined) throw new Error('expected two phases');
+    expect(inputsOf(textGenerateOf(enhancerGraph))['thinking']).toBe(true);
+    expect(inputsOf(textGenerateOf(enhancerGraph))['max_length']).toBe(2048);
+    expect(switchOf(imageGraph)).toBe(false);
+    expect(inputsOf(nodeOf(imageGraph, '24'))['value']).toBe(BASE_REQUEST.prompt);
   });
 });
 
