@@ -27,7 +27,7 @@ import { ProviderSettings, providerInputSchema, providerPatchSchema } from './se
 import { ThemeStore, themeInputSchema, themePatchSchema } from './themes';
 import { applyProfileOverrides, detectSystemProfile, mergeLaunchArgs } from './system';
 
-const API_VERSION = '0.1.0';
+const API_VERSION = '1.0.0';
 const MAX_REFERENCE_BYTES = 25 * 1024 * 1024;
 const MAX_REFERENCE_BASE64_LENGTH = Math.ceil(MAX_REFERENCE_BYTES / 3) * 4 + 4;
 const MAX_JSON_BYTES = 40 * 1024 * 1024;

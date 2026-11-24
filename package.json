@@ -1,6 +1,6 @@
 {
   "name": "h3-studio",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Local desktop studio for MiniMax H3 Image: live diffusion previews, vision-aware prompt enhancement, and hardware-aware auto-tuning.",
@@ -37,8 +37,63 @@
     "start": "tsx src/server/index.ts",
     "desktop:build": "npm run build && esbuild src/server/index.ts --bundle --platform=node --format=cjs --outfile=dist/server/main.cjs",
     "desktop": "npm run desktop:build && node scripts/desktop.mjs",
+    "desktop:package": "npm run desktop:build && electron-builder --win --x64",
     "desktop:shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/desktop-shortcut.ps1",
     "verify": "npm run typecheck && npm run test && npm run build"
+  },
+  "build": {
+    "appId": "com.atroxit.h3studio",
+    "productName": "H3 Studio",
+    "copyright": "Copyright © 2026 Atroxit",
+    "directories": {
+      "output": "release"
+    },
+    "asar": true,
+    "files": [
+      "electron/main.cjs",
+      "package.json",
+      "!node_modules/**"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/server",
+        "to": "server"
+      },
+      {
+        "from": "dist/web",
+        "to": "web"
+      },
+      {
+        "from": "electron/h3-studio.ico",
+        "to": "h3-studio.ico"
+      }
+    ],
+    "win": {
+      "icon": "electron/h3-studio.ico",
+      "artifactName": "H3-Studio-${version}-win-${arch}.${ext}",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "H3 Studio",
+      "artifactName": "H3-Studio-Setup-${version}-win-${arch}.${ext}"
+    }
   },
   "dependencies": {
     "express": "^5.1.0",
@@ -53,6 +108,7 @@
     "@types/react-dom": "^19.2.2",
     "@vitejs/plugin-react": "^5.1.0",
     "electron": "^45.3.3",
+    "electron-builder": "^26.18.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vite": "^7.1.12",

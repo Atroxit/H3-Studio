@@ -12,8 +12,21 @@ const os = require('node:os');
 const path = require('node:path');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
-const SERVER_ENTRY = path.join(PROJECT_ROOT, 'dist', 'server', 'main.cjs');
-const WEB_ROOT = path.join(PROJECT_ROOT, 'dist', 'web');
+// Packaged, everything the child process needs lives outside app.asar: it is spawned as a
+// plain Node process (ELECTRON_RUN_AS_NODE), and Node cannot read a real path inside an
+// archive. electron-builder copies the server bundle, the web build and the icon into
+// resources/ for exactly this reason.
+const PACKAGED = app.isPackaged;
+const SERVER_ENTRY = PACKAGED
+  ? path.join(process.resourcesPath, 'server', 'main.cjs')
+  : path.join(PROJECT_ROOT, 'dist', 'server', 'main.cjs');
+const WEB_ROOT = PACKAGED
+  ? path.join(process.resourcesPath, 'web')
+  : path.join(PROJECT_ROOT, 'dist', 'web');
+const SERVER_CWD = PACKAGED ? process.resourcesPath : PROJECT_ROOT;
+const ICON_PATH = PACKAGED
+  ? path.join(process.resourcesPath, 'h3-studio.ico')
+  : path.join(__dirname, 'h3-studio.ico');
 const PORT_FIRST = 4317;
 const PORT_TRIES = 40;
 const HEALTH_TIMEOUT_MS = 30_000;
@@ -66,7 +79,7 @@ async function waitForHealth(port) {
 
 function startServer(port, dataDir) {
   const child = spawn(process.execPath, [SERVER_ENTRY], {
-    cwd: PROJECT_ROOT,
+    cwd: SERVER_CWD,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
@@ -148,7 +161,6 @@ function reportError(title, message) {
 }
 
 function createWindow(port) {
-  const iconPath = path.join(__dirname, 'h3-studio.ico');
   const window = new BrowserWindow({
     width: 1440,
     height: 940,
@@ -156,7 +168,7 @@ function createWindow(port) {
     minHeight: 700,
     backgroundColor: '#0a0a0c',
     title: 'H3 Studio',
-    icon: require('node:fs').existsSync(iconPath) ? iconPath : undefined,
+    icon: require('node:fs').existsSync(ICON_PATH) ? ICON_PATH : undefined,
     show: false,
     autoHideMenuBar: true,
     // The page draws its own top bar. Windows still draws minimise, maximise and close in a

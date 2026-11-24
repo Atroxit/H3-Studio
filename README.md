@@ -49,6 +49,8 @@ On a DynamicVRAM capable build (PyTorch 2.8+ on CUDA, or PyTorch 2.8+ with a ROC
 
 ## Quick start
 
+On Windows, skip the toolchain: download the installer `H3-Studio-Setup-1.0.0-win-x64.exe` (or the portable `H3-Studio-1.0.0-win-x64.zip`) from the [GitHub Releases](https://github.com/Atroxit/H3-Studio/releases) page and run it. The rest of this section is the from-source path.
+
 Requirements: Node 24 or newer and npm. A GPU is optional (the mock provider runs anywhere), and ComfyUI is only needed for real generation.
 
 ```powershell
@@ -142,6 +144,7 @@ docs/                API contract, ComfyUI graph references, research notes, scr
 | `npm run build` | Vite production build into `dist/web` |
 | `npm run desktop:build` | Web build plus the esbuild server bundle at `dist/server/main.cjs` |
 | `npm run desktop` | Build, then open the Electron shell |
+| `npm run desktop:package` | Build, then package the Windows installer and portable zip into `release/` |
 | `npm run desktop:shortcut` | Write a Windows Desktop shortcut for the packaged app |
 | `npm run verify` | Typecheck, test and build in one pass |
 | `npm start` | Run the server alone from TypeScript, on port 4317 |

@@ -5,6 +5,7 @@ node_modules/
 
 # Build output
 dist/
+release/
 
 # Local studio state. The real library lives in ~/.h3-studio; these cover an in-repo one.
 .h3data/
