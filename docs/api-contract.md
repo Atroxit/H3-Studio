@@ -156,4 +156,4 @@ One page, three views switched in `src/web/App.tsx` (owner: ui-shell): `setup` w
 | `src/web/features/generate/` | generate-ui | composer, controls, progress grid, partial failure tiles |
 | `src/web/features/library/` | library-ui | batch rows, image viewer, selection, export, presets |
 
-Design language, from the approved mockup `docs/mockups/a-studio-canvas.html`: near-black canvas `#14100e` to `#1b1614`, panel `#211b18`, hairline `#3a2f29`, text `#efe6dd`, muted `#a3938a`, single accent `#e0b183`, accent text on accent `#221a14`. Rail metadata at least 10 px. Visible focus ring on every interactive control. No em dash anywhere in copy.
+Design language, from the approved Studio Canvas design: near-black canvas `#14100e` to `#1b1614`, panel `#211b18`, hairline `#3a2f29`, text `#efe6dd`, muted `#a3938a`, single accent `#e0b183`, accent text on accent `#221a14`. Rail metadata at least 10 px. Visible focus ring on every interactive control. No em dash anywhere in copy.

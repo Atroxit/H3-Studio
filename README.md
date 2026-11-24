@@ -8,11 +8,11 @@
 ![React](https://img.shields.io/badge/React-19-61dafb?logo=react&logoColor=111111)
 ![Electron](https://img.shields.io/badge/Electron-45-47848f?logo=electron&logoColor=white)
 ![ComfyUI](https://img.shields.io/badge/ComfyUI-backend-20242a)
-![Vitest](https://img.shields.io/badge/tests-261%20passing-4e9a06?logo=vitest&logoColor=white)
+![Vitest](https://img.shields.io/badge/tests-321%20passing-4e9a06?logo=vitest&logoColor=white)
 ![Node](https://img.shields.io/badge/Node-24-5fa04e?logo=nodedotjs&logoColor=white)
 ![Loopback only](https://img.shields.io/badge/network-loopback%20only-8b8b93)
 
-<img src="docs/screenshots/live-h3-generate.png" alt="H3 Studio generating two 2048 by 2048 images with MiniMax H3 Image, live tiles and the inspector on the right" width="100%">
+<img src="docs/screenshots/live-h3-generate.png" alt="H3 Studio's Darkroom Studio interface generating two 2048 by 2048 images with MiniMax H3 Image, with live tiles and the inspector on the right" width="100%">
 
 </div>
 
@@ -137,7 +137,7 @@ docs/                API contract, ComfyUI graph references, research notes, scr
 |---|---|
 | `npm run dev` | API server and Vite dev server together, output prefixed `[api]` and `[web]` |
 | `npm run typecheck` | `tsc --noEmit` over the whole repository, tests included |
-| `npm run test` | Vitest unit and integration suites (261 tests) |
+| `npm run test` | Vitest unit and integration suites (321 tests) |
 | `npm run test:e2e` | Vitest e2e suite against the real server and the mock provider (5 tests) |
 | `npm run build` | Vite production build into `dist/web` |
 | `npm run desktop:build` | Web build plus the esbuild server bundle at `dist/server/main.cjs` |
@@ -146,7 +146,7 @@ docs/                API contract, ComfyUI graph references, research notes, scr
 | `npm run verify` | Typecheck, test and build in one pass |
 | `npm start` | Run the server alone from TypeScript, on port 4317 |
 
-The 261 vitest tests cover the library store and its journal, PNG and ZIP encoding, the mock provider, the ComfyUI and HTTP adapters against stub servers, the HTTP API over a real loopback socket, the hardware recommender across all four tiers, and the pure UI helpers (progress folding, durations, preferences, launch argument and environment parsing). The e2e suite drives real generations through the mock provider and asserts the stored batches, SSE event order, retries, exports and stats.
+The 321 vitest tests cover the library store and its journal, PNG and ZIP encoding, the mock provider, the ComfyUI and HTTP adapters against stub servers, the HTTP API over a real loopback socket, the hardware recommender across all four tiers, and the pure UI helpers (progress folding, durations, preferences, launch argument and environment parsing). The e2e suite drives real generations through the mock provider and asserts the stored batches, SSE event order, retries, exports and stats.
 
 ## Keyboard shortcuts
 
@@ -204,3 +204,9 @@ They live in the [Comfy-Org/MiniMax-H3-Image](https://huggingface.co/Comfy-Org/M
 **ComfyUI connects but every generation fails with a node error.** Usually a missing file. The error names the node and the reason ComfyUI gave; compare it with the names in the wizard's model checklist.
 
 **The new launch flags seem to do nothing.** They are read when ComfyUI starts. Quit ComfyUI and start it again from the studio, or restart H3 Studio if the provider is set to auto-start.
+
+## License
+
+The H3 Studio source code is released under the MIT License. See [LICENSE](LICENSE).
+
+The optional MiniMax H3 model weights are not part of this repository. They carry their own separate community licence, with the territorial restrictions noted under [Models](#models); review that licence before downloading or serving them.

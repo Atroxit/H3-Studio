@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "description": "Local desktop studio for MiniMax H3 Image: live diffusion previews, vision-aware prompt enhancement, and hardware-aware auto-tuning.",
+  "license": "MIT",
+  "author": "Atroxit",
   "homepage": "https://github.com/Atroxit/H3-Studio#readme",
   "repository": {
     "type": "git",

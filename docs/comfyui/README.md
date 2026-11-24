@@ -140,13 +140,13 @@ its `STRING` output is what actually reaches node `5`.
 
 * ComfyUI installed and reachable, version **0.45.0 or newer**, with the template pack nodes
   present. The live verification used `v0.46.0` (`v0.46.0-2-gd5d59c401`), Python 3.12.13 in an
-  isolated venv at `E:\ComfyUI`, `comfyui-frontend-package` `1.59.6`, `comfy-kitchen` `0.2.41`
+  isolated venv at `<ComfyUI>`, `comfyui-frontend-package` `1.59.6`, `comfy-kitchen` `0.2.41`
   with its native `hip` backend active, and PyTorch `2.9.1+rocm7.2.1` from AMD's ROCm 7.2.1
   Windows repository.
 * `comfy-aimdo` `0.6.0` is installed but `init_devices` returns False on ROCm 7.2, because
   DynamicVRAM needs ROCm 7.14 or newer. The graph runs without it.
 * The four model files visible to ComfyUI. The verified install references them without copying
-  through `E:\ComfyUI\extra_model_paths.yaml` pointing at `E:/Models/h3-image`, and all four
+  through `<ComfyUI>\extra_model_paths.yaml` pointing at `<models>/h3-image`, and all four
   appeared in `/object_info`:
 
 ```
@@ -175,7 +175,7 @@ Live environment:
 | --- | --- |
 | OS and CPU | Windows 11, Ryzen 9 7950X3D, 31.15 GB RAM, 23.0 GB pagefile (`C:\pagefile.sys`) |
 | GPU | AMD Radeon RX 7900 XTX 24 GB, `gfx1100`, driver `32.0.32015.12012` |
-| ComfyUI | `v0.46.0` (`v0.46.0-2-gd5d59c401`), Python 3.12.13 venv via `uv` at `E:\ComfyUI` |
+| ComfyUI | `v0.46.0` (`v0.46.0-2-gd5d59c401`), Python 3.12.13 venv via `uv` at `<ComfyUI>` |
 | Template pack | `comfyui-workflow-templates` `0.11.111` |
 | Frontend | `comfyui-frontend-package` `1.59.6` |
 | PyTorch | `2.9.1+rocm7.2.1`, torchvision `0.24.1+rocm7.2.1`, torchaudio `2.9.1+rocm7.2.1`; `torch.cuda.is_available() == True` on the 7900 XTX, GPU matmul passed |
@@ -195,15 +195,17 @@ python.exe -u main.py --listen 127.0.0.1 --port 8188 --cache-none --disable-pinn
   card and samples 6 Euler steps at 2048x2048 in about 12 seconds (`2.16 s/it`).
 * A direct smoke prompt (`2048x2048`, 6 steps, seed 42, a teacup on an oak table) took `102.75s`
   wall (`102.18s` in ComfyUI history) and wrote
-  `E:\ComfyUI\output\minimax_h3_image_t2i_00002_.png` (5,966,084 bytes).
-* `E:\ComfyUI\custom_nodes\h3_memory_handoff.py`, under `--cache-none`, discards loaded GPU models
+  `<ComfyUI>\output\minimax_h3_image_t2i_00002_.png` (5,966,084 bytes).
+* The legacy local workaround `<ComfyUI>\custom_nodes\h3_memory_handoff.py` (not bundled in this
+  repository) was needed only on ROCm 7.2 under `--cache-none`. It discards loaded GPU models
   in place at `post-minimax-clip-encode` (on `comfy.sd.CLIP.encode_from_tokens_scheduled`),
   `pre-load_clip`, `pre-load_diffusion_model` and `pre-VAEDecode`. It pops
   `comfy.model_management.current_loaded_models`, releases the tensors, runs `gc.collect()` twice
   and `torch.cuda.empty_cache()`, and never calls `model_unload()`. Calling `unload_all_models()`
   instead copies the GPU weights into CPU RAM first (observed crash in `unpatch_model` ->
   `model.to("cpu")` -> `alloc_cpu`). Without the handoff, GPU commit plus CPU tensors passed the
-  54.15 GB Windows commit limit and the process died with `0xC0000005`.
+  54.15 GB Windows commit limit and the process died with `0xC0000005`. It is no longer needed on
+  ROCm 10.2 / DynamicVRAM, where the runtime manages model residency itself.
 * With the handoff, private commit stayed flat at `7.74` to `7.84 GB` between stages, `5.64` to
   `5.69 GB` idle after each prompt, peak working set `23.69 GB`, minimum free VRAM `1.37 GB`, and
   no growth across 4 consecutive prompts.
@@ -213,7 +215,7 @@ Not run in this pass: a live 16 MP generation (the presets exist and pass valida
 
 ## Status update: ROCm 10.2 + DynamicVRAM (2026-11-23)
 
-The ROCm 7.2.1 findings above were re-measured on a second, isolated venv (`E:\ComfyUI\.venv-rocm102`)
+The ROCm 7.2.1 findings above were re-measured on a second, isolated venv (`<ComfyUI>/.venv-rocm102`)
 with a DynamicVRAM capable runtime. DynamicVRAM now initialises and the same graph runs
 substantially faster, so the legacy `--cache-none --disable-smart-memory` pair is no longer the
 right default on this class of build (H3 Studio omits both flags from its High tier plan when the
