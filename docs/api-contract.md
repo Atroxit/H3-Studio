@@ -75,10 +75,19 @@ export function vendorFromGpuName(name: string, deviceType?: string): GpuVendor;
 export function cleanGpuName(raw: string): string;
 export function buildLaunchArgs(settings: LaunchArgSettings): string[];
 export function mergeLaunchArgs(current: readonly string[], next: readonly string[]): string[];
+export function parseRocmVersion(pytorchVersion: string | null | undefined): readonly [number, number] | null;
+export function supportsDynamicVram(vendor: GpuVendor, pytorchVersion: string | null | undefined): boolean;
 export function recommendForHardware(input: HardwareInput): { recommended: RecommendedSettings; models: ModelCatalogEntry[] };
 export function applyProfileOverrides(recommended: RecommendedSettings, overrides: ProfileOverrides): RecommendedSettings;
 export function detectSystemProfile(settings: { list(): ProviderConfig[] }): Promise<SystemProfile>;
 ```
+
+`HardwareInput` carries `vramGb`, `ramTotalGb`, `vendor`, optional `installedFiles` and optional
+`pytorchVersion`. `supportsDynamicVram` mirrors ComfyUI's own gate (PyTorch 2.8 or newer, and on AMD
+a ROCm 7.14 or newer wheel); `detectSystemProfile` feeds it the PyTorch version from `/system_stats`.
+When it is true the High tier plan keeps smart memory and the prompt cache enabled, so
+`--cache-none` and `--disable-smart-memory` are not part of `launchArgs`. When it is false (older
+runtimes or an unreadable version) both flags are emitted exactly as before.
 
 `detectSystemProfile` probes in this order, every step time bounded (2500 ms at most) and never throwing: ComfyUI `/system_stats` for the exact device name, VRAM, ComfyUI and PyTorch versions; `nvidia-smi`; on Windows the driver class registry key, whose `HardwareInformation.qwMemorySize` is the real 64-bit VRAM (WMI `AdapterRAM` caps at 4 GB); on macOS `system_profiler`. Installed models come from `/object_info/{UNETLoader,CLIPLoader,VAELoader}` when ComfyUI answers, and always from `models/{diffusion_models,text_encoders,vae}` plus `extra_model_paths.yaml` under the provider's `launch.cwd`.
 

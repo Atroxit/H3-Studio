@@ -211,6 +211,28 @@ python.exe -u main.py --listen 127.0.0.1 --port 8188 --cache-none --disable-pinn
 Not run in this pass: a live 16 MP generation (the presets exist and pass validation, only
 2048x2048 was sampled) and the prompt expander with `node "22".inputs.switch` set to `true`.
 
+## Status update: ROCm 10.2 + DynamicVRAM (2026-11-23)
+
+The ROCm 7.2.1 findings above were re-measured on a second, isolated venv (`E:\ComfyUI\.venv-rocm102`)
+with a DynamicVRAM capable runtime. DynamicVRAM now initialises and the same graph runs
+substantially faster, so the legacy `--cache-none --disable-smart-memory` pair is no longer the
+right default on this class of build (H3 Studio omits both flags from its High tier plan when the
+reported PyTorch version passes the gate in `supportsDynamicVram`).
+
+Live environment, unchanged hardware: RX 7900 XTX 24 GB (`gfx1100`), Adrenalin `26.11.2`,
+PyTorch `2.14.0+rocm10.2.0`, HIP `7.17`, `comfy-aimdo` `0.6.0`, `comfy-kitchen` `0.2.41` with its
+native `hip` backend active.
+
+* `DynamicVRAM support detected and enabled`, with the native `hip` backend active and `0` graph
+  breaks.
+* 2048x2048, `INT8 ConvRot` diffusion + `INT8 ConvRot` text encoder: `95.3s` on the ROCm 7.2.1
+  legacy runtime, `39.9s` cold and `14.4s` on a repeat seed here. Three consecutive different
+  prompts landed between `41.4s` and `44.7s`.
+* 2048x2048, `W4A8` diffusion + `NVFP4 AWQ` text encoder: `54.9s` on the ROCm 7.2.1 legacy
+  runtime, `30.4s` cold and `14.0s` on a repeat seed here.
+* 4096x4096 (16 MP), `INT8 ConvRot` + `INT8 ConvRot`: `101.7s` (`11.85 s/it`) end to end with no
+  OOM, which is what makes the High tier's 4K note safe on a 24 GB card.
+
 ## Mapping uncertainties
 
 Checked against the UI file, but not provable without a live server. Node ids given so a reviewer can

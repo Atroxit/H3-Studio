@@ -8,7 +8,9 @@ import {
   buildLaunchArgs,
   cleanGpuName,
   mergeLaunchArgs,
+  parseRocmVersion,
   recommendForHardware,
+  supportsDynamicVram,
   tierFor,
   vendorFromGpuName,
 } from '../../src/server/system';
@@ -62,6 +64,46 @@ describe('hardware tiers', () => {
     // A ComfyUI device type is the fallback when the name says nothing.
     expect(vendorFromGpuName('Device 0', 'cuda')).toBe('nvidia');
     expect(vendorFromGpuName('Device 0', 'rocm')).toBe('amd');
+  });
+});
+
+describe('ROCm and DynamicVRAM detection', () => {
+  it('reads the ROCm version out of a PyTorch local version tag', () => {
+    expect(parseRocmVersion('2.14.0+rocm10.2.0')).toEqual([10, 2]);
+    expect(parseRocmVersion('2.9.1+rocm7.2.1')).toEqual([7, 2]);
+    expect(parseRocmVersion('2.12.0+rocm7.14')).toEqual([7, 14]);
+    expect(parseRocmVersion('2.14.0+ROCM10.2.0')).toEqual([10, 2]);
+  });
+
+  it('returns null when there is no usable ROCm tag', () => {
+    expect(parseRocmVersion('2.10.0+cu128')).toBeNull();
+    expect(parseRocmVersion(null)).toBeNull();
+    expect(parseRocmVersion(undefined)).toBeNull();
+    expect(parseRocmVersion('')).toBeNull();
+    expect(parseRocmVersion('+rocm')).toBeNull();
+    expect(parseRocmVersion('2.14.0+rocmX.Y')).toBeNull();
+  });
+
+  it('enables DynamicVRAM on AMD only from ROCm 7.14 on', () => {
+    expect(supportsDynamicVram('amd', '2.14.0+rocm10.2.0')).toBe(true);
+    expect(supportsDynamicVram('amd', '2.12.0+rocm7.14.0')).toBe(true);
+    expect(supportsDynamicVram('amd', '2.9.1+rocm7.2.1')).toBe(false);
+    expect(supportsDynamicVram('amd', '2.7.1+rocm10.2.0')).toBe(false);
+    expect(supportsDynamicVram('amd', '2.14.0')).toBe(false);
+  });
+
+  it('enables DynamicVRAM on NVIDIA from PyTorch 2.8 on', () => {
+    expect(supportsDynamicVram('nvidia', '2.10.0+cu128')).toBe(true);
+    expect(supportsDynamicVram('nvidia', '2.8.0+cu128')).toBe(true);
+    expect(supportsDynamicVram('nvidia', '2.7.0+cu124')).toBe(false);
+    expect(supportsDynamicVram('nvidia', null)).toBe(false);
+    expect(supportsDynamicVram('nvidia', undefined)).toBe(false);
+  });
+
+  it('never enables DynamicVRAM on Apple, Intel or an unknown vendor', () => {
+    expect(supportsDynamicVram('apple', '2.10.0+cu128')).toBe(false);
+    expect(supportsDynamicVram('intel', '2.10.0+cu128')).toBe(false);
+    expect(supportsDynamicVram('unknown', '2.10.0+cu128')).toBe(false);
   });
 });
 
@@ -159,6 +201,67 @@ describe('recommendForHardware: high tier', () => {
       '--preview-method',
       'latent2rgb',
     ]);
+  });
+
+  it('keeps caching enabled on a DynamicVRAM capable ROCm 10.2 build', () => {
+    const { recommended } = recommendForHardware({
+      vramGb: 24,
+      ramTotalGb: 32,
+      vendor: 'amd',
+      installedFiles: amdFiles,
+      pytorchVersion: '2.14.0+rocm10.2.0',
+    });
+
+    expect(recommended.tier).toBe('high');
+    expect(recommended.cacheNone).toBe(false);
+    expect(recommended.disableSmartMemory).toBe(false);
+    expect(recommended.disablePinnedMemory).toBe(false);
+    expect(recommended.lowvram).toBe(false);
+    expect(recommended.width).toBe(2048);
+    expect(recommended.height).toBe(2048);
+    expect(recommended.modelVariant).toBe('w4a8');
+    expect(recommended.reserveVramGb).toBe(4);
+    expect(recommended.previewMethod).toBe('latent2rgb');
+    expect(recommended.launchArgs).not.toContain('--cache-none');
+    expect(recommended.launchArgs).not.toContain('--disable-smart-memory');
+    expect(recommended.launchArgs).not.toContain('--disable-pinned-memory');
+    expect(recommended.launchArgs).toContain('--reserve-vram');
+    expect(recommended.launchArgs).toContain('4');
+    expect(recommended.launchArgs).toContain('--preview-method');
+    expect(recommended.launchArgs).toContain('latent2rgb');
+    expect(recommended.launchEnv).toEqual({ TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: '1' });
+    expect(recommended.notes.join(' ')).toContain('DynamicVRAM');
+  });
+
+  it('keeps the safe flags on ROCm 7.2, which has no DynamicVRAM', () => {
+    const { recommended } = recommendForHardware({
+      vramGb: 24,
+      ramTotalGb: 32,
+      vendor: 'amd',
+      installedFiles: amdFiles,
+      pytorchVersion: '2.9.1+rocm7.2.1',
+    });
+
+    expect(recommended.cacheNone).toBe(true);
+    expect(recommended.disableSmartMemory).toBe(true);
+    expect(recommended.launchArgs).toContain('--cache-none');
+    expect(recommended.launchArgs).toContain('--disable-smart-memory');
+    expect(recommended.launchEnv).toEqual({ TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL: '1' });
+    expect(recommended.notes.join(' ')).not.toContain('DynamicVRAM');
+  });
+
+  it('keeps the safe flags when the PyTorch version is unknown', () => {
+    const { recommended } = recommendForHardware({
+      vramGb: 24,
+      ramTotalGb: 32,
+      vendor: 'amd',
+      installedFiles: amdFiles,
+    });
+
+    expect(recommended.cacheNone).toBe(true);
+    expect(recommended.disableSmartMemory).toBe(true);
+    expect(recommended.launchArgs).toContain('--cache-none');
+    expect(recommended.launchArgs).toContain('--disable-smart-memory');
   });
 
   it('keeps pinned memory on when the machine has enough RAM', () => {

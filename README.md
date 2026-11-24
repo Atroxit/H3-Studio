@@ -39,11 +39,13 @@ The recommender is a pure function of what was measured, so the same machine alw
 | Tier | VRAM | Example card | Recommended models | Canvas | Launch flags |
 |---|---|---|---|---|---|
 | Extreme | 30 GB+ | RTX 5090 32 GB, RTX PRO 48 GB | INT8 ConvRot diffusion, NVFP4 text encoder, Qwen3.8 27B enhancer | 4096 x 4096 | `--reserve-vram 2 --preview-method latent2rgb`, smart and pinned memory on |
-| High | 20 to 30 GB | RX 7900 XTX 24 GB, RTX 4090, RTX 3090 | W4A8 diffusion, NVFP4 text encoder (INT8 when NVFP4 is absent), 27B enhancer | 2048 x 2048 | `--reserve-vram 4 --cache-none --disable-smart-memory`, pinned memory off below 28 GB RAM |
+| High | 20 to 30 GB | RX 7900 XTX 24 GB, RTX 4090, RTX 3090 | W4A8 diffusion, NVFP4 text encoder (INT8 when NVFP4 is absent), 27B enhancer | 2048 x 2048 | `--reserve-vram 4 --cache-none --disable-smart-memory`, pinned memory off below 28 GB RAM; on a DynamicVRAM build only `--reserve-vram 4 --preview-method latent2rgb` |
 | Mid | 14 to 20 GB | RTX 4080, RTX 5070 Ti, RX 7800 XT | W4A8 diffusion, NVFP4 text encoder, Qwen3.5 9B enhancer | 2048 x 2048 | `--reserve-vram 3 --cache-none --disable-pinned-memory --disable-smart-memory` |
 | Entry | under 14 GB or unknown | 12 GB cards, CPU fallback | W4A8 diffusion, NVFP4 or INT8 text encoder, enhancer off or 9B | 2048 x 2048 (1024 x 1024 draft) | `--lowvram --reserve-vram 2 --cache-none --disable-pinned-memory --disable-smart-memory` |
 
-AMD cards always get the vendor neutral INT8 text encoder, plus the ROCm AOTriton flash attention switch. Every plan is editable afterwards: reserved VRAM (2 to 8 GB), live previews, pinned memory and the ROCm switch are all in Settings, under Performance & Defaults.
+Cards under 30 GB, AMD included, get the 14.6 GB NVFP4 AWQ text encoder (INT8 ConvRot only when NVFP4 is not on disk or the card is a 30 GB+ class part), and every AMD plan also sets the ROCm AOTriton flash attention switch.
+
+On a DynamicVRAM capable build (PyTorch 2.8+ on CUDA, or PyTorch 2.8+ with a ROCm 7.14+ wheel such as ROCm 10.2 on `2.14.0+rocm10.2.0`), the High plan omits `--cache-none` and `--disable-smart-memory` so ComfyUI's smart memory and prompt cache stay enabled: repeat runs are much faster and 4096 x 4096 (16 MP) renders stay safe on a 24 GB card. On older runtimes (for example `2.9.1+rocm7.2.1`) or when the PyTorch version cannot be read, the conservative flags are kept. Every plan is editable afterwards: reserved VRAM (2 to 8 GB), live previews, pinned memory and the ROCm switch are all in Settings, under Performance & Defaults.
 
 ## Quick start
 

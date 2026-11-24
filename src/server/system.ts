@@ -106,7 +106,7 @@ const H3_CATALOG: readonly CatalogSeed[] = [
     tier: 'fast',
     repoSubdir: 'text_encoders',
     targetSubdir: TEXT_ENCODER_SUBDIR,
-    note: 'NVFP4 build of the 32B H3 text encoder. NVIDIA Ada/Blackwell only.',
+    note: 'Compact 14.6 GB build of the 32B H3 text encoder. Fits in 24 GB VRAM with zero offloading on both NVIDIA and AMD ROCm.',
   },
   {
     id: 'h3-text-encoder-int8',
@@ -318,6 +318,60 @@ export function mergeLaunchArgs(current: readonly string[], next: readonly strin
   return [...merged, ...extras, ...preserved];
 }
 
+// --- Runtime capability detection ----------------------------------------------------
+
+/**
+ * The ROCm build a PyTorch wheel was compiled for, from its local version tag
+ * (`2.14.0+rocm10.2.0` -> `[10, 2]`). Returns null when the wheel is not a ROCm build or the
+ * tag is not numeric.
+ */
+export function parseRocmVersion(
+  pytorchVersion: string | null | undefined,
+): readonly [number, number] | null {
+  if (typeof pytorchVersion !== 'string') return null;
+  const match = /\+rocm(\d+)\.(\d+)/i.exec(pytorchVersion);
+  if (match === null || match[1] === undefined || match[2] === undefined) return null;
+  const major = Number.parseInt(match[1], 10);
+  const minor = Number.parseInt(match[2], 10);
+  if (!Number.isFinite(major) || !Number.isFinite(minor)) return null;
+  return [major, minor] as const;
+}
+
+/** The PyTorch release a version string names: `2.14.0+rocm10.2.0` -> `[2, 14]`. */
+function parsePytorchVersion(pytorchVersion: string): readonly [number, number] | null {
+  const match = /^(\d+)\.(\d+)/.exec(pytorchVersion.trim());
+  if (match === null || match[1] === undefined || match[2] === undefined) return null;
+  const major = Number.parseInt(match[1], 10);
+  const minor = Number.parseInt(match[2], 10);
+  if (!Number.isFinite(major) || !Number.isFinite(minor)) return null;
+  return [major, minor] as const;
+}
+
+function atLeast(version: readonly [number, number], minimum: readonly [number, number]): boolean {
+  return version[0] > minimum[0] || (version[0] === minimum[0] && version[1] >= minimum[1]);
+}
+
+/**
+ * Whether this PyTorch build can run ComfyUI's DynamicVRAM, mirroring the gate in ComfyUI's
+ * `main.py`: PyTorch 2.8 or newer, and on AMD a ROCm 7.14 or newer wheel. Keeping the gate in
+ * one place means the recommender only relaxes the memory flags when the runtime supports it.
+ */
+export function supportsDynamicVram(
+  vendor: GpuVendor,
+  pytorchVersion: string | null | undefined,
+): boolean {
+  if (typeof pytorchVersion !== 'string' || pytorchVersion.length === 0) return false;
+  const torch = parsePytorchVersion(pytorchVersion);
+  if (torch === null || !atLeast(torch, [2, 8])) return false;
+  if (vendor === 'nvidia') return true;
+  if (vendor === 'amd') {
+    const rocm = parseRocmVersion(pytorchVersion);
+    if (rocm === null) return false;
+    return atLeast(rocm, [7, 14]);
+  }
+  return false;
+}
+
 // --- Model catalog -------------------------------------------------------------------
 
 function catalogEntry(
@@ -352,6 +406,8 @@ export interface HardwareInput {
   vendor: GpuVendor;
   /** Model filenames ComfyUI or a local model folder reports, in any path form. */
   installedFiles?: readonly string[];
+  /** The `torch.__version__` ComfyUI reports, which decides whether DynamicVRAM can run. */
+  pytorchVersion?: string | null;
 }
 
 export interface HardwareRecommendation {
@@ -412,7 +468,12 @@ interface TierPlan {
   notes: string[];
 }
 
-function planFor(tier: HardwareTier, ramTotalGb: number, vramGb: number | null): TierPlan {
+function planFor(
+  tier: HardwareTier,
+  ramTotalGb: number,
+  vramGb: number | null,
+  dynamicVram: boolean,
+): TierPlan {
   const vramText = vramGb === null ? 'an unknown amount of VRAM' : `${round1(vramGb)} GB of VRAM`;
   switch (tier) {
     case 'extreme':
@@ -436,6 +497,9 @@ function planFor(tier: HardwareTier, ramTotalGb: number, vramGb: number | null):
       };
     case 'high': {
       const pinnedWarning = ramTotalGb < PINNED_MEMORY_MIN_RAM_GB;
+      const pinnedNote = pinnedWarning
+        ? `Pinned memory is disabled because this machine has only ${round1(ramTotalGb)} GB of RAM.`
+        : `Pinned memory stays on: ${round1(ramTotalGb)} GB of RAM is enough to speed up PCIe loads.`;
       return {
         tierLabel: 'High',
         summary: `With ${vramText} the W4A8 build fills the card at 2048 x 2048, the sweet spot for 24 GB GPUs.`,
@@ -445,16 +509,23 @@ function planFor(tier: HardwareTier, ramTotalGb: number, vramGb: number | null):
         reserveVramGb: 4,
         previewMethod: 'latent2rgb',
         disablePinnedMemory: pinnedWarning,
-        disableSmartMemory: true,
-        cacheNone: true,
+        // On a DynamicVRAM capable build, smart memory and the prompt cache make repeat runs
+        // cheap and keep 16 MP renders off the VRAM cliff, so they stay on.
+        disableSmartMemory: !dynamicVram,
+        cacheNone: !dynamicVram,
         lowvram: false,
-        notes: [
-          'W4A8 diffusion (11.7 GB) and NVFP4 text encoder (14.6 GB) each fit inside a 24 GB card with zero RAM offloading.',
-          pinnedWarning
-            ? `Pinned memory is disabled because this machine has only ${round1(ramTotalGb)} GB of RAM.`
-            : `Pinned memory stays on: ${round1(ramTotalGb)} GB of RAM is enough to speed up PCIe loads.`,
-          'The 4 MP canvas is the largest that stays fast; 4096 x 4096 needs a 30 GB class card.',
-        ],
+        notes: dynamicVram
+          ? [
+              'W4A8 diffusion (11.7 GB) and NVFP4 text encoder (14.6 GB) each fit inside a 24 GB card with zero RAM offloading.',
+              pinnedNote,
+              'DynamicVRAM is active on this PyTorch build, so smart memory and caching stay enabled: repeat runs are faster and 4096 x 4096 (16 MP) stays safe on a 24 GB card.',
+              'The default canvas stays at 2048 x 2048 for quick drafts; raise it to 4096 x 4096 for finals.',
+            ]
+          : [
+              'W4A8 diffusion (11.7 GB) and NVFP4 text encoder (14.6 GB) each fit inside a 24 GB card with zero RAM offloading.',
+              pinnedNote,
+              'The 4 MP canvas is the largest that stays fast; 4096 x 4096 needs a 30 GB class card.',
+            ],
       };
     }
     case 'mid':
@@ -511,7 +582,8 @@ export function recommendForHardware(input: HardwareInput): HardwareRecommendati
   );
 
   const tier = tierFor(vramGb);
-  const plan = planFor(tier, ramTotalGb, vramGb);
+  const dynamicVram = supportsDynamicVram(vendor, input.pytorchVersion);
+  const plan = planFor(tier, ramTotalGb, vramGb, dynamicVram);
   const textEncoderVariant = chooseTextEncoder(tier, installed);
   const promptEnhancer = chooseEnhancer(tier, installed);
   const launchArgs = buildLaunchArgs({
@@ -1052,6 +1124,7 @@ export async function detectSystemProfile(settings: ProviderSource): Promise<Sys
     ramTotalGb: stats?.ramTotalGb ?? ramTotalGb,
     vendor: gpu.vendor,
     installedFiles,
+    pytorchVersion: stats?.pytorchVersion ?? null,
   });
 
   const cpus = os.cpus();
